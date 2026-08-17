@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-08-17T00:32:01.119Z",
+  "updatedAt": "2026-08-17T01:00:02.602Z",
   "assets": [
     {
       "id": "6731e68a-7641-48ee-ba31-688f0aecc386",
@@ -26,6 +26,36 @@
       "fileSizeBytes": 133840,
       "durationMs": 5227,
       "description": "Test whistle"
+    },
+    {
+      "id": "3320b902-b0e4-430d-a0bc-65b7442b4e18",
+      "createdAt": "2026-08-17T01:00:02.602Z",
+      "updatedAt": "2026-08-17T01:00:02.602Z",
+      "name": "The Whatever",
+      "categoryPaths": [
+        [
+          "Human",
+          "Speech"
+        ],
+        [
+          "Human",
+          "Noises"
+        ]
+      ],
+      "tags": [
+        "human",
+        "question"
+      ],
+      "source": {
+        "type": "url",
+        "path": "https://raw.githubusercontent.com/circleoforigin/Soundforge/main/library/audio/3320b902-b0e4-430d-a0bc-65b7442b4e18.m4a"
+      },
+      "originalFileName": "The Whatever.m4a",
+      "fileType": "m4a",
+      "mimeType": "audio/x-m4a",
+      "fileSizeBytes": 125242,
+      "durationMs": 4885,
+      "description": "Just a random upload."
     }
   ]
 }
