@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "updatedAt": "2026-08-17T00:32:01.119Z",
+  "assets": [
+    {
+      "id": "6731e68a-7641-48ee-ba31-688f0aecc386",
+      "createdAt": "2026-08-17T00:32:01.119Z",
+      "updatedAt": "2026-08-17T00:32:01.119Z",
+      "name": "Whistle",
+      "categoryPaths": [
+        [
+          "Creatures"
+        ]
+      ],
+      "tags": [
+        "whistle",
+        "human"
+      ],
+      "source": {
+        "type": "url",
+        "path": "https://raw.githubusercontent.com/circleoforigin/Soundforge/main/library/audio/6731e68a-7641-48ee-ba31-688f0aecc386.m4a"
+      },
+      "originalFileName": "Whistle.m4a",
+      "fileType": "m4a",
+      "mimeType": "audio/x-m4a",
+      "fileSizeBytes": 133840,
+      "durationMs": 5227,
+      "description": "Test whistle"
+    }
+  ]
+}
