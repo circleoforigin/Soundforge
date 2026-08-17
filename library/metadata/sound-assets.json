@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-08-17T01:20:23.096Z",
+  "updatedAt": "2026-08-17T01:58:02.010Z",
   "assets": [
     {
       "id": "1d0390c1-003b-4422-b05b-af7d8dd1a85f",
@@ -26,6 +26,33 @@
       "fileSizeBytes": 133840,
       "durationMs": 5227,
       "description": "Sounds and shit"
+    },
+    {
+      "id": "686c22c3-264f-4e61-9f5f-c4f353ebeedc",
+      "createdAt": "2026-08-17T01:58:02.010Z",
+      "updatedAt": "2026-08-17T01:58:02.010Z",
+      "name": "The Whatever",
+      "categoryPaths": [
+        [
+          "Creatures",
+          "Human"
+        ],
+        [
+          "Random"
+        ]
+      ],
+      "tags": [
+        "stuff"
+      ],
+      "source": {
+        "type": "url",
+        "path": "https://raw.githubusercontent.com/circleoforigin/Soundforge/main/library/audio/686c22c3-264f-4e61-9f5f-c4f353ebeedc.m4a"
+      },
+      "originalFileName": "The Whatever.m4a",
+      "fileType": "m4a",
+      "mimeType": "audio/x-m4a",
+      "fileSizeBytes": 125242,
+      "durationMs": 4885
     }
   ]
 }
