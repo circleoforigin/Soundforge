@@ -406,9 +406,12 @@ function RoomManagerDialog({
   }
 
   function handleConnectSonos() {
-    window.location.href =
-        'http://localhost:3001/api/sonos/login';
-    }
+    window.open(
+        'https://sacscape-server.tail7d5063.ts.net/api/sonos/login',
+        'sonos-auth',
+        'width=600,height=750'
+    );
+  }
 
   return (
   <div className="dialog-backdrop">
