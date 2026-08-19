@@ -1,0 +1,175 @@
+name: Deploy home server
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency: sacscape-home-server-deployment
+
+jobs:
+  deploy:
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+
+    defaults:
+      run:
+        shell: powershell
+        working-directory: C:\Projects\Soundforge
+
+    steps:
+      - name: Verify runner access
+        run: |
+          $networkServiceSid = 'S-1-5-20'
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+
+          if ($identity.User.Value -ne $networkServiceSid) {
+            throw "Runner is not executing as NETWORK SERVICE."
+          }
+
+          $accessProbe = Join-Path `
+            (Get-Location) `
+            ".sacscape-deploy-$([guid]::NewGuid()).tmp"
+
+          try {
+            [IO.File]::WriteAllText($accessProbe, 'access-check')
+          } finally {
+            if (Test-Path -LiteralPath $accessProbe) {
+              Remove-Item -LiteralPath $accessProbe -Force
+            }
+          }
+
+          Get-ScheduledTask `
+            -TaskName 'SACscape Backend' `
+            -ErrorAction Stop | Out-Null
+
+      - name: Update deployment to origin/main
+        env:
+          SACSCAPE_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if (-not $env:SACSCAPE_GITHUB_TOKEN) {
+            throw "GitHub Actions token is unavailable."
+          }
+
+          $authBytes = [Text.Encoding]::ASCII.GetBytes(
+            "x-access-token:$env:SACSCAPE_GITHUB_TOKEN"
+          )
+
+          $basicAuth =
+            [Convert]::ToBase64String($authBytes)
+
+          $env:GIT_CONFIG_COUNT = '2'
+          $env:GIT_CONFIG_KEY_0 = 'credential.helper'
+          $env:GIT_CONFIG_VALUE_0 = ''
+          $env:GIT_CONFIG_KEY_1 =
+            'http.https://github.com/.extraheader'
+          $env:GIT_CONFIG_VALUE_1 =
+            "AUTHORIZATION: basic $basicAuth"
+          $env:GIT_TERMINAL_PROMPT = '0'
+
+          try {
+            git fetch origin main
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to fetch origin/main."
+            }
+          } finally {
+            [Array]::Clear($authBytes, 0, $authBytes.Length)
+            $basicAuth = $null
+
+            @(
+              'SACSCAPE_GITHUB_TOKEN',
+              'GIT_CONFIG_COUNT',
+              'GIT_CONFIG_KEY_0',
+              'GIT_CONFIG_VALUE_0',
+              'GIT_CONFIG_KEY_1',
+              'GIT_CONFIG_VALUE_1',
+              'GIT_TERMINAL_PROMPT'
+            ) | ForEach-Object {
+              Remove-Item `
+                -LiteralPath "Env:$_" `
+                -ErrorAction SilentlyContinue
+            }
+          }
+
+          git cat-file -e origin/main:.env.local 2>$null
+
+          if ($LASTEXITCODE -eq 0) {
+            throw "Refusing to overwrite the protected environment file."
+          }
+
+          git reset --hard origin/main
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to reset the deployment to origin/main."
+          }
+
+          $head = git rev-parse HEAD
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to resolve the deployed commit."
+          }
+
+          $originMain = git rev-parse origin/main
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to resolve origin/main."
+          }
+
+          if ($head -ne $originMain) {
+            throw "Deployment checkout does not match origin/main."
+          }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restart SACscape backend
+        run: |
+          $taskName = 'SACscape Backend'
+
+          Get-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
+          Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
+
+          $stopDeadline = (Get-Date).AddSeconds(30)
+
+          while (
+            (Get-ScheduledTask -TaskName $taskName).State -eq 'Running'
+          ) {
+            if ((Get-Date) -ge $stopDeadline) {
+              throw "Timed out stopping scheduled task '$taskName'."
+            }
+
+            Start-Sleep -Seconds 1
+          }
+
+          Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+
+      - name: Verify backend health
+        run: |
+          $healthUrl = 'http://localhost:3001/api/health'
+          $attempts = 30
+
+          for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+            try {
+              $response = Invoke-RestMethod `
+                -Uri $healthUrl `
+                -TimeoutSec 5 `
+                -ErrorAction Stop
+
+              if ($response.ok -eq $true) {
+                Write-Host 'SACscape backend is healthy.'
+                exit 0
+              }
+            } catch {
+              Write-Host "Health check attempt $attempt of $attempts failed."
+            }
+
+            Start-Sleep -Seconds 2
+          }
+
+          throw "SACscape backend health check failed after $attempts attempts."
