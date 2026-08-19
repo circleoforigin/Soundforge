@@ -1478,3 +1478,31 @@ body,
   width: 100%;
   margin-bottom: 8px;
 }
+
+.project-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.project-picker-item {
+  padding: 10px;
+  text-align: left;
+  font: inherit;
+  color: #d8d8d8;
+  background: #1e1f22;
+  border: 1px solid #45474e;
+  border-radius: 4px;
+}
+
+.project-picker-item:hover {
+  color: white;
+  background: #3a3c41;
+}
+
+.project-picker-empty {
+  margin: 0;
+  color: #a9abb2;
+}

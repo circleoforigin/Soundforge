@@ -4,6 +4,8 @@ import type { Room } from '../models/Room';
 
 interface MenuBarProps {
   onNewProject: () => void;
+  onLoadProject: () => void;
+  onSaveProject: () => void;
   onNewScene: () => void;
   onImportSound: () => void;
   onNewRoom: () => void;
@@ -19,6 +21,8 @@ interface MenuBarProps {
 
 function MenuBar({
   onNewProject,
+  onLoadProject,
+  onSaveProject,
   onNewScene,
   onImportSound,
   onNewRoom,
@@ -52,6 +56,16 @@ function MenuBar({
   function handleNewProject() {
     closeAllMenus();
     onNewProject();
+  }
+
+  function handleLoadProject() {
+    closeAllMenus();
+    onLoadProject();
+  }
+
+  function handleSaveProject() {
+    closeAllMenus();
+    onSaveProject();
   }
 
   function handleNewScene() {
@@ -97,11 +111,18 @@ function MenuBar({
               New Project
             </button>
 
-            <button className="dropdown-item">
+            <button
+              className="dropdown-item"
+              onClick={handleLoadProject}
+            >
               Load Project
             </button>
 
-            <button className="dropdown-item">
+            <button
+              className="dropdown-item"
+              onClick={handleSaveProject}
+              disabled={!projectName}
+            >
               Save Project
             </button>
 

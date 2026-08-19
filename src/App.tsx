@@ -19,6 +19,7 @@ import NewRoomDialog, {
 } from './components/NewRoomDialog';
 import RoomManagerDialog from './components/RoomManagerDialog';
 import { speakerMapRepository } from './speakers/SpeakerMapRepository';
+import { projectRepository } from './projects/ProjectRepository';
 
 import ImportSoundDialog, {
   type ImportSoundData,
@@ -26,6 +27,8 @@ import ImportSoundDialog, {
 
 function App() {
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
+  const [showProjectPicker, setShowProjectPicker] = useState(false);
+  const [savedProjects, setSavedProjects] = useState<Project[]>([]);
   const [soundAssets, setSoundAssets] = useState<SoundAsset[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
@@ -120,6 +123,58 @@ useEffect(() => {
 
   function handleNewProject() {
     setShowNewProjectDialog(true);
+  }
+
+  function handleSaveProject() {
+    if (!activeProject) {
+      return;
+    }
+
+    const projectToSave: Project = {
+      ...activeProject,
+      activeSceneInstanceId:
+        currentSceneInstanceId ?? undefined,
+      updatedAt: new Date(),
+    };
+
+    const projects =
+      projectRepository.saveProject(
+        projectToSave
+      );
+
+    setActiveProject(projectToSave);
+    setSavedProjects(projects);
+    setNotification('Project saved.');
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 3000);
+  }
+
+  function handleOpenProjectPicker() {
+    setSavedProjects(
+      projectRepository.loadProjects()
+    );
+    setShowProjectPicker(true);
+  }
+
+  function handleLoadProject(
+    project: Project
+  ) {
+    const activeSceneId =
+      project.scenes.some(
+        (scene) =>
+          scene.instanceId ===
+          project.activeSceneInstanceId
+      )
+        ? project.activeSceneInstanceId ?? null
+        : project.scenes[0]?.instanceId ?? null;
+
+    setActiveProject(project);
+    setCurrentSceneInstanceId(activeSceneId);
+    setTransitionTargetInstanceId(null);
+    setPreviewingTarget(false);
+    setShowProjectPicker(false);
   }
 
   function handleNewScene() {
@@ -506,6 +561,8 @@ useEffect(() => {
     <div className="app">
       <MenuBar
         onNewProject={handleNewProject}
+        onLoadProject={handleOpenProjectPicker}
+        onSaveProject={handleSaveProject}
         onNewScene={handleNewScene}
         onImportSound={handleImportSound}
         onNewRoom={handleNewRoom}
@@ -584,6 +641,44 @@ useEffect(() => {
                 onClick={handleCreateProject}
               >
                 Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showProjectPicker && (
+        <div className="dialog-backdrop">
+          <div className="dialog">
+            <h2>Load Project</h2>
+
+            {savedProjects.length === 0 ? (
+              <p className="project-picker-empty">
+                No saved projects.
+              </p>
+            ) : (
+              <div className="project-picker-list">
+                {savedProjects.map((project) => (
+                  <button
+                    key={project.id}
+                    className="project-picker-item"
+                    onClick={() =>
+                      handleLoadProject(project)
+                    }
+                  >
+                    {project.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="dialog-buttons">
+              <button
+                onClick={() =>
+                  setShowProjectPicker(false)
+                }
+              >
+                Cancel
               </button>
             </div>
           </div>
