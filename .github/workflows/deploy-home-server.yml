@@ -63,18 +63,18 @@ jobs:
           $basicAuth =
             [Convert]::ToBase64String($authBytes)
 
-          $env:GIT_CONFIG_COUNT = '2'
-          $env:GIT_CONFIG_KEY_0 = 'safe.directory'
-          $env:GIT_CONFIG_VALUE_0 =
-            'C:\Projects\Soundforge'
-          $env:GIT_CONFIG_KEY_1 =
+          $env:GIT_CONFIG_COUNT = '1'
+          $env:GIT_CONFIG_KEY_0 =
             'http.https://github.com/.extraheader'
-          $env:GIT_CONFIG_VALUE_1 =
+          $env:GIT_CONFIG_VALUE_0 =
             "AUTHORIZATION: basic $basicAuth"
           $env:GIT_TERMINAL_PROMPT = '0'
 
           try {
-            git -c credential.helper= fetch origin main
+            git `
+              -c safe.directory=C:/Projects/Soundforge `
+              -c credential.helper= `
+              fetch origin main
 
             if ($LASTEXITCODE -ne 0) {
               throw "Unable to fetch origin/main."
@@ -88,8 +88,6 @@ jobs:
               'GIT_CONFIG_COUNT',
               'GIT_CONFIG_KEY_0',
               'GIT_CONFIG_VALUE_0',
-              'GIT_CONFIG_KEY_1',
-              'GIT_CONFIG_VALUE_1',
               'GIT_TERMINAL_PROMPT'
             ) | ForEach-Object {
               Remove-Item `
@@ -98,25 +96,33 @@ jobs:
             }
           }
 
-          git cat-file -e origin/main:.env.local 2>$null
+          git `
+            -c safe.directory=C:/Projects/Soundforge `
+            cat-file -e origin/main:.env.local 2>$null
 
           if ($LASTEXITCODE -eq 0) {
             throw "Refusing to overwrite the protected environment file."
           }
 
-          git reset --hard origin/main
+          git `
+            -c safe.directory=C:/Projects/Soundforge `
+            reset --hard origin/main
 
           if ($LASTEXITCODE -ne 0) {
             throw "Unable to reset the deployment to origin/main."
           }
 
-          $head = git rev-parse HEAD
+          $head = git `
+            -c safe.directory=C:/Projects/Soundforge `
+            rev-parse HEAD
 
           if ($LASTEXITCODE -ne 0) {
             throw "Unable to resolve the deployed commit."
           }
 
-          $originMain = git rev-parse origin/main
+          $originMain = git `
+            -c safe.directory=C:/Projects/Soundforge `
+            rev-parse origin/main
 
           if ($LASTEXITCODE -ne 0) {
             throw "Unable to resolve origin/main."
