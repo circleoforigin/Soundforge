@@ -25,11 +25,33 @@ import {
 
 const app = express();
 
-app.use((_request, response, next) => {
-  response.header(
-    'Access-Control-Allow-Origin',
-    'http://localhost:5173'
-  );
+const allowedClientOrigins = new Set([
+  'http://localhost:5173',
+  process.env.CLIENT_ORIGIN
+    ?.trim()
+    .replace(/\/+$/, ''),
+].filter((origin): origin is string =>
+  Boolean(origin)
+));
+
+app.use((request, response, next) => {
+  const requestOrigin =
+    request.headers.origin;
+
+  if (
+    requestOrigin &&
+    allowedClientOrigins.has(requestOrigin)
+  ) {
+    response.header(
+      'Access-Control-Allow-Origin',
+      requestOrigin
+    );
+
+    response.header(
+      'Vary',
+      'Origin'
+    );
+  }
 
   next();
 });

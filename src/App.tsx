@@ -24,6 +24,7 @@ import { projectRepository } from './projects/ProjectRepository';
 import ImportSoundDialog, {
   type ImportSoundData,
 } from './components/ImportSoundDialog';
+import { apiUrl } from './config/api';
 
 function App() {
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
@@ -65,7 +66,7 @@ useEffect(() => {
   async function loadSoundLibrary() {
     try {
       const response = await fetch(
-        'http://localhost:3001/api/library/manifest'
+        apiUrl('/api/library/manifest')
       );
 
       if (!response.ok) {
@@ -259,7 +260,7 @@ useEffect(() => {
 
     try {
       const response = await fetch(
-        'http://localhost:3001/api/library/import',
+        apiUrl('/api/library/import'),
         {
           method: 'POST',
           body: formData,

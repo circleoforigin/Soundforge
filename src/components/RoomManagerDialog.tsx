@@ -2,6 +2,7 @@ import { useState } from 'react';
 
 import type { Room } from '../models/Room';
 import type {SpeakerMap} from '../models/SpeakerMap';
+import { apiUrl } from '../config/api';
 
 interface RoomManagerDialogProps {
   rooms: Room[];
@@ -407,7 +408,7 @@ function RoomManagerDialog({
 
   function handleConnectSonos() {
     window.open(
-        'https://sacscape-server.tail7d5063.ts.net/api/sonos/login',
+        apiUrl('/api/sonos/login'),
         'sonos-auth',
         'width=600,height=750'
     );
