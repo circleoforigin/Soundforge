@@ -64,8 +64,9 @@ jobs:
             [Convert]::ToBase64String($authBytes)
 
           $env:GIT_CONFIG_COUNT = '2'
-          $env:GIT_CONFIG_KEY_0 = 'credential.helper'
-          $env:GIT_CONFIG_VALUE_0 = ''
+          $env:GIT_CONFIG_KEY_0 = 'safe.directory'
+          $env:GIT_CONFIG_VALUE_0 =
+            'C:\Projects\Soundforge'
           $env:GIT_CONFIG_KEY_1 =
             'http.https://github.com/.extraheader'
           $env:GIT_CONFIG_VALUE_1 =
@@ -73,7 +74,7 @@ jobs:
           $env:GIT_TERMINAL_PROMPT = '0'
 
           try {
-            git fetch origin main
+            git -c credential.helper= fetch origin main
 
             if ($LASTEXITCODE -ne 0) {
               throw "Unable to fetch origin/main."
