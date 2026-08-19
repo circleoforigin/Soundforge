@@ -7,6 +7,4 @@ export const githubSettings: GitHubConfig = {
 
   audioPath: 'library/audio',
   manifestPath: 'library/metadata/sound-assets.json',
-
-  token: process.env.GITHUB_TOKEN ?? '',
 };

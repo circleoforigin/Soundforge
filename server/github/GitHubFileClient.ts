@@ -128,7 +128,10 @@ export class GitHubFileClient {
   }
 
   private getHeaders(): Record<string, string> {
-    if (!githubSettings.token) {
+    const token =
+      process.env.GITHUB_TOKEN;
+
+    if (!token) {
       throw new Error(
         'GITHUB_TOKEN is not configured.'
       );
@@ -138,7 +141,7 @@ export class GitHubFileClient {
       Accept: 'application/vnd.github+json',
 
       Authorization:
-        `Bearer ${githubSettings.token}`,
+        `Bearer ${token}`,
 
       'X-GitHub-Api-Version': '2022-11-28',
 

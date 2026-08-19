@@ -5,6 +5,4 @@ export interface GitHubConfig {
 
   audioPath: string;
   manifestPath: string;
-
-  token: string;
 }
