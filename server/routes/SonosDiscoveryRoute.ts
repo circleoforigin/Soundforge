@@ -1,6 +1,9 @@
 import type { Express } from 'express';
 
-import { SonosClient } from '../sonos/SonosClient.ts';
+import {
+  SonosApiError,
+  SonosClient,
+} from '../sonos/SonosClient.ts';
 
 export function registerSonosDiscoveryRoute(
   app: Express
@@ -60,6 +63,43 @@ export function registerSonosDiscoveryRoute(
             error instanceof Error
               ? error.message
               : 'Unable to discover Sonos players.',
+        });
+      }
+    }
+  );
+
+  app.post(
+    '/api/sonos/test-tone/:playerId',
+    async (request, response) => {
+      try {
+        const client =
+          new SonosClient();
+
+        const sonosResponse =
+          await client.playTestTone(
+            request.params.playerId
+          );
+
+        response.json(sonosResponse);
+      } catch (error) {
+        console.error(error);
+
+        if (error instanceof SonosApiError) {
+          response.status(error.status).json({
+            ok: false,
+            message: error.message,
+            details: error.details,
+          });
+
+          return;
+        }
+
+        response.status(500).json({
+          ok: false,
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Unable to play Sonos test tone.',
         });
       }
     }

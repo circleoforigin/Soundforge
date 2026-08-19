@@ -28,6 +28,21 @@ export interface SonosGroupsResponse {
   players: SonosPlayer[];
 }
 
+export class SonosApiError extends Error {
+  status: number;
+  details: unknown;
+
+  constructor(
+    status: number,
+    details: unknown
+  ) {
+    super(`Sonos request failed: ${status}`);
+    this.name = 'SonosApiError';
+    this.status = status;
+    this.details = details;
+  }
+}
+
 export class SonosClient {
   private getAccessToken(): string {
     const tokens = getSonosTokens();
@@ -120,4 +135,60 @@ export class SonosClient {
 
   return data as SonosGroupsResponse;
 }
+
+  async playTestTone(
+    playerId: string
+  ): Promise<unknown> {
+    const accessToken =
+      this.getAccessToken();
+
+    const response = await fetch(
+      `${SONOS_API_BASE}/players/${encodeURIComponent(
+        playerId
+      )}/audioClip`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization:
+            `Bearer ${accessToken}`,
+          'Content-Type':
+            'application/json',
+        },
+        body: JSON.stringify({
+          name: 'SACscape test tone',
+          appId: 'com.circleoforigin.sacscape',
+          priority: 'LOW',
+          clipType: 'CHIME',
+          volume: 20,
+        }),
+      }
+    );
+
+    const responseText =
+      await response.text();
+
+    let data: unknown = null;
+
+    if (responseText) {
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        data = responseText;
+      }
+    }
+
+    if (!response.ok) {
+      console.error(
+        'Sonos playTestTone failed:',
+        data
+      );
+
+      throw new SonosApiError(
+        response.status,
+        data
+      );
+    }
+
+    return data;
+  }
 }
