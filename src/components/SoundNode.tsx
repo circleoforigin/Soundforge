@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import type { RefObject } from 'react';
 
 import type { SceneObjectInstance } from '../models/SceneObjectInstance';
@@ -9,6 +10,7 @@ interface SoundNodeProps {
   stageRef: RefObject<HTMLDivElement | null>;
 
   selected: boolean;
+  playing: boolean;
   isAmbient: boolean;
 
   onSelect: (instanceId: string) => void;
@@ -16,7 +18,6 @@ interface SoundNodeProps {
   onTogglePlayback: (
     node: SceneObjectInstance
   ) => void;
-
   onPositionChange: (
     instanceId: string,
     position: SoundPosition,
@@ -34,12 +35,14 @@ function SoundNode({
   node,
   stageRef,
   selected,
+  playing,
   isAmbient,
   onSelect,
   onPositionChange,
   onContextMenu,
   onTogglePlayback,
 }: SoundNodeProps) {
+  const lastDragAtRef = useRef(0);
   const position = node.position ?? {
     x: 0,
     y: 0,
@@ -77,10 +80,24 @@ function SoundNode({
     event.stopPropagation();
 
     onSelect(node.instanceId);
+    const startClientX = event.clientX;
+    const startClientY = event.clientY;
+    let dragged = false;
 
     function handlePointerMove(
       event: PointerEvent
     ) {
+      if (
+        !dragged &&
+        Math.hypot(
+          event.clientX - startClientX,
+          event.clientY - startClientY
+        ) < 4
+      ) {
+        return;
+      }
+
+      dragged = true;
       const newPosition =
         getPositionFromPointer(
           event.clientX,
@@ -99,6 +116,10 @@ function SoundNode({
     }
 
     function handlePointerUp() {
+      if (dragged) {
+        lastDragAtRef.current = Date.now();
+      }
+
       window.removeEventListener(
         'pointermove',
         handlePointerMove
@@ -148,9 +169,13 @@ function SoundNode({
 
   function handleDoubleClick(
     event: React.MouseEvent<HTMLDivElement>
-        ) {
+  ) {
     event.preventDefault();
     event.stopPropagation();
+
+    if (Date.now() - lastDragAtRef.current < 500) {
+      return;
+    }
 
     onSelect(node.instanceId);
 
@@ -164,6 +189,9 @@ return (
     className={[
       'sound-node',
       selected ? 'selected' : '',
+      playing ? 'playing' : '',
+      node.muted ? 'muted' : '',
+      node.soundAssetIds.length === 0 ? 'no-sound' : '',
       isAmbient ? 'ambient' : 'positional',
     ]
       .filter(Boolean)
@@ -172,11 +200,18 @@ return (
     onContextMenu={handleContextMenu}
     onDoubleClick={handleDoubleClick}
     title={node.instanceName ?? 'Sound'}
+    data-node-id={node.instanceId}
+    data-placement="field"
+    data-playback-mode={node.playbackMode}
     style={{
       left: `${((position.x + 1) / 2) * 100}%`,
       top: `${((1 - position.y) / 2) * 100}%`,
     }}
   >
+    {node.soundAssetIds.length === 0 && (
+      <span className="sound-node-no-sound">No Sound</span>
+    )}
+
     <div
       className={[
         'sound-node-label',

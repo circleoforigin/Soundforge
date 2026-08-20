@@ -1,5 +1,10 @@
 import type { SceneDefinition } from './SceneDefinition';
 
+export type SceneTransitionMode =
+  | 'crossfade'
+  | 'sequential'
+  | 'immediate';
+
 export interface SceneInstance extends SceneDefinition {
   instanceId: string;
 
@@ -10,6 +15,8 @@ export interface SceneInstance extends SceneDefinition {
   templateId?: string;
 
   instanceName: string;
+  description?: string;
+  transitionMode?: SceneTransitionMode;
 
   volume: {
     master: number;

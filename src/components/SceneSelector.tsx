@@ -1,10 +1,19 @@
-import type { SceneInstance } from '../models/SceneInstance';
+import { useEffect, useState } from 'react';
+
+import type {
+  SceneInstance,
+  SceneTransitionMode,
+} from '../models/SceneInstance';
+
+export type ScenePlaybackGroup = 'all' | 'loop' | 'ambience';
 
 interface SceneSelectorProps {
   scene: SceneInstance;
   currentScene: SceneInstance | null;
   transitionTarget: SceneInstance | null;
   previewingTarget: boolean;
+  transitionInProgress: boolean;
+  sceneDirty: boolean;
   projectScenes: SceneInstance[];
 
   onSceneChange: (scene: SceneInstance) => void;
@@ -13,6 +22,8 @@ interface SceneSelectorProps {
   onPreviewTransitionTarget: () => void;
   onRevertPreview: () => void;
   onTransition: () => void;
+  onStartPlayback: (group: ScenePlaybackGroup) => void;
+  onPausePlayback: (group: ScenePlaybackGroup) => void;
 }
 
 function SceneSelector({
@@ -20,6 +31,8 @@ function SceneSelector({
   currentScene,
   transitionTarget,
   previewingTarget,
+  transitionInProgress,
+  sceneDirty,
   projectScenes,
   onSceneChange,
   onSelectTransitionTarget,
@@ -27,7 +40,66 @@ function SceneSelector({
   onPreviewTransitionTarget,
   onRevertPreview,
   onTransition,
+  onStartPlayback,
+  onPausePlayback,
 }: SceneSelectorProps) {
+  const [sceneNameDraft, setSceneNameDraft] =
+    useState(currentScene?.instanceName ?? '');
+  const [transitionModeMenuOpen, setTransitionModeMenuOpen] =
+    useState(false);
+
+  useEffect(() => {
+    setSceneNameDraft(
+      currentScene?.instanceName ?? ''
+    );
+  }, [
+    currentScene?.instanceId,
+    currentScene?.instanceName,
+  ]);
+
+  function handleSceneNameChange(
+    value: string
+  ) {
+    setSceneNameDraft(value);
+
+    if (!currentScene || !value.trim()) {
+      return;
+    }
+
+    onSceneChange({
+      ...currentScene,
+      instanceName: value,
+    });
+  }
+
+  function handleSceneNameBlur() {
+    if (!currentScene) {
+      return;
+    }
+
+    const trimmedName =
+      sceneNameDraft.trim();
+
+    if (!trimmedName) {
+      setSceneNameDraft(
+        currentScene.instanceName
+      );
+
+      return;
+    }
+
+    setSceneNameDraft(trimmedName);
+
+    if (
+      trimmedName !==
+      currentScene.instanceName
+    ) {
+      onSceneChange({
+        ...currentScene,
+        instanceName: trimmedName,
+      });
+    }
+  }
 
   function updateVolume(
     type: keyof SceneInstance['volume'],
@@ -42,10 +114,68 @@ function SceneSelector({
     });
   }
 
+  function setTransitionMode(mode: SceneTransitionMode) {
+    if (!currentScene) {
+      return;
+    }
+
+    onSceneChange({
+      ...currentScene,
+      transitionMode: mode,
+    });
+    setTransitionModeMenuOpen(false);
+  }
+
+  const transitionMode =
+    currentScene?.transitionMode ?? 'crossfade';
+  const transitionModeLabels: Record<SceneTransitionMode, string> = {
+    crossfade: 'Crossfade',
+    sequential: 'Fade Out → Fade In',
+    immediate: 'Immediate',
+  };
+
   return (
   <div className="scene-selector">
 
-    <h2>{currentScene?.instanceName}</h2>
+    <div className="scene-name-row">
+      <input
+        className="scene-name-input"
+        type="text"
+        aria-label="Scene name"
+        value={sceneNameDraft}
+        onChange={(event) =>
+          handleSceneNameChange(
+            event.target.value
+          )
+        }
+        onBlur={handleSceneNameBlur}
+      />
+
+      {sceneDirty && (
+        <span
+          className="scene-dirty-indicator"
+          title="Unsaved changes"
+          aria-label="Unsaved changes"
+        >
+          *
+        </span>
+      )}
+    </div>
+
+    <textarea
+      className="scene-description-input"
+      aria-label="Scene description"
+      placeholder="Scene description..."
+      value={currentScene?.description ?? ''}
+      onChange={(event) => {
+        if (currentScene) {
+          onSceneChange({
+            ...currentScene,
+            description: event.target.value,
+          });
+        }
+      }}
+    />
 
     <div className="transition-target">
 
@@ -88,81 +218,45 @@ function SceneSelector({
             {previewingTarget ? 'Revert' : 'Preview'}
           </button>
 
-          <button onClick={onTransition}>
-            Transition
-          </button>
+          <div className="transition-split-button">
+            <button
+              className="transition-primary"
+              onClick={onTransition}
+              disabled={transitionInProgress}
+              title={`Transition mode: ${transitionModeLabels[transitionMode]}`}
+            >
+              Transition
+            </button>
+
+            <button
+              className="transition-mode-toggle"
+              aria-label="Select transition mode"
+              aria-expanded={transitionModeMenuOpen}
+              onClick={() =>
+                setTransitionModeMenuOpen((open) => !open)
+              }
+            >
+              ▾
+            </button>
+
+            {transitionModeMenuOpen && (
+              <div className="transition-mode-menu">
+                {(
+                  Object.keys(transitionModeLabels) as SceneTransitionMode[]
+                ).map((mode) => (
+                  <button
+                    key={mode}
+                    className={mode === transitionMode ? 'selected' : ''}
+                    onClick={() => setTransitionMode(mode)}
+                  >
+                    {transitionModeLabels[mode]}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
-    </div>
-
-    <div className="scene-controls">
-      <div className="scene-control compact">
-        <span>Master</span>
-
-        <input
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          value={scene.volume.master}
-          onChange={(event) =>
-            updateVolume('master', Number(event.target.value))
-          }
-        />
-
-        <span>{Math.round(scene.volume.master * 100)}%</span>
-      </div>
-
-      <div className="scene-control compact">
-        <span>One-Shot</span>
-
-        <input
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          value={scene.volume.oneShot}
-          onChange={(event) =>
-            updateVolume('oneShot', Number(event.target.value))
-          }
-        />
-
-        <span>{Math.round(scene.volume.oneShot * 100)}%</span>
-      </div>
-
-      <div className="scene-control compact">
-        <span>Loop</span>
-
-        <input
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          value={scene.volume.loop}
-          onChange={(event) =>
-            updateVolume('loop', Number(event.target.value))
-          }
-        />
-
-        <span>{Math.round(scene.volume.loop * 100)}%</span>
-      </div>
-
-      <div className="scene-control compact">
-        <span>Ambience</span>
-
-        <input
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          value={scene.volume.ambience}
-          onChange={(event) =>
-            updateVolume('ambience', Number(event.target.value))
-          }
-        />
-
-        <span>{Math.round(scene.volume.ambience * 100)}%</span>
-      </div>
     </div>
 
     <div className="scene-fade-controls">
@@ -199,6 +293,96 @@ function SceneSelector({
       </label>
 
       <span className="fade-unit">ms</span>
+    </div>
+
+    <div className="scene-volume-section">
+    <div className="scene-controls">
+      <div className="scene-control-group">
+        <div className="scene-control compact">
+        <span>Master</span>
+
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value={scene.volume.master}
+          onChange={(event) =>
+            updateVolume('master', Number(event.target.value))
+          }
+        />
+
+        <span>{Math.round(scene.volume.master * 100)}%</span>
+        </div>
+        <div className="scene-playback-buttons">
+          <button onClick={() => onStartPlayback('all')}>Start All</button>
+          <button onClick={() => onPausePlayback('all')}>Pause All</button>
+        </div>
+      </div>
+
+      <div className="scene-control compact">
+        <span>One-Shot</span>
+
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value={scene.volume.oneShot}
+          onChange={(event) =>
+            updateVolume('oneShot', Number(event.target.value))
+          }
+        />
+
+        <span>{Math.round(scene.volume.oneShot * 100)}%</span>
+      </div>
+
+      <div className="scene-control-group">
+        <div className="scene-control compact">
+        <span>Loop</span>
+
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value={scene.volume.loop}
+          onChange={(event) =>
+            updateVolume('loop', Number(event.target.value))
+          }
+        />
+
+        <span>{Math.round(scene.volume.loop * 100)}%</span>
+        </div>
+        <div className="scene-playback-buttons">
+          <button onClick={() => onStartPlayback('loop')}>Start Looping</button>
+          <button onClick={() => onPausePlayback('loop')}>Pause Looping</button>
+        </div>
+      </div>
+
+      <div className="scene-control-group">
+        <div className="scene-control compact">
+        <span>Ambience</span>
+
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value={scene.volume.ambience}
+          onChange={(event) =>
+            updateVolume('ambience', Number(event.target.value))
+          }
+        />
+
+        <span>{Math.round(scene.volume.ambience * 100)}%</span>
+        </div>
+        <div className="scene-playback-buttons">
+          <button onClick={() => onStartPlayback('ambience')}>Start Ambience</button>
+          <button onClick={() => onPausePlayback('ambience')}>Pause Ambience</button>
+        </div>
+      </div>
+    </div>
     </div>
   </div>
 );

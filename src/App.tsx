@@ -1,4 +1,8 @@
-import { useEffect, useState } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import type { SoundAsset } from './models/SoundAsset';
 import './App.css';
 
@@ -24,7 +28,8 @@ import { projectRepository } from './projects/ProjectRepository';
 import ImportSoundDialog, {
   type ImportSoundData,
 } from './components/ImportSoundDialog';
-import { apiUrl } from './config/api';
+import { localSoundLibrary } from './services/library/browser/LocalSoundLibraryService';
+import { playbackEngine } from './audio/PlaybackEngine';
 
 function App() {
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
@@ -32,13 +37,25 @@ function App() {
   const [savedProjects, setSavedProjects] = useState<Project[]>([]);
   const [soundAssets, setSoundAssets] = useState<SoundAsset[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
+  const [dirtySceneIds, setDirtySceneIds] =
+    useState<Set<string>>(() => new Set());
+  const [showUnsavedChangesDialog, setShowUnsavedChangesDialog] =
+    useState(false);
+  const pendingProjectActionRef =
+    useRef<(() => void) | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
   const [currentSceneInstanceId, setCurrentSceneInstanceId] =
     useState<string | null>(null);
   const [importingSound, setImportingSound] = useState(false);
+  const [libraryFolderConfigured, setLibraryFolderConfigured] =
+    useState(false);
   const [transitionTargetInstanceId, setTransitionTargetInstanceId] =
     useState<string | null>(null);
   const [previewingTarget, setPreviewingTarget] = useState(false);
+  const [transitionInProgress, setTransitionInProgress] = useState(false);
+  const transitionInProgressRef = useRef(false);
+  const transitionRunIdRef = useRef(0);
+  const [projectRuntimeKey, setProjectRuntimeKey] = useState(0);
   const [newProjectName, setNewProjectName] = useState('');
   const [showNewSceneDialog, setShowNewSceneDialog] = useState(false);
   const [newSceneName, setNewSceneName] = useState('');
@@ -65,19 +82,9 @@ function App() {
 useEffect(() => {
   async function loadSoundLibrary() {
     try {
-      const response = await fetch(
-        apiUrl('/api/library/manifest')
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          `Library load failed: ${response.status}`
-        );
-      }
-
-      const manifest = await response.json();
-
-      setSoundAssets(manifest.assets ?? []);
+      const assets = await localSoundLibrary.initialize();
+      setSoundAssets(assets);
+      setLibraryFolderConfigured(localSoundLibrary.directoryConfigured);
     } catch (error) {
       console.error(error);
 
@@ -126,15 +133,17 @@ useEffect(() => {
     setShowNewProjectDialog(true);
   }
 
-  function handleSaveProject() {
+  function saveActiveProject(): boolean {
     if (!activeProject) {
-      return;
+      return false;
     }
 
     const projectToSave: Project = {
       ...activeProject,
       activeSceneInstanceId:
         currentSceneInstanceId ?? undefined,
+      activeRoomId:
+        activeRoom?.id ?? undefined,
       updatedAt: new Date(),
     };
 
@@ -145,11 +154,88 @@ useEffect(() => {
 
     setActiveProject(projectToSave);
     setSavedProjects(projects);
+    setDirtySceneIds(new Set());
     setNotification('Project saved.');
 
     setTimeout(() => {
       setNotification(null);
     }, 3000);
+
+    return true;
+  }
+
+  function handleSaveProject() {
+    saveActiveProject();
+  }
+
+  function requestProjectAction(
+    action: () => void
+  ) {
+    if (dirtySceneIds.size === 0) {
+      action();
+      return;
+    }
+
+    pendingProjectActionRef.current = action;
+    setShowUnsavedChangesDialog(true);
+  }
+
+  function finishPendingProjectAction(
+    saveFirst: boolean
+  ) {
+    const action =
+      pendingProjectActionRef.current;
+
+    if (!action) {
+      return;
+    }
+
+    if (saveFirst && !saveActiveProject()) {
+      return;
+    }
+
+    pendingProjectActionRef.current = null;
+    setShowUnsavedChangesDialog(false);
+    action();
+  }
+
+  function cancelPendingProjectAction() {
+    pendingProjectActionRef.current = null;
+    setShowUnsavedChangesDialog(false);
+  }
+
+  function teardownProjectRuntime(project: Project) {
+    for (const scene of project.scenes) {
+      playbackEngine.stopScene(scene.instanceId);
+      playbackEngine.setSceneTransitionGain(scene.instanceId, 1);
+    }
+
+    transitionRunIdRef.current += 1;
+    transitionInProgressRef.current = false;
+    setTransitionInProgress(false);
+    setTransitionTargetInstanceId(null);
+    setPreviewingTarget(false);
+    setDirtySceneIds(new Set());
+    setProjectRuntimeKey((current) => current + 1);
+  }
+
+  function closeActiveProject() {
+    if (!activeProject) {
+      return;
+    }
+
+    teardownProjectRuntime(activeProject);
+    setActiveProject(null);
+    setCurrentSceneInstanceId(null);
+    setActiveRoom(null);
+  }
+
+  function handleCloseProject() {
+    if (!activeProject) {
+      return;
+    }
+
+    requestProjectAction(closeActiveProject);
   }
 
   function handleOpenProjectPicker() {
@@ -159,9 +245,23 @@ useEffect(() => {
     setShowProjectPicker(true);
   }
 
-  function handleLoadProject(
+  function loadProject(
     project: Project
   ) {
+    if (activeProject) {
+      teardownProjectRuntime(activeProject);
+    }
+
+    const storedRooms =
+      roomRepository.loadRooms();
+
+    const restoredRoom = [
+      headphonesRoom,
+      ...storedRooms,
+    ].find((room) =>
+      room.id === project.activeRoomId
+    ) ?? null;
+
     const activeSceneId =
       project.scenes.some(
         (scene) =>
@@ -171,11 +271,25 @@ useEffect(() => {
         ? project.activeSceneInstanceId ?? null
         : project.scenes[0]?.instanceId ?? null;
 
-    setActiveProject(project);
+    setActiveProject({
+      ...project,
+      activeRoomId:
+        restoredRoom?.id,
+    });
     setCurrentSceneInstanceId(activeSceneId);
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
+    setActiveRoom(restoredRoom);
+    setDirtySceneIds(new Set());
     setShowProjectPicker(false);
+  }
+
+  function handleLoadProject(
+    project: Project
+  ) {
+    requestProjectAction(() =>
+      loadProject(project)
+    );
   }
 
   function handleNewScene() {
@@ -190,95 +304,50 @@ useEffect(() => {
     setShowImportSoundDialog(true);
   }
 
+  async function handleChooseLibraryFolder() {
+    const assets = await localSoundLibrary.chooseDirectory();
+    setSoundAssets(assets);
+    setLibraryFolderConfigured(true);
+  }
+
   async function handleSubmitSoundImport(
     data: ImportSoundData
   ) {
     setImportingSound(true);
-    const formData = new FormData();
-
-    formData.append('file', data.file);
-    formData.append('name', data.name);
-    formData.append('description', data.description);
-
-    formData.append(
-      'categoryPaths',
-      JSON.stringify(data.categoryPaths)
-    );
-
-    formData.append(
-      'tags',
-      JSON.stringify(data.tags)
-    );
-
-    if (data.durationMs !== undefined) {
-      formData.append(
-        'durationMs',
-        String(data.durationMs)
-      );
-    }
-
-    formData.append(
-      'originalFileName',
-      data.originalFileName
-    );
-
-    formData.append(
-      'fileType',
-      data.fileType
-    );
-
-    formData.append(
-      'mimeType',
-      data.mimeType
-    );
-
-    formData.append(
-      'fileSizeBytes',
-      String(data.fileSizeBytes)
-    );
-
-    if (data.attribution) {
-      formData.append(
-        'attribution',
-        data.attribution
-      );
-    }
-
-    if (data.license) {
-      formData.append(
-        'license',
-        data.license
-      );
-    }
-
-    if (data.sourceUrl) {
-      formData.append(
-        'sourceUrl',
-        data.sourceUrl
-      );
-    }
 
     try {
-      const response = await fetch(
-        apiUrl('/api/library/import'),
-        {
-          method: 'POST',
-          body: formData,
-        }
-      );
+      const metadata = {
+        name: data.name,
+        description: data.description,
+        categoryPaths: data.categoryPaths,
+        tags: data.tags,
+        durationMs: data.durationMs,
+        originalFileName: data.originalFileName,
+        fileType: data.fileType,
+        mimeType: data.mimeType,
+        fileSizeBytes: data.fileSizeBytes,
+        attribution: data.attribution,
+        license: data.license,
+        sourceUrl: data.sourceUrl,
+      };
+      const asset = data.sourceType === 'local'
+        ? data.file
+          ? await localSoundLibrary.importLocalFile(data.file, metadata)
+          : null
+        : data.webUrl
+          ? await localSoundLibrary.importWebUrl(data.webUrl, metadata)
+          : null;
 
-      if (!response.ok) {
-        const errorText = await response.text();
-
-        throw new Error(
-          `Import failed: ${response.status} ${errorText}`
-        );
+      if (!asset) {
+        throw new Error('The selected import source is incomplete.');
       }
+
+      setSoundAssets((current) => [...current, asset]);
 
       setShowImportSoundDialog(false);
 
       setNotification(
-        'Sound committed to repository.'
+        'Sound added to local library.'
       );
 
       setTimeout(() => {
@@ -288,7 +357,9 @@ useEffect(() => {
       console.error(error);
 
       setNotification(
-        'Sound import failed.'
+        error instanceof Error
+          ? error.message
+          : 'Sound import failed.'
       );
 
       setTimeout(() => {
@@ -299,11 +370,11 @@ useEffect(() => {
     }
   }
 
-  function handleCreateProject() {
-    const trimmedName = newProjectName.trim();
-
-    if (!trimmedName) {
-      return;
+  function createProject(
+    trimmedName: string
+  ) {
+    if (activeProject) {
+      teardownProjectRuntime(activeProject);
     }
 
     const now = new Date();
@@ -320,9 +391,23 @@ useEffect(() => {
     setCurrentSceneInstanceId(null);
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
+    setActiveRoom(null);
+    setDirtySceneIds(new Set());
 
     setNewProjectName('');
     setShowNewProjectDialog(false);
+  }
+
+  function handleCreateProject() {
+    const trimmedName = newProjectName.trim();
+
+    if (!trimmedName) {
+      return;
+    }
+
+    requestProjectAction(() =>
+      createProject(trimmedName)
+    );
   }
 
   function handleCreateScene() {
@@ -353,6 +438,8 @@ useEffect(() => {
       instanceId: crypto.randomUUID(),
       templateId: newTemplate.id,
       instanceName: trimmedName,
+      description: '',
+      transitionMode: 'crossfade',
 
       positionalObjects: [],
       ambientObjects: [],
@@ -383,6 +470,13 @@ useEffect(() => {
     ]);
 
     setActiveProject(updatedProject);
+    setDirtySceneIds((current) => {
+      const updated = new Set(current);
+
+      updated.add(newInstance.instanceId);
+
+      return updated;
+    });
 
     setCurrentSceneInstanceId(
       newInstance.instanceId
@@ -404,16 +498,30 @@ useEffect(() => {
       return;
     }
 
-    setActiveProject({
-      ...activeProject,
+    setActiveProject((currentProject) => {
+      if (!currentProject) {
+        return currentProject;
+      }
 
-      scenes: activeProject.scenes.map((scene) =>
-        scene.instanceId === updatedScene.instanceId
-          ? updatedScene
-          : scene
-      ),
+      return {
+        ...currentProject,
 
-      updatedAt: new Date(),
+        scenes: currentProject.scenes.map((scene) =>
+          scene.instanceId === updatedScene.instanceId
+            ? updatedScene
+            : scene
+        ),
+
+        updatedAt: new Date(),
+      };
+    });
+
+    setDirtySceneIds((current) => {
+      const updated = new Set(current);
+
+      updated.add(updatedScene.instanceId);
+
+      return updated;
     });
   }
 
@@ -445,19 +553,88 @@ useEffect(() => {
     setPreviewingTarget(false);
   }
 
-  function handleTransition() {
-    if (!transitionTargetInstanceId) {
+  async function handleTransition() {
+    if (
+      transitionInProgressRef.current ||
+      !currentScene ||
+      !transitionTarget
+    ) {
       return;
     }
 
-    // Playback fades will eventually happen here.
+    transitionInProgressRef.current = true;
+    setTransitionInProgress(true);
+    const transitionRunId = ++transitionRunIdRef.current;
 
-    setCurrentSceneInstanceId(
-      transitionTargetInstanceId
-    );
+    const outgoingScene = currentScene;
+    const incomingScene = transitionTarget;
+    const transitionMode = outgoingScene.transitionMode ?? 'crossfade';
 
-    setTransitionTargetInstanceId(null);
-    setPreviewingTarget(false);
+    function activateIncomingScene() {
+      setCurrentSceneInstanceId(incomingScene.instanceId);
+    }
+
+    function clearTransitionSelection() {
+      setTransitionTargetInstanceId(null);
+      setPreviewingTarget(false);
+    }
+
+    try {
+      if (transitionMode === 'immediate') {
+        playbackEngine.stopScene(outgoingScene.instanceId);
+        playbackEngine.setSceneTransitionGain(incomingScene.instanceId, 1);
+        activateIncomingScene();
+        clearTransitionSelection();
+        return;
+      }
+
+      if (transitionMode === 'sequential') {
+        await playbackEngine.fadeOutAndStopScene(
+          outgoingScene.instanceId,
+          outgoingScene.fadeOutMs
+        );
+
+        if (transitionRunId !== transitionRunIdRef.current) {
+          return;
+        }
+
+        playbackEngine.setSceneTransitionGain(incomingScene.instanceId, 0);
+        activateIncomingScene();
+
+        const incomingFade = playbackEngine.fadeSceneTransitionGain(
+          incomingScene.instanceId,
+          1,
+          incomingScene.fadeInMs
+        );
+
+        clearTransitionSelection();
+        await incomingFade;
+        return;
+      }
+
+      playbackEngine.setSceneTransitionGain(incomingScene.instanceId, 0);
+      activateIncomingScene();
+
+      const transitionFades = [
+        playbackEngine.fadeOutAndStopScene(
+          outgoingScene.instanceId,
+          outgoingScene.fadeOutMs
+        ),
+        playbackEngine.fadeSceneTransitionGain(
+          incomingScene.instanceId,
+          1,
+          incomingScene.fadeInMs
+        ),
+      ];
+
+      clearTransitionSelection();
+      await Promise.all(transitionFades);
+    } finally {
+      if (transitionRunId === transitionRunIdRef.current) {
+        transitionInProgressRef.current = false;
+        setTransitionInProgress(false);
+      }
+    }
   }
 
   function handleManageRooms() {
@@ -526,15 +703,31 @@ useEffect(() => {
       roomRepository.saveRoom(newRoom);
 
     setCustomRooms(updatedRooms);
-    setActiveRoom(newRoom);
+    handleActiveRoomChange(newRoom);
     setShowNewRoomDialog(false);
+  }
+
+  function handleActiveRoomChange(
+    room: Room | null
+  ) {
+    setActiveRoom(room);
+
+    setActiveProject((currentProject) =>
+      currentProject
+        ? {
+            ...currentProject,
+            activeRoomId:
+              room?.id,
+          }
+        : currentProject
+    );
   }
 
   function handleSelectRoom(
     roomId: string | null
   ) {
     if (roomId === null) {
-      setActiveRoom(null);
+      handleActiveRoomChange(null);
       return;
     }
 
@@ -548,7 +741,7 @@ useEffect(() => {
       return;
     }
 
-    setActiveRoom(room);
+    handleActiveRoomChange(room);
   }
 
   return (
@@ -557,6 +750,7 @@ useEffect(() => {
         onNewProject={handleNewProject}
         onLoadProject={handleOpenProjectPicker}
         onSaveProject={handleSaveProject}
+        onCloseProject={handleCloseProject}
         onNewScene={handleNewScene}
         onImportSound={handleImportSound}
         onNewRoom={handleNewRoom}
@@ -575,6 +769,7 @@ useEffect(() => {
 
       {displayedScene && (
         <SceneWorkspace
+          key={`${activeProject?.id ?? 'none'}:${projectRuntimeKey}`}
           scene={displayedScene}           
           currentScene={currentScene}
           soundAssets={soundAssets}
@@ -582,6 +777,14 @@ useEffect(() => {
           activeSpeakerMap={activeSpeakerMap}
           transitionTarget={transitionTarget}
           previewingTarget={previewingTarget}
+          transitionInProgress={transitionInProgress}
+          currentSceneDirty={
+            currentScene
+              ? dirtySceneIds.has(
+                  currentScene.instanceId
+                )
+              : false
+          }
           projectScenes={activeProject?.scenes ?? []}
           soundObjectTemplates={soundObjectTemplates}
           onSceneChange={handleSceneChange}          
@@ -598,7 +801,7 @@ useEffect(() => {
             handleRevertPreview
           }
           onTransition={handleTransition}
-          onRoomChange={setActiveRoom}
+          onRoomChange={handleActiveRoomChange}
         />
       )}
 
@@ -676,6 +879,42 @@ useEffect(() => {
         </div>
       )}
 
+      {showUnsavedChangesDialog && (
+        <div className="dialog-backdrop unsaved-changes-backdrop">
+          <div className="dialog">
+            <h2>Unsaved Changes</h2>
+
+            <p>
+              Save changes to the current project?
+            </p>
+
+            <div className="dialog-buttons">
+              <button
+                onClick={() =>
+                  finishPendingProjectAction(true)
+                }
+              >
+                Save
+              </button>
+
+              <button
+                onClick={() =>
+                  finishPendingProjectAction(false)
+                }
+              >
+                Don&apos;t Save
+              </button>
+
+              <button
+                onClick={cancelPendingProjectAction}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showNewSceneDialog && (
         <div className="dialog-backdrop">
           <div className="dialog">
@@ -718,6 +957,11 @@ useEffect(() => {
             setShowImportSoundDialog(false)
           }
           onImport={handleSubmitSoundImport}
+          onChooseLibraryFolder={handleChooseLibraryFolder}
+          libraryFolderConfigured={libraryFolderConfigured}
+          directoryPickerSupported={
+            localSoundLibrary.directoryPickerSupported
+          }
           isImporting={importingSound}
         />
       )}
@@ -760,7 +1004,9 @@ useEffect(() => {
               activeRoom?.id ===
               updatedRoom.id
             ) {
-              setActiveRoom(updatedRoom);
+              handleActiveRoomChange(
+                updatedRoom
+              );
             }
           }}
           

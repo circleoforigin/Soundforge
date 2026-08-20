@@ -1,4 +1,8 @@
-import { useState } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 
 import type { Room } from '../models/Room';
 
@@ -6,6 +10,7 @@ interface MenuBarProps {
   onNewProject: () => void;
   onLoadProject: () => void;
   onSaveProject: () => void;
+  onCloseProject: () => void;
   onNewScene: () => void;
   onImportSound: () => void;
   onNewRoom: () => void;
@@ -23,6 +28,7 @@ function MenuBar({
   onNewProject,
   onLoadProject,
   onSaveProject,
+  onCloseProject,
   onNewScene,
   onImportSound,
   onNewRoom,
@@ -34,6 +40,9 @@ function MenuBar({
   projectName,
   roomName,
 }: MenuBarProps) {
+  const menuBarRef =
+    useRef<HTMLDivElement>(null);
+
   const [fileMenuOpen, setFileMenuOpen] =
     useState(false);
 
@@ -45,6 +54,46 @@ function MenuBar({
 
   const [roomsMenuOpen, setRoomsMenuOpen] =
     useState(false);
+
+  const menuOpen =
+    fileMenuOpen ||
+    sceneMenuOpen ||
+    soundsMenuOpen ||
+    roomsMenuOpen;
+
+  useEffect(() => {
+    if (!menuOpen) {
+      return;
+    }
+
+    function handleOutsidePointerDown(
+      event: PointerEvent
+    ) {
+      const target = event.target;
+
+      if (
+        target instanceof Node &&
+        !menuBarRef.current?.contains(target)
+      ) {
+        setFileMenuOpen(false);
+        setSceneMenuOpen(false);
+        setSoundsMenuOpen(false);
+        setRoomsMenuOpen(false);
+      }
+    }
+
+    document.addEventListener(
+      'pointerdown',
+      handleOutsidePointerDown
+    );
+
+    return () => {
+      document.removeEventListener(
+        'pointerdown',
+        handleOutsidePointerDown
+      );
+    };
+  }, [menuOpen]);
 
   function closeAllMenus() {
     setFileMenuOpen(false);
@@ -68,6 +117,11 @@ function MenuBar({
     onSaveProject();
   }
 
+  function handleCloseProject() {
+    closeAllMenus();
+    onCloseProject();
+  }
+
   function handleNewScene() {
     closeAllMenus();
     onNewScene();
@@ -86,7 +140,10 @@ function MenuBar({
   }
 
   return (
-    <div className="menu-bar">
+    <div
+      ref={menuBarRef}
+      className="menu-bar"
+    >
       <div className="menu-group">
         <button
           className="menu-item"
@@ -128,7 +185,11 @@ function MenuBar({
 
             <div className="dropdown-separator" />
 
-            <button className="dropdown-item">
+            <button
+              className="dropdown-item"
+              onClick={handleCloseProject}
+              disabled={!projectName}
+            >
               Close Project
             </button>
           </div>

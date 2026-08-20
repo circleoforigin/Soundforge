@@ -1,5 +1,7 @@
 import type { PlaybackMode } from './SoundObjectTemplate';
 
+export type SceneNodePlacement = 'shelf' | 'field';
+
 export interface SceneObjectInstance {
   instanceId: string;
 
@@ -26,6 +28,17 @@ export interface SceneObjectInstance {
    */
   playbackMode: PlaybackMode;
 
+  /** Missing on older positional nodes means already deployed in the field. */
+  placement?: SceneNodePlacement;
+
+  onLoad: boolean;
+  fadeInEnabled: boolean;
+  fadeInMs: number;
+  fadeOutEnabled: boolean;
+  fadeOutMs: number;
+  excludeFromBulkControls: boolean;
+  randomStart: boolean;
+
   /**
     * Per-node source gain trim in decibels.
     * 0 = unchanged, negative = quieter, positive = louder.
@@ -44,4 +57,25 @@ export interface SceneObjectInstance {
   };
 
   muted: boolean;
+}
+
+export const DEFAULT_NODE_FADE_MS = 1000;
+
+export function nodeStartsOnLoad(
+  node: SceneObjectInstance,
+  isAmbient: boolean
+): boolean {
+  return node.onLoad ?? isAmbient;
+}
+
+export function nodeIsExcludedFromBulkControls(
+  node: SceneObjectInstance
+): boolean {
+  return node.excludeFromBulkControls ?? false;
+}
+
+export function nodeIsDeployed(
+  node: SceneObjectInstance
+): boolean {
+  return node.placement !== 'shelf';
 }

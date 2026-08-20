@@ -1,18 +1,29 @@
-import { useRef, useState } from 'react';
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 
 import { getDistanceFromCenter } from '../utils/soundStageMath';
 import SoundNode from './SoundNode';
 import { playbackEngine } from '../audio/PlaybackEngine';
+import type { PlaybackRouting } from '../audio/PlaybackEngine';
 import RoomLayer from './RoomLayer';
 import { getRoomSpeakerGeometry } from '../utils/roomSpeakerMath';
 import { getSpeakerMix } from '../utils/spatialMixMath';
 
 import type { SceneInstance } from '../models/SceneInstance';
 import type { SceneObjectInstance } from '../models/SceneObjectInstance';
+import { DEFAULT_NODE_FADE_MS } from '../models/SceneObjectInstance';
 import type { SoundPosition } from '../utils/soundStageMath';
 import type { Room } from '../models/Room';
 import type { SpeakerMap } from '../models/SpeakerMap';
 import type { SoundAsset } from '../models/SoundAsset';
+import type { DeployedSceneObjectInstance } from '../models/DeployedSceneObjectInstance';
+import { useOutsidePointerDown } from '../hooks/useOutsidePointerDown';
 
 interface SoundStageProps {
   scene: SceneInstance;
@@ -24,17 +35,24 @@ interface SoundStageProps {
 
   selectedNodeId: string | null;
   onSelectedNodeChange: (
-    instanceId: string | null
+    instanceId: string | null,
+    sourceNodeId?: string
   ) => void;
+}
+
+export interface SoundStageHandle {
+  startNodes: (nodes: SceneObjectInstance[]) => Promise<void>;
+  pauseNodes: (nodes: SceneObjectInstance[]) => void;
 }
 
 interface NodeContextMenu {
   instanceId: string;
   x: number;
   y: number;
+  kind: 'field' | 'soundShelf' | 'ambienceShelf';
 }
 
-function SoundStage({
+const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundStage({
   scene,
   soundAssets,
   activeRoom,
@@ -43,7 +61,13 @@ function SoundStage({
   selectedNodeId,
   onSelectedNodeChange,
   onRoomChange,
-}: SoundStageProps) {
+}: SoundStageProps, ref) {
+  const sceneRef = useRef(scene);
+  sceneRef.current = scene;
+  useSyncExternalStore(
+    playbackEngine.subscribe,
+    playbackEngine.getPlaybackVersion
+  );
   const stageRef = useRef<HTMLDivElement>(null);
   const roomDragRef = useRef<{
     pointerId: number;
@@ -54,22 +78,74 @@ function SoundStage({
   } | null>(null);
 
   const [roomLocked, setRoomLocked] = useState(true);
+  const [roomZoom, setRoomZoom] = useState(1);
   const [roomDragging, setRoomDragging] = useState(false);
+  const [soundSpawnMenuOpen, setSoundSpawnMenuOpen] = useState(false);
+  const [draggingShelfNodeId, setDraggingShelfNodeId] =
+    useState<string | null>(null);
+  const [fieldDropActive, setFieldDropActive] = useState(false);
+  const [temporaryDeployments, setTemporaryDeployments] =
+    useState<DeployedSceneObjectInstance[]>([]);
+  const [fieldMessage, setFieldMessage] = useState<string | null>(null);
+  const fieldMessageTimerRef = useRef<number | null>(null);
 
-  const rightClickStartedOnNodeRef = useRef(false);
+  useEffect(() => () => {
+    if (fieldMessageTimerRef.current !== null) {
+      window.clearTimeout(fieldMessageTimerRef.current);
+    }
+  }, []);
 
   const [resizingCircle, setResizingCircle] =
     useState<'center' | 'full' | null>(null);
   
   const [nodeContextMenu, setNodeContextMenu] =
     useState<NodeContextMenu | null>(null);
+  const nodeContextMenuRef = useRef<HTMLDivElement>(null);
+
+  useOutsidePointerDown(
+    nodeContextMenuRef,
+    nodeContextMenu !== null,
+    () => setNodeContextMenu(null)
+  );
 
   const [centerRadius, setCenterRadius] = useState(0.14);
 
   const [fullVolumeRadius, setFullVolumeRadius] = useState(0.62);
 
   const MAX_POSITIONAL_RADIUS = 0.98;
-  const MIN_AMBIENT_RADIUS = 1.03;
+  const shelvedSoundNodes = scene.positionalObjects.filter(
+    (node) => node.placement === 'shelf'
+  );
+  const deployedSoundNodes = scene.positionalObjects.filter(
+    (node) => node.placement !== 'shelf'
+  );
+  const referencedDeployments = [
+    ...(scene.deployedObjects ?? []),
+    ...temporaryDeployments,
+  ].flatMap((deployment) => {
+    const sourceNode = scene.positionalObjects.find(
+      (node) => node.instanceId === deployment.sourceNodeId
+    );
+
+    return sourceNode
+      ? [{
+          deployment,
+          node: {
+            ...sourceNode,
+            instanceId: deployment.instanceId,
+            placement: 'field' as const,
+            position: deployment.position,
+          },
+        }]
+      : [];
+  });
+  const allDeployedSoundNodes = [
+    ...deployedSoundNodes.map((node) => ({
+      node,
+      deployment: undefined as DeployedSceneObjectInstance | undefined,
+    })),
+    ...referencedDeployments,
+  ];
 
   const speakerGeometry =
   activeRoom
@@ -82,9 +158,18 @@ function SoundStage({
     scene.ambientObjects.find(
       (node) => node.instanceId === selectedNodeId
     ) ??
+    referencedDeployments.find(
+      ({ node }) => node.instanceId === selectedNodeId
+    )?.node ??
     null;
 
-  const selectedNodePosition = selectedNode?.position ?? null;
+  const selectedNodePosition =
+    selectedNode &&
+    allDeployedSoundNodes.some(
+      ({ node }) => node.instanceId === selectedNode.instanceId
+    )
+      ? selectedNode.position ?? null
+      : null;
 
   const speakerMix =
     selectedNodePosition
@@ -95,6 +180,28 @@ function SoundStage({
         fullVolumeRadius
       )
     : [];
+  const sceneVolume = scene.volume;
+
+  useEffect(() => {
+    playbackEngine.setSceneVolume(scene.instanceId, sceneVolume);
+
+    for (const node of [
+      ...scene.positionalObjects,
+      ...scene.ambientObjects,
+    ]) {
+      playbackEngine.updateNodeGain(
+        scene.instanceId,
+        node.instanceId,
+        node.gainDb ?? 0,
+        node.muted
+      );
+    }
+  }, [
+    scene.instanceId,
+    sceneVolume,
+    scene.positionalObjects,
+    scene.ambientObjects,
+  ]);
 
   function getPositionFromPointer(
     clientX: number,
@@ -135,32 +242,6 @@ function SoundStage({
     };
   }
 
-  function clampToAmbientArea(
-    position: SoundPosition
-  ): SoundPosition {
-    const distance =
-      getDistanceFromCenter(position);
-
-    if (distance >= MIN_AMBIENT_RADIUS) {
-      return position;
-    }
-
-    if (distance === 0) {
-      return {
-        x: MIN_AMBIENT_RADIUS,
-        y: 0,
-      };
-    }
-
-    const scale =
-      MIN_AMBIENT_RADIUS / distance;
-
-    return {
-      x: position.x * scale,
-      y: position.y * scale,
-    };
-  }
-
   function handleStageContextMenu(
     event: React.MouseEvent<HTMLDivElement>
   ) {
@@ -168,74 +249,40 @@ function SoundStage({
 
     setNodeContextMenu(null);
 
-    if (rightClickStartedOnNodeRef.current) {
-      rightClickStartedOnNodeRef.current = false;
-      return;
-    }
+  }
 
-    const position = getPositionFromPointer(
-      event.clientX,
-      event.clientY
-    );
-
-    if (!position) {
-      return;
-    }
-
-    const distance =
-      getDistanceFromCenter(position);
-
+  function createShelfNode(
+    kind: 'oneShot' | 'loop' | 'ambience'
+  ) {
+    const isAmbience = kind === 'ambience';
     const newNode: SceneObjectInstance = {
       instanceId: crypto.randomUUID(),
-
-      instanceName: 'New Sound',
-
+      instanceName: isAmbience ? 'New Ambience' : 'New Sound',
       soundAssetIds: [],
-      playbackMode: 'oneShot',
+      playbackMode: kind === 'oneShot' ? 'oneShot' : 'loop',
+      placement: 'shelf',
+      onLoad: isAmbience,
+      fadeInEnabled: false,
+      fadeInMs: DEFAULT_NODE_FADE_MS,
+      fadeOutEnabled: false,
+      fadeOutMs: DEFAULT_NODE_FADE_MS,
+      excludeFromBulkControls: false,
+      randomStart: false,
       gainDb: 0,
-      position,
-
       muted: false,
-    };
-
-    if (distance <= 1) {
-      const positionalNode = {
-        ...newNode,
-        position:
-          clampToPositionalArea(position),
-      };
-
-      onSceneChange({
-        ...scene,
-        positionalObjects: [
-          ...scene.positionalObjects,
-          positionalNode,
-        ],
-      });
-
-      onSelectedNodeChange(
-        positionalNode.instanceId
-      );
-
-      return;
-    }
-
-    const ambientNode = {
-      ...newNode,
-      position: clampToAmbientArea(position),
     };
 
     onSceneChange({
       ...scene,
-      ambientObjects: [
-        ...scene.ambientObjects,
-        ambientNode,
-      ],
+      positionalObjects: isAmbience
+        ? scene.positionalObjects
+        : [...scene.positionalObjects, newNode],
+      ambientObjects: isAmbience
+        ? [...scene.ambientObjects, newNode]
+        : scene.ambientObjects,
     });
-
-    onSelectedNodeChange(
-      ambientNode.instanceId
-    );
+    onSelectedNodeChange(newNode.instanceId);
+    setSoundSpawnMenuOpen(false);
   }
 
   function handleNodePositionChange(
@@ -243,25 +290,37 @@ function SoundStage({
     position: SoundPosition,
     isAmbient: boolean
   ) {
-    const clampedPosition = isAmbient
-      ? clampToAmbientArea(position)
-      : clampToPositionalArea(position);
-
     if (isAmbient) {
-      onSceneChange({
-        ...scene,
+      return;
+    }
 
-        ambientObjects:
-          scene.ambientObjects.map((node) =>
-            node.instanceId === instanceId
-              ? {
-                  ...node,
-                  position: clampedPosition,
-                }
-              : node
-          ),
-      });
+    const clampedPosition = clampToPositionalArea(position);
+    const deployedNode = allDeployedSoundNodes.find(
+      ({ node }) => node.instanceId === instanceId
+    )?.node;
 
+    if (deployedNode) {
+      playbackEngine.updateSpatialMix(
+        instanceId,
+        getStereoMixForNode({
+          ...deployedNode,
+          position: clampedPosition,
+        })
+      );
+    }
+
+    const temporaryDeployment = temporaryDeployments.find(
+      (deployment) => deployment.instanceId === instanceId
+    );
+
+    if (temporaryDeployment) {
+      setTemporaryDeployments((current) =>
+        current.map((deployment) =>
+          deployment.instanceId === instanceId
+            ? { ...deployment, position: clampedPosition }
+            : deployment
+        )
+      );
       return;
     }
 
@@ -277,13 +336,22 @@ function SoundStage({
               }
             : node
         ),
+      deployedObjects: (scene.deployedObjects ?? []).map((deployment) =>
+        deployment.instanceId === instanceId
+          ? { ...deployment, position: clampedPosition }
+          : deployment
+      ),
     });
   }
 
   function getStereoMixForNode(
     node: SceneObjectInstance
   ) {
-    if (!node.position) {
+    const isAmbience = scene.ambientObjects.some(
+      (ambientNode) => ambientNode.instanceId === node.instanceId
+    );
+
+    if (isAmbience || !node.position) {
       return {
         left: 1,
         right: 1,
@@ -336,9 +404,52 @@ function SoundStage({
     };
   }
 
+  function getPlaybackRouting(
+    node: SceneObjectInstance
+  ): PlaybackRouting {
+    const deployment = referencedDeployments.find(
+      ({ node: deployedNode }) =>
+        deployedNode.instanceId === node.instanceId
+    )?.deployment;
+    const isAmbience = scene.ambientObjects.some(
+      (ambientNode) => ambientNode.instanceId === node.instanceId
+    );
+
+    return {
+      sceneInstanceId: scene.instanceId,
+      sourceNodeId: deployment?.sourceNodeId ?? node.instanceId,
+      type: isAmbience
+        ? 'ambience'
+        : node.playbackMode === 'loop'
+          ? 'loop'
+          : 'oneShot',
+      volume: scene.volume,
+    };
+  }
+
   function handleToggleNodePlayback(
     node: SceneObjectInstance
   ) {
+    const isTemporaryOneShot =
+      node.playbackMode === 'oneShot' &&
+      temporaryDeployments.some(
+        (deployment) => deployment.instanceId === node.instanceId
+      );
+
+    if (isTemporaryOneShot) {
+      if (playbackEngine.isPlaying(node.instanceId)) {
+        playbackEngine.stop(node.instanceId);
+        despawnTemporaryDeployment(node.instanceId);
+        return;
+      }
+
+      void handleStartNodePlayback(
+        node,
+        () => despawnTemporaryDeployment(node.instanceId)
+      );
+      return;
+    }
+
     const soundAssetId =
       node.soundAssetIds[0];
 
@@ -366,9 +477,179 @@ function SoundStage({
     void playbackEngine.toggle(
       node,
       asset,
-      stereoMix
+      stereoMix,
+      getPlaybackRouting(node)
     );
   }
+
+  function handleNodeTransportPlayback(
+    node: SceneObjectInstance,
+    playing: boolean
+  ) {
+    if (playing) {
+      void playbackEngine.stopNode(node);
+      return;
+    }
+
+    void handleStartNodePlayback(node);
+  }
+
+  async function handleStartNodePlayback(
+    node: SceneObjectInstance,
+    onComplete?: () => void
+  ) {
+    const soundAssetId = node.soundAssetIds[0];
+
+    if (!soundAssetId) {
+      return;
+    }
+
+    const asset = soundAssets.find(
+      (soundAsset) => soundAsset.id === soundAssetId
+    );
+
+    if (!asset) {
+      console.error(`Sound asset not found: ${soundAssetId}`);
+      return;
+    }
+
+    await playbackEngine.start(
+      node,
+      asset,
+      getStereoMixForNode(node),
+      getPlaybackRouting(node),
+      onComplete
+    );
+  }
+
+  function despawnTemporaryDeployment(instanceId: string) {
+    setTemporaryDeployments((current) =>
+      current.filter((deployment) => deployment.instanceId !== instanceId)
+    );
+
+    if (selectedNodeId === instanceId) {
+      onSelectedNodeChange(null);
+    }
+  }
+
+  function showFieldMessage(message: string) {
+    setFieldMessage(message);
+
+    if (fieldMessageTimerRef.current !== null) {
+      window.clearTimeout(fieldMessageTimerRef.current);
+    }
+
+    fieldMessageTimerRef.current = window.setTimeout(() => {
+      setFieldMessage(null);
+      fieldMessageTimerRef.current = null;
+    }, 2200);
+  }
+
+  function handleShelfNodeDragStart(
+    event: React.DragEvent<HTMLDivElement>,
+    node: SceneObjectInstance
+  ) {
+    if (event.button !== 0) {
+      event.preventDefault();
+      return;
+    }
+
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData(
+      'application/x-sacscape-scene-node',
+      node.instanceId
+    );
+    setDraggingShelfNodeId(node.instanceId);
+  }
+
+  function handleShelfNodeDragEnd() {
+    setDraggingShelfNodeId(null);
+    setFieldDropActive(false);
+  }
+
+  function handleSpatialFieldDrop(
+    event: React.DragEvent<HTMLDivElement>
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const instanceId =
+      event.dataTransfer.getData(
+        'application/x-sacscape-scene-node'
+      ) || draggingShelfNodeId;
+    const latestScene = sceneRef.current;
+    const node = latestScene.positionalObjects.find(
+      (item) =>
+        item.instanceId === instanceId &&
+        item.placement === 'shelf'
+    );
+    const position = getPositionFromPointer(
+      event.clientX,
+      event.clientY
+    );
+    const soundAssetId = node?.soundAssetIds[0];
+    const assetExists = soundAssets.some(
+      (asset) => asset.id === soundAssetId
+    );
+
+    setDraggingShelfNodeId(null);
+    setFieldDropActive(false);
+
+    if (!node || !position) {
+      return;
+    }
+
+    if (!soundAssetId || !assetExists) {
+      showFieldMessage('No sound assigned to this node.');
+      return;
+    }
+
+    const deployment: DeployedSceneObjectInstance = {
+      instanceId: crypto.randomUUID(),
+      sourceNodeId: node.instanceId,
+      position: clampToPositionalArea(position),
+    };
+    const deployedNode: SceneObjectInstance = {
+      ...node,
+      instanceId: deployment.instanceId,
+      placement: 'field',
+      position: deployment.position,
+    };
+
+    if (node.playbackMode === 'loop') {
+      onSceneChange({
+        ...latestScene,
+        deployedObjects: [
+          ...(latestScene.deployedObjects ?? []),
+          deployment,
+        ],
+      });
+    } else {
+      setTemporaryDeployments((current) => [...current, deployment]);
+    }
+
+    onSelectedNodeChange(deployedNode.instanceId, node.instanceId);
+
+    void handleStartNodePlayback(
+      deployedNode,
+      deployedNode.playbackMode === 'oneShot'
+        ? () => despawnTemporaryDeployment(deployedNode.instanceId)
+        : undefined
+    );
+  }
+
+  useImperativeHandle(ref, () => ({
+    startNodes: async (nodes) => {
+      for (const node of nodes) {
+        await handleStartNodePlayback(node);
+      }
+    },
+    pauseNodes: (nodes) => {
+      for (const node of nodes) {
+        void playbackEngine.pause(node);
+      }
+    },
+  }));
 
   function handleStagePointerDown(
     event: React.PointerEvent<HTMLDivElement>
@@ -383,9 +664,6 @@ function SoundStage({
       );
 
     if (event.button === 2) {
-      rightClickStartedOnNodeRef.current =
-        startedOnNode;
-
       return;
     }
 
@@ -495,18 +773,97 @@ function SoundStage({
   function handleNodeContextMenu(
     instanceId: string,
     clientX: number,
-    clientY: number
+    clientY: number,
+    kind: NodeContextMenu['kind'] = 'field'
   ) {
     setNodeContextMenu({
       instanceId,
       x: clientX,
       y: clientY,
+      kind,
     });
+  }
+
+  function handleDuplicateShelfNode(instanceId: string) {
+    const sourceNode = scene.positionalObjects.find(
+      (node) =>
+        node.instanceId === instanceId && node.placement === 'shelf'
+    );
+
+    if (!sourceNode) {
+      return;
+    }
+
+    const duplicate: SceneObjectInstance = {
+      ...sourceNode,
+      instanceId: crypto.randomUUID(),
+      instanceName: `${sourceNode.instanceName ?? 'Sound'} Copy`,
+      soundAssetIds: [...sourceNode.soundAssetIds],
+      position: undefined,
+      placement: 'shelf',
+    };
+
+    onSceneChange({
+      ...scene,
+      positionalObjects: [...scene.positionalObjects, duplicate],
+    });
+    onSelectedNodeChange(duplicate.instanceId);
+    setNodeContextMenu(null);
   }
 
   function handleRemoveNode(
     instanceId: string
   ) {
+    const sourceNode = scene.positionalObjects.find(
+      (node) => node.instanceId === instanceId
+    );
+    const persistentDeployment = (scene.deployedObjects ?? []).find(
+      (deployment) => deployment.instanceId === instanceId
+    );
+    const temporaryDeployment = temporaryDeployments.find(
+      (deployment) => deployment.instanceId === instanceId
+    );
+    const removedDeploymentIds = sourceNode?.placement === 'shelf'
+      ? (scene.deployedObjects ?? [])
+          .filter((deployment) => deployment.sourceNodeId === instanceId)
+          .map((deployment) => deployment.instanceId)
+      : [];
+
+    if (persistentDeployment || temporaryDeployment) {
+      playbackEngine.stop(instanceId);
+    }
+
+    if (temporaryDeployment) {
+      setTemporaryDeployments((current) =>
+        current.filter((deployment) => deployment.instanceId !== instanceId)
+      );
+
+      if (selectedNodeId === instanceId) {
+        onSelectedNodeChange(null);
+      }
+
+      setNodeContextMenu(null);
+      return;
+    }
+
+    for (const deploymentId of removedDeploymentIds) {
+      playbackEngine.stop(deploymentId);
+    }
+
+    if (sourceNode?.placement === 'shelf') {
+      for (const deployment of temporaryDeployments) {
+        if (deployment.sourceNodeId === instanceId) {
+          playbackEngine.stop(deployment.instanceId);
+        }
+      }
+
+      setTemporaryDeployments((current) =>
+        current.filter(
+          (deployment) => deployment.sourceNodeId !== instanceId
+        )
+      );
+    }
+
     onSceneChange({
       ...scene,
 
@@ -521,9 +878,22 @@ function SoundStage({
           (node) =>
             node.instanceId !== instanceId
         ),
+      deployedObjects: (scene.deployedObjects ?? []).filter(
+        (deployment) =>
+          deployment.instanceId !== instanceId &&
+          deployment.sourceNodeId !== instanceId
+      ),
     });
 
-    if (selectedNodeId === instanceId) {
+    if (
+      selectedNodeId === instanceId ||
+      removedDeploymentIds.includes(selectedNodeId ?? '') ||
+      temporaryDeployments.some(
+        (deployment) =>
+          deployment.sourceNodeId === instanceId &&
+          deployment.instanceId === selectedNodeId
+      )
+    ) {
       onSelectedNodeChange(null);
     }
 
@@ -629,16 +999,45 @@ function handleCircleResizeEnd(
       ]
         .filter(Boolean)
         .join(' ')}
-      onPointerDown={handleStagePointerDown}
-      onPointerMove={handleStagePointerMove}
-      onPointerUp={handleStagePointerUp}
-      onPointerCancel={handleStagePointerUp}
-      onDragStart={(event) => event.preventDefault()}
     >
-      <div
-        className="soundstage-field"
-        onContextMenu={handleStageContextMenu}
-      >
+      <div className="spatial-field-area">
+        <div className="spatial-field-label">Spatial Field</div>
+        <div
+          className={[
+            'soundstage-field',
+            fieldDropActive ? 'shelf-drop-active' : '',
+          ].filter(Boolean).join(' ')}
+          onContextMenu={handleStageContextMenu}
+          onDragEnter={(event) => {
+            if (draggingShelfNodeId) {
+              event.preventDefault();
+              setFieldDropActive(true);
+            }
+          }}
+          onDragOver={(event) => {
+            if (draggingShelfNodeId) {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'copy';
+              setFieldDropActive(true);
+            }
+          }}
+          onDragLeave={(event) => {
+            const nextTarget = event.relatedTarget;
+
+            if (
+              !(nextTarget instanceof Node) ||
+              !event.currentTarget.contains(nextTarget)
+            ) {
+              setFieldDropActive(false);
+            }
+          }}
+          onDrop={handleSpatialFieldDrop}
+          onPointerDown={handleStagePointerDown}
+          onPointerMove={handleStagePointerMove}
+          onPointerUp={handleStagePointerUp}
+          onPointerCancel={handleStagePointerUp}
+          onDragStart={(event) => event.preventDefault()}
+        >
         <div
           ref={stageRef}
           className="soundstage-circle-layer"
@@ -646,6 +1045,7 @@ function handleCircleResizeEnd(
           {activeRoom && (
             <RoomLayer
               room={activeRoom}
+              viewScale={roomZoom}
               speakerMap={activeSpeakerMap}
               speakerGeometry={speakerGeometry}
               speakerMix={speakerMix}
@@ -709,8 +1109,8 @@ function handleCircleResizeEnd(
 
           <div className="center-point" />
 
-          {scene.positionalObjects.map(
-            (node) => (
+          {allDeployedSoundNodes.map(
+            ({ node, deployment }) => (
               <SoundNode
                 key={node.instanceId}
                 node={node}
@@ -719,13 +1119,19 @@ function handleCircleResizeEnd(
                   node.instanceId ===
                   selectedNodeId
                 }
+                playing={playbackEngine.isPlaying(node.instanceId)}
                 isAmbient={false}
-                onSelect={onSelectedNodeChange}
+                onSelect={(instanceId) =>
+                  onSelectedNodeChange(
+                    instanceId,
+                    deployment?.sourceNodeId
+                  )
+                }
                 onPositionChange={
                   handleNodePositionChange
                 }
-                onContextMenu={
-                  handleNodeContextMenu
+                onContextMenu={(instanceId, x, y) =>
+                  handleNodeContextMenu(instanceId, x, y, 'field')
                 }
                 onTogglePlayback={
                   handleToggleNodePlayback
@@ -734,69 +1140,228 @@ function handleCircleResizeEnd(
             )
           )}
 
-          {scene.ambientObjects.map(
-            (node) => (
-              <SoundNode
-                key={node.instanceId}
-                node={node}
-                stageRef={stageRef}
-                selected={
-                  node.instanceId ===
-                  selectedNodeId
-                }
-                isAmbient={true}
-                onSelect={onSelectedNodeChange}
-                onPositionChange={
-                  handleNodePositionChange
-                }
-                onContextMenu={
-                  handleNodeContextMenu
-                }
-                onTogglePlayback={
-                  handleToggleNodePlayback
-                }
-              />
-            )
-          )}
-
-          {activeRoom && (
-  <div className="stage-settings-test">
-    <label className="room-lock-control">
-      <input
-        type="checkbox"
-        checked={roomLocked}
-        onChange={(event) =>
-          setRoomLocked(event.target.checked)
-        }
-      />
-      Lock Room
-    </label>
-  </div>
-)}
         </div>
+
+        {fieldMessage && (
+          <div className="spatial-field-message" role="status">
+            {fieldMessage}
+          </div>
+        )}
+
+        {activeRoom && (
+          <div className="stage-settings-test">
+            {!roomLocked && (
+              <label className="room-zoom-control">
+                <span>Room Zoom</span>
+
+                <input
+                  type="range"
+                  min="0.5"
+                  max="2"
+                  step="0.05"
+                  value={roomZoom}
+                  onChange={(event) =>
+                    setRoomZoom(
+                      Number(event.target.value)
+                    )
+                  }
+                />
+
+                <output>
+                  {Math.round(roomZoom * 100)}%
+                </output>
+              </label>
+            )}
+
+            <label className="room-lock-control">
+              <input
+                type="checkbox"
+                checked={roomLocked}
+                onChange={(event) =>
+                  setRoomLocked(event.target.checked)
+                }
+              />
+              Lock Room
+            </label>
+          </div>
+        )}
+      </div>
+      </div>
+
+      <div className="soundstage-shelves">
+        <section className="sound-shelf node-shelf">
+          <header className="node-shelf-header">
+            <span>Sound Shelf</span>
+            <div className="shelf-spawn-control">
+              <button
+                onClick={() => setSoundSpawnMenuOpen((open) => !open)}
+              >
+                Spawn Node
+              </button>
+              {soundSpawnMenuOpen && (
+                <div className="shelf-spawn-menu">
+                  <button onClick={() => createShelfNode('oneShot')}>
+                    One Shot
+                  </button>
+                  <button onClick={() => createShelfNode('loop')}>
+                    Loop
+                  </button>
+                </div>
+              )}
+            </div>
+          </header>
+          <div className="node-shelf-contents">
+            {shelvedSoundNodes.map((node) => (
+              <div
+                key={node.instanceId}
+                className={[
+                  'shelf-node-tile',
+                  'sound-shelf-node',
+                  node.instanceId === selectedNodeId ? 'selected' : '',
+                  node.muted ? 'muted' : '',
+                  node.soundAssetIds.length === 0 ? 'no-sound' : '',
+                ].filter(Boolean).join(' ')}
+                data-node-id={node.instanceId}
+                data-placement="shelf"
+                data-playback-mode={node.playbackMode}
+                draggable
+                onDragStart={(event) =>
+                  handleShelfNodeDragStart(event, node)
+                }
+                onDragEnd={handleShelfNodeDragEnd}
+                onClick={() => onSelectedNodeChange(node.instanceId)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onSelectedNodeChange(node.instanceId);
+                  handleNodeContextMenu(
+                    node.instanceId,
+                    event.clientX,
+                    event.clientY,
+                    'soundShelf'
+                  );
+                }}
+              >
+                <div className="shelf-node-icon" aria-hidden="true">
+                  <span className="shelf-node-type-badge">
+                    {node.playbackMode === 'loop' ? '∞' : '1'}
+                  </span>
+                  {node.soundAssetIds.length === 0 && (
+                    <span className="shelf-node-no-sound">No Sound</span>
+                  )}
+                </div>
+                <span className="shelf-node-name">
+                  {node.instanceName ?? 'New Sound'}
+                </span>
+              </div>
+            ))}
+            {shelvedSoundNodes.length === 0 && (
+              <div className="node-shelf-empty">
+                Spawn Node to add a prepared sound.
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="ambience-shelf node-shelf">
+          <header className="node-shelf-header">
+            <span>Ambience Shelf</span>
+            <button onClick={() => createShelfNode('ambience')}>
+              Spawn Node
+            </button>
+          </header>
+          <div className="node-shelf-contents">
+            {scene.ambientObjects.map((node) => (
+              <div
+                key={node.instanceId}
+                className={[
+                  'shelf-node-tile',
+                  'ambience-shelf-node',
+                  node.instanceId === selectedNodeId ? 'selected' : '',
+                  playbackEngine.isPlaying(node.instanceId) ? 'playing' : '',
+                  node.muted ? 'muted' : '',
+                  node.soundAssetIds.length === 0 ? 'no-sound' : '',
+                ].filter(Boolean).join(' ')}
+                data-node-id={node.instanceId}
+                data-placement="shelf"
+                data-node-kind="ambience"
+                onClick={() => onSelectedNodeChange(node.instanceId)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onSelectedNodeChange(node.instanceId);
+                  handleNodeContextMenu(
+                    node.instanceId,
+                    event.clientX,
+                    event.clientY,
+                    'ambienceShelf'
+                  );
+                }}
+              >
+                <div className="shelf-node-icon">
+                  <span className="shelf-node-type-badge" aria-hidden="true">
+                    A
+                  </span>
+                  {node.soundAssetIds.length === 0 && (
+                    <span className="shelf-node-no-sound">No Sound</span>
+                  )}
+                  {node.soundAssetIds.length > 0 && (
+                  <button
+                    className="ambience-playback-toggle"
+                    aria-label={
+                      playbackEngine.isPlaying(node.instanceId)
+                        ? `Pause ${node.instanceName ?? 'ambience'}`
+                        : `Play ${node.instanceName ?? 'ambience'}`
+                    }
+                    title={
+                      playbackEngine.isPlaying(node.instanceId)
+                        ? 'Pause'
+                        : 'Play'
+                    }
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleNodeTransportPlayback(
+                        node,
+                        playbackEngine.isPlaying(node.instanceId)
+                      );
+                    }}
+                  >
+                    {playbackEngine.isPlaying(node.instanceId) ? '■' : '▶'}
+                  </button>
+                  )}
+                </div>
+                <span className="shelf-node-name">
+                  {node.instanceName ?? 'New Ambience'}
+                </span>
+              </div>
+            ))}
+            {scene.ambientObjects.length === 0 && (
+              <div className="node-shelf-empty">
+                Spawn Node to add ambience.
+              </div>
+            )}
+          </div>
+        </section>
       </div>
 
       {nodeContextMenu && (
         <div
+          ref={nodeContextMenuRef}
           className="node-context-menu"
           style={{
             left: nodeContextMenu.x,
             top: nodeContextMenu.y,
           }}
         >
-          <button
-            onClick={() =>
-              setNodeContextMenu(null)
-            }
-          >
-            Edit
-          </button>
-
-          <button disabled>
-            Duplicate
-          </button>
-
-          <div className="node-context-separator" />
+          {nodeContextMenu.kind === 'soundShelf' && (
+            <button
+              onClick={() =>
+                handleDuplicateShelfNode(nodeContextMenu.instanceId)
+              }
+            >
+              Duplicate
+            </button>
+          )}
 
           <button
             onClick={() =>
@@ -805,12 +1370,12 @@ function handleCircleResizeEnd(
               )
             }
           >
-            Remove from Scene
+            Delete
           </button>
         </div>
       )}
     </div>
   );
-}
+});
 
 export default SoundStage;

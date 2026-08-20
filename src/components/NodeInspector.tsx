@@ -1,4 +1,5 @@
 import type { SceneObjectInstance } from '../models/SceneObjectInstance';
+import { DEFAULT_NODE_FADE_MS } from '../models/SceneObjectInstance';
 import type { SoundObjectTemplate } from '../models/SoundObjectTemplate';
 import type { SoundAsset } from '../models/SoundAsset';
 
@@ -113,6 +114,112 @@ function NodeInspector({
                 {(node.gainDb ?? 0) > 0 ? '+' : ''}
                 {node.gainDb ?? 0} dB
             </span>
+        </div>
+      </div>
+
+      <div className="node-behavior-controls">
+        {(isAmbient || node.playbackMode === 'loop') && (
+          <label className="node-checkbox">
+            <input
+              type="checkbox"
+              checked={node.randomStart ?? false}
+              onChange={(event) =>
+                onNodeChange({
+                  ...node,
+                  randomStart: event.target.checked,
+                })
+              }
+            />
+            Random Start
+          </label>
+        )}
+
+        <label className="node-checkbox">
+          <input
+            type="checkbox"
+            checked={node.onLoad ?? isAmbient}
+            onChange={(event) =>
+              onNodeChange({
+                ...node,
+                onLoad: event.target.checked,
+              })
+            }
+          />
+          On Load
+        </label>
+
+        <label className="node-checkbox">
+          <input
+            type="checkbox"
+            checked={node.excludeFromBulkControls ?? false}
+            onChange={(event) =>
+              onNodeChange({
+                ...node,
+                excludeFromBulkControls: event.target.checked,
+              })
+            }
+          />
+          Exclude from Bulk Controls
+        </label>
+
+        <div className="node-fade-row">
+          <label className="node-checkbox">
+            <input
+              type="checkbox"
+              checked={node.fadeInEnabled ?? false}
+              onChange={(event) =>
+                onNodeChange({
+                  ...node,
+                  fadeInEnabled: event.target.checked,
+                })
+              }
+            />
+            Fade In
+          </label>
+          <input
+            type="number"
+            min="0"
+            aria-label="Fade in milliseconds"
+            disabled={!(node.fadeInEnabled ?? false)}
+            value={node.fadeInMs ?? DEFAULT_NODE_FADE_MS}
+            onChange={(event) =>
+              onNodeChange({
+                ...node,
+                fadeInMs: Math.max(0, Number(event.target.value)),
+              })
+            }
+          />
+          <span>ms</span>
+        </div>
+
+        <div className="node-fade-row">
+          <label className="node-checkbox">
+            <input
+              type="checkbox"
+              checked={node.fadeOutEnabled ?? false}
+              onChange={(event) =>
+                onNodeChange({
+                  ...node,
+                  fadeOutEnabled: event.target.checked,
+                })
+              }
+            />
+            Fade Out
+          </label>
+          <input
+            type="number"
+            min="0"
+            aria-label="Fade out milliseconds"
+            disabled={!(node.fadeOutEnabled ?? false)}
+            value={node.fadeOutMs ?? DEFAULT_NODE_FADE_MS}
+            onChange={(event) =>
+              onNodeChange({
+                ...node,
+                fadeOutMs: Math.max(0, Number(event.target.value)),
+              })
+            }
+          />
+          <span>ms</span>
         </div>
       </div>
 

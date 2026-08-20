@@ -5,6 +5,7 @@ import type { SpeakerMix } from '../utils/spatialMixMath';
 
 interface RoomLayerProps {
   room: Room;
+  viewScale: number;
   speakerMap: SpeakerMap;
   speakerGeometry: SpeakerGeometry[];
   speakerMix: SpeakerMix[];
@@ -12,6 +13,7 @@ interface RoomLayerProps {
 
 function RoomLayer({
   room,
+  viewScale,
   speakerMap,
   speakerGeometry,
   speakerMix,
@@ -24,12 +26,10 @@ function RoomLayer({
         top: `${50 - room.offset.y * 50}%`,
         width: `${room.width * 50}%`,
         height: `${room.height * 50}%`,
+        transform:
+          `translate(-50%, -50%) scale(${viewScale})`,
       }}
     >
-      <div className="room-name">
-        {room.name}
-      </div>
-
       {room.speakers.map((roomSpeaker) => {
         const geometry =
             speakerGeometry.find(

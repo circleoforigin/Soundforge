@@ -57,6 +57,14 @@ function normalizeSoundAsset(raw: unknown): SoundAsset | null {
       typeof asset.durationMs === 'number'
         ? asset.durationMs
         : undefined,
+    originalFileName: asset.originalFileName,
+    fileType: asset.fileType,
+    mimeType: asset.mimeType,
+    fileSizeBytes: asset.fileSizeBytes,
+    description: asset.description,
+    attribution: asset.attribution,
+    license: asset.license,
+    sourceUrl: asset.sourceUrl,
   };
 }
 

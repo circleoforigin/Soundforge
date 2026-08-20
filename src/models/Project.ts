@@ -5,4 +5,5 @@ export interface Project extends PersistentEntity {
   name: string;
   scenes: SceneInstance[];
   activeSceneInstanceId?: string;
+  activeRoomId?: string;
 }

@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 
 import type { SoundAsset } from '../models/SoundAsset';
+import { getSoundAssetPlaybackUrl } from '../models/SoundAsset';
 import type { SoundObjectTemplate } from '../models/SoundObjectTemplate';
 
 type PickerMode = 'sound' | 'template';
@@ -120,7 +121,7 @@ function SoundPickerDialog({
     stopPreview();
 
     const audio =
-      new Audio(selectedSound.source.path);
+      new Audio(getSoundAssetPlaybackUrl(selectedSound));
 
     audioRef.current = audio;
 
