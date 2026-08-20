@@ -96,11 +96,15 @@ jobs:
             }
           }
 
-          git `
+          $trackedEnvironmentFile = git `
             -c safe.directory=C:/Projects/Soundforge `
-            cat-file -e origin/main:.env.local 2>$null
+            ls-tree --name-only origin/main -- .env.local
 
-          if ($LASTEXITCODE -eq 0) {
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to inspect origin/main for protected files."
+          }
+
+          if ($trackedEnvironmentFile) {
             throw "Refusing to overwrite the protected environment file."
           }
 
