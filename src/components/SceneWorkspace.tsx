@@ -29,9 +29,7 @@ interface SceneWorkspaceProps {
   onPreviewTransitionTarget: () => void;
   onRevertPreview: () => void;
   onTransition: () => void;
-  onCreateSoundObjectTemplate: (
-    template: SoundObjectTemplate
-  ) => void;
+  
   onRoomChange: (room: Room) => void;
 }
 
@@ -51,7 +49,6 @@ function SceneWorkspace({
   onPreviewTransitionTarget,
   onRevertPreview,
   onTransition,
-  onCreateSoundObjectTemplate,
   onRoomChange,
 }: SceneWorkspaceProps) {
   const [selectedNodeId, setSelectedNodeId] =

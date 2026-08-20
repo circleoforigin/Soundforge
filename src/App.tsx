@@ -44,12 +44,12 @@ function App() {
   const [newSceneName, setNewSceneName] = useState('');
   const [showImportSoundDialog, setShowImportSoundDialog] =
     useState(false);
-  const [sceneTemplates, setSceneTemplates] =
+  const [, setSceneTemplates] =
     useState<SceneTemplate[]>([]);
-  const [soundObjectTemplates, setSoundObjectTemplates] =
+  const [soundObjectTemplates] =
     useState<SoundObjectTemplate[]>([]);
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
-  const [activeSpeakerMap, setActiveSpeakerMap] =
+  const [activeSpeakerMap] =
     useState<SpeakerMap>(headphonesSpeakerMap);
   const [customRooms, setCustomRooms] =  useState<Room[]>([]);
   const availableRooms: Room[] = [
@@ -395,14 +395,7 @@ useEffect(() => {
     setShowNewSceneDialog(false);
   }
 
-  function handleCreateSoundObjectTemplate(
-    template: SoundObjectTemplate
-  ) {
-    setSoundObjectTemplates((current) => [
-      ...current,
-      template,
-    ]);
-  }
+  
 
   function handleSceneChange(
     updatedScene: SceneInstance
@@ -591,10 +584,7 @@ useEffect(() => {
           previewingTarget={previewingTarget}
           projectScenes={activeProject?.scenes ?? []}
           soundObjectTemplates={soundObjectTemplates}
-          onSceneChange={handleSceneChange}
-          onCreateSoundObjectTemplate={
-            handleCreateSoundObjectTemplate
-          }
+          onSceneChange={handleSceneChange}          
           onSelectTransitionTarget={
             handleSelectTransitionTarget
           }
