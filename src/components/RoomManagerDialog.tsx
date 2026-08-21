@@ -35,7 +35,7 @@ interface SonosHousehold {
 interface SonosPlayer {
   id: string;
   name: string;
-  devices: SonosDevice[];
+  deviceIds: string[];
 }
 
 interface SonosDevice {
@@ -80,6 +80,15 @@ function getSonosDeviceLabel(device: SonosDevice): string {
 function getSonosAssignmentLabel(device: SonosDevice): string {
   const idSuffix = device.id.slice(-8);
   return `${getSonosDeviceLabel(device)} · …${idSuffix}`;
+}
+
+function getSonosPhysicalDevices(player: SonosPlayer): SonosDevice[] {
+  return (player.deviceIds ?? []).map((deviceId, index) => ({
+    id: deviceId,
+    name: player.deviceIds.length === 1
+      ? player.name
+      : `${player.name} · Device ${index + 1}`,
+  }));
 }
 
 function getRoomShape(
@@ -619,7 +628,7 @@ function RoomManagerDialog({
 
     const discoveredDevices = sonosDiscovery.status === 'ready'
       ? sonosDiscovery.households.flatMap((household) =>
-          household.players.flatMap((player) => player.devices ?? [])
+          household.players.flatMap(getSonosPhysicalDevices)
         )
       : [];
     const device = discoveredDevices.find(
@@ -715,7 +724,7 @@ function RoomManagerDialog({
         new Map(
           sonosDiscovery.households
             .flatMap((household) =>
-              household.players.flatMap((player) => player.devices ?? [])
+              household.players.flatMap(getSonosPhysicalDevices)
             )
             .map((device) => [device.id, device])
         ).values()
@@ -1201,7 +1210,7 @@ function RoomManagerDialog({
                                   </div>
 
                                   <div className="room-sonos-devices">
-                                    {(player.devices ?? []).map((device) => (
+                                    {getSonosPhysicalDevices(player).map((device) => (
                                       <div
                                         className="room-sonos-physical-device"
                                         key={device.id}
@@ -1211,7 +1220,7 @@ function RoomManagerDialog({
                                       </div>
                                     ))}
 
-                                    {(player.devices ?? []).length === 0 && (
+                                    {(player.deviceIds ?? []).length === 0 && (
                                       <div className="room-sonos-player-empty">
                                         No physical devices reported.
                                       </div>
@@ -1250,7 +1259,7 @@ function RoomManagerDialog({
                                 </div>
 
                                 <div className="room-sonos-devices">
-                                  {(player.devices ?? []).map((device) => (
+                                  {getSonosPhysicalDevices(player).map((device) => (
                                     <div
                                       className="room-sonos-physical-device"
                                       key={device.id}

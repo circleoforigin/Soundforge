@@ -142,7 +142,7 @@ if (
   return;
 }
 
-setSonosTokens({
+await setSonosTokens({
   accessToken: tokenResult.access_token,
   refreshToken: tokenResult.refresh_token,
 

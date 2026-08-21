@@ -42,6 +42,7 @@ import {
 import {
   registerSonosMediaRoute,
 } from './routes/SonosMediaRoute.ts';
+import { initializeSonosTokenStore } from './sonos/SonosTokenStore.ts';
 
 const app = express();
 
@@ -144,6 +145,8 @@ app.post(
     }
   }
 );
+
+await initializeSonosTokenStore();
 
 registerLibraryImportRoute(app);
 registerLibraryManifestRoute(app);

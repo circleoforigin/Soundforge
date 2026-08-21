@@ -1,5 +1,5 @@
 import {
-  getSonosTokens,
+  getValidSonosAccessToken,
 } from './SonosTokenStore.ts';
 
 const SONOS_API_BASE =
@@ -15,14 +15,7 @@ export interface SonosHouseholdsResponse {
 export interface SonosPlayer {
   id: string;
   name: string;
-  devices: SonosDevice[];
-}
-
-export interface SonosDevice {
-  id: string;
-  name?: string;
-  model?: string;
-  modelDisplayName?: string;
+  deviceIds: string[];
 }
 
 export interface SonosGroup {
@@ -52,28 +45,14 @@ export class SonosApiError extends Error {
 }
 
 export class SonosClient {
-  private getAccessToken(): string {
-    const tokens = getSonosTokens();
-
-    if (!tokens) {
-      throw new Error(
-        'SACscape is not connected to Sonos.'
-      );
-    }
-
-    if (Date.now() >= tokens.expiresAt) {
-      throw new Error(
-        'Sonos access token has expired.'
-      );
-    }
-
-    return tokens.accessToken;
+  private async getAccessToken(): Promise<string> {
+    return getValidSonosAccessToken();
   }
 
   async getHouseholds():
     Promise<SonosHouseholdsResponse> {
     const accessToken =
-      this.getAccessToken();
+      await this.getAccessToken();
 
     const response =
       await fetch(
@@ -109,7 +88,7 @@ export class SonosClient {
   householdId: string
 ): Promise<SonosGroupsResponse> {
   const accessToken =
-    this.getAccessToken();
+    await this.getAccessToken();
 
   const response =
     await fetch(
@@ -148,7 +127,7 @@ export class SonosClient {
     playerId: string
   ): Promise<unknown> {
     const accessToken =
-      this.getAccessToken();
+      await this.getAccessToken();
 
     const response = await fetch(
       `${SONOS_API_BASE}/players/${encodeURIComponent(
@@ -206,7 +185,7 @@ export class SonosClient {
     volume: number,
     name: string
   ): Promise<unknown> {
-    const accessToken = this.getAccessToken();
+    const accessToken = await this.getAccessToken();
     const response = await fetch(
       `${SONOS_API_BASE}/players/${encodeURIComponent(playerId)}/audioClip`,
       {
