@@ -46,6 +46,104 @@ test('Research Lab identify route passes only the selected opaque device identit
   }
 });
 
+test('Research Lab presentation route saves and clears an alias without changing device ID', async () => {
+  const deviceId = 'opaque-device-presentation';
+  const aliases = new Map<string, string>();
+  const identifiedDeviceIds: string[] = [];
+  const discoveredDevice = {
+    id: deviceId,
+    provider: 'sonos',
+    name: 'Bonded component 2',
+    identity: {
+      providerIdentifierSuffix: 'component2',
+      logicalPlayerName: 'Living Room',
+    },
+    capabilities: ['audio-clip' as const],
+    diagnosticActions: [],
+    topology: [],
+    transports: [],
+  };
+  const app = express();
+  registerResearchLabDeviceRoute(app, {
+    async discoverDevices() {
+      return [discoveredDevice];
+    },
+    async identifyDevice(targetDeviceId) {
+      identifiedDeviceIds.push(targetDeviceId);
+    },
+    presentationStore: {
+      async apply(devices) {
+        return devices.map((device) => aliases.has(device.id)
+          ? { ...device, presentation: { alias: aliases.get(device.id) as string } }
+          : device);
+      },
+      async setAlias(targetDeviceId, alias) {
+        if (alias) {
+          aliases.set(targetDeviceId, alias);
+        } else {
+          aliases.delete(targetDeviceId);
+        }
+        return { deviceId: targetDeviceId, ...(alias ? { alias } : {}) };
+      },
+    },
+  });
+  const server = app.listen(0, '127.0.0.1');
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('listening', resolve);
+      server.once('error', reject);
+    });
+    const address = server.address() as AddressInfo;
+    const url = `http://127.0.0.1:${address.port}/api/research-lab/devices/` +
+      `${encodeURIComponent(deviceId)}/presentation`;
+    const renameResponse = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ alias: '  Desk  ' }),
+    });
+    const renamed = await renameResponse.json() as {
+      presentation: { deviceId: string; alias?: string };
+    };
+    assert.equal(renameResponse.status, 200);
+    assert.equal(renamed.presentation.deviceId, deviceId);
+    assert.equal(renamed.presentation.alias, 'Desk');
+
+    const discoveryResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/research-lab/devices`
+    );
+    const discovery = await discoveryResponse.json() as {
+      devices: Array<{ id: string; presentation?: { alias?: string } }>;
+    };
+    assert.equal(discovery.devices[0].id, deviceId);
+    assert.equal(discovery.devices[0].presentation?.alias, 'Desk');
+
+    const identifyResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/research-lab/devices/` +
+      `${encodeURIComponent(deviceId)}/identify`,
+      { method: 'POST' }
+    );
+    assert.equal(identifyResponse.status, 200);
+    assert.deepEqual(identifiedDeviceIds, [deviceId]);
+
+    const clearResponse = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ alias: null }),
+    });
+    const cleared = await clearResponse.json() as {
+      presentation: { deviceId: string; alias?: string };
+    };
+    assert.equal(clearResponse.status, 200);
+    assert.equal(cleared.presentation.deviceId, deviceId);
+    assert.equal(cleared.presentation.alias, undefined);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
 test('Research Lab identify route preserves structured Sonos errors', async () => {
   const app = express();
   registerResearchLabDeviceRoute(app, {

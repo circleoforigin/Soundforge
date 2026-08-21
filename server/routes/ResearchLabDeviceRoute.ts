@@ -1,9 +1,14 @@
-import type { Express } from 'express';
+import { json, type Express } from 'express';
 
 import type {
   AudioDeviceActionResponse,
   AudioDeviceDiscoveryResponse,
+  AudioDevicePresentationResponse,
 } from '../../src/models/ResearchLab.ts';
+import {
+  audioDevicePresentationStore,
+  type AudioDevicePresentationStore,
+} from '../research-lab/AudioDevicePresentationStore.ts';
 import {
   discoverSonosAudioDevices,
   identifySonosAudioDevice,
@@ -15,11 +20,13 @@ import { logSonosError } from '../sonos/SonosDiagnosticLog.ts';
 interface ResearchLabDeviceRouteDependencies {
   discoverDevices: typeof discoverSonosAudioDevices;
   identifyDevice: typeof identifySonosAudioDevice;
+  presentationStore?: Pick<AudioDevicePresentationStore, 'apply' | 'setAlias'>;
 }
 
 const defaultDependencies: ResearchLabDeviceRouteDependencies = {
   discoverDevices: discoverSonosAudioDevices,
   identifyDevice: identifySonosAudioDevice,
+  presentationStore: audioDevicePresentationStore,
 };
 
 function getSonosReason(details: unknown): string | null {
@@ -42,11 +49,15 @@ export function registerResearchLabDeviceRoute(
   app: Express,
   dependencies: ResearchLabDeviceRouteDependencies = defaultDependencies
 ): void {
+  const presentationStore =
+    dependencies.presentationStore ?? audioDevicePresentationStore;
+
   app.get('/api/research-lab/devices', async (_request, response) => {
     try {
+      const devices = await dependencies.discoverDevices();
       const result: AudioDeviceDiscoveryResponse = {
         ok: true,
-        devices: await dependencies.discoverDevices(),
+        devices: await presentationStore.apply(devices),
       };
       response.json(result);
     } catch (error) {
@@ -59,6 +70,54 @@ export function registerResearchLabDeviceRoute(
       });
     }
   });
+
+  app.put(
+    '/api/research-lab/devices/:deviceId/presentation',
+    json(),
+    async (request, response) => {
+      try {
+        const alias = (request.body as { alias?: unknown } | undefined)?.alias;
+        if (alias !== null && typeof alias !== 'string') {
+          response.status(400).json({
+            ok: false,
+            message: 'Alias must be a string or null.',
+          });
+          return;
+        }
+        const normalizedAlias = typeof alias === 'string' ? alias.trim() : null;
+        if (normalizedAlias && normalizedAlias.length > 80) {
+          response.status(400).json({
+            ok: false,
+            message: 'Alias must be 80 characters or fewer.',
+          });
+          return;
+        }
+        const devices = await dependencies.discoverDevices();
+        if (!devices.some((device) => device.id === request.params.deviceId)) {
+          response.status(404).json({
+            ok: false,
+            message: 'Physical device could not be resolved from current discovery.',
+          });
+          return;
+        }
+        const result: AudioDevicePresentationResponse = {
+          ok: true,
+          presentation: await presentationStore.setAlias(
+            request.params.deviceId,
+            normalizedAlias
+          ),
+        };
+        response.json(result);
+      } catch (error) {
+        response.status(500).json({
+          ok: false,
+          message: error instanceof Error
+            ? error.message
+            : 'Unable to save audio device presentation metadata.',
+        });
+      }
+    }
+  );
 
   app.post('/api/research-lab/devices/:deviceId/identify', async (request, response) => {
     try {

@@ -81,6 +81,7 @@ export function normalizeDiscoveredAudioDevices(payload: unknown): NormalizedAud
         })
       : [];
     const identity = isRecord(value.identity) ? value.identity : {};
+    const presentation = isRecord(value.presentation) ? value.presentation : {};
     const logicalPlayerName = typeof identity.logicalPlayerName === 'string'
       ? identity.logicalPlayerName
       : topology.find((node) => node.kind === 'logical-player')?.name ?? value.name;
@@ -111,6 +112,9 @@ export function normalizeDiscoveredAudioDevices(payload: unknown): NormalizedAud
       provider: value.provider,
       name: value.name,
       ...(typeof value.model === 'string' && value.model.trim() ? { model: value.model } : {}),
+      ...(typeof presentation.alias === 'string' && presentation.alias.trim()
+        ? { presentation: { alias: presentation.alias.trim() } }
+        : {}),
       identity: {
         providerIdentifierSuffix: typeof identity.providerIdentifierSuffix === 'string'
           ? identity.providerIdentifierSuffix

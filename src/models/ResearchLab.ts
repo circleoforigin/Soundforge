@@ -49,11 +49,17 @@ export interface AudioDeviceIdentityDetails {
   componentRole?: string;
 }
 
+export interface AudioDevicePresentationMetadata {
+  deviceId: string;
+  alias?: string;
+}
+
 export interface AudioDevice {
   id: string;
   provider: string;
   name: string;
   model?: string;
+  presentation?: Omit<AudioDevicePresentationMetadata, 'deviceId'>;
   identity: AudioDeviceIdentityDetails;
   capabilities: AudioDeviceCapability[];
   diagnosticActions: AudioDeviceDiagnosticAction[];
@@ -70,6 +76,11 @@ export interface AudioDeviceActionResponse {
   ok: true;
   deviceId: string;
   actionId: AudioDeviceDiagnosticAction['id'];
+}
+
+export interface AudioDevicePresentationResponse {
+  ok: true;
+  presentation: AudioDevicePresentationMetadata;
 }
 
 export type AudioStreamLifecycleState =

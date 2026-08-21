@@ -18,6 +18,7 @@ import type {
   AudioDevice,
   AudioDeviceActionResponse,
   AudioDeviceDiscoveryResponse,
+  AudioDevicePresentationResponse,
   AudioStreamListResponse,
   AudioStreamSnapshot,
   AudioStreamSnapshotResponse,
@@ -158,6 +159,14 @@ function ResearchDeviceCard({
   actionMessage,
   onStart,
   onIdentify,
+  editing,
+  aliasDraft,
+  savingAlias,
+  renameError,
+  onBeginRename,
+  onAliasDraftChange,
+  onSaveAlias,
+  onCancelRename,
 }: {
   device: AudioDevice;
   startingKey: string | null;
@@ -165,26 +174,69 @@ function ResearchDeviceCard({
   actionMessage?: DeviceActionMessage;
   onStart: (device: AudioDevice, transport: AudioTransportOption) => void;
   onIdentify: (device: AudioDevice) => void;
+  editing: boolean;
+  aliasDraft: string;
+  savingAlias: boolean;
+  renameError?: string;
+  onBeginRename: (device: AudioDevice) => void;
+  onAliasDraftChange: (value: string) => void;
+  onSaveAlias: (device: AudioDevice, alias: string | null) => void;
+  onCancelRename: () => void;
 }) {
+  const alias = device.presentation?.alias;
   return (
     <article className="research-device-card">
       <header>
         <div>
-          <h4>{device.model ?? device.name}</h4>
-          {device.model && <div>{device.name}</div>}
+          <h4>{alias ?? device.model ?? device.name}</h4>
+          {alias && device.model && <div>{device.model}</div>}
+          {(alias || device.model) && <div>{device.name}</div>}
           <div>{titleCase(device.provider)} · Physical Device</div>
         </div>
-        {device.diagnosticActions.map((action) => action.id === 'identify-speaker' && (
-          <button
-            key={action.id}
-            disabled={action.availability !== 'available' || identifying}
-            title={action.limitation ?? ''}
-            onClick={() => onIdentify(device)}
-          >
-            {identifying ? 'Identifying…' : action.name}
+        <div className="research-device-header-actions">
+          {device.diagnosticActions.map((action) => action.id === 'identify-speaker' && (
+            <button
+              key={action.id}
+              disabled={action.availability !== 'available' || identifying}
+              title={action.limitation ?? ''}
+              onClick={() => onIdentify(device)}
+            >
+              {identifying ? 'Identifying…' : action.name}
+            </button>
+          ))}
+          <button disabled={savingAlias} onClick={() => onBeginRename(device)}>
+            {alias ? 'Rename' : 'Set Name'}
           </button>
-        ))}
+        </div>
       </header>
+      {editing && (
+        <div className="research-alias-editor">
+          <input
+            autoFocus
+            maxLength={80}
+            placeholder="Friendly Research Lab name"
+            value={aliasDraft}
+            onChange={(event) => onAliasDraftChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                onSaveAlias(device, aliasDraft);
+              } else if (event.key === 'Escape') {
+                onCancelRename();
+              }
+            }}
+          />
+          <button disabled={savingAlias} onClick={() => onSaveAlias(device, aliasDraft)}>
+            {savingAlias ? 'Saving…' : 'Save'}
+          </button>
+          {alias && (
+            <button disabled={savingAlias} onClick={() => onSaveAlias(device, null)}>
+              Clear
+            </button>
+          )}
+          <button disabled={savingAlias} onClick={onCancelRename}>Cancel</button>
+        </div>
+      )}
+      {renameError && <div className="research-error-message">{renameError}</div>}
       {actionMessage && (
         <div className={actionMessage.error
           ? 'research-error-message'
@@ -384,6 +436,10 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [startingKey, setStartingKey] = useState<string | null>(null);
   const [identifyingDeviceId, setIdentifyingDeviceId] = useState<string | null>(null);
+  const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
+  const [aliasDraft, setAliasDraft] = useState('');
+  const [savingAlias, setSavingAlias] = useState(false);
+  const [renameErrors, setRenameErrors] = useState<Record<string, string>>({});
   const [deviceActionMessages, setDeviceActionMessages] = useState<
     Record<string, DeviceActionMessage>
   >({});
@@ -511,6 +567,59 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
     }
   }
 
+  function beginRename(device: AudioDevice) {
+    setEditingDeviceId(device.id);
+    setAliasDraft(device.presentation?.alias ?? '');
+    setRenameErrors((current) => {
+      const next = { ...current };
+      delete next[device.id];
+      return next;
+    });
+  }
+
+  async function saveAlias(device: AudioDevice, alias: string | null) {
+    setSavingAlias(true);
+    setRenameErrors((current) => {
+      const next = { ...current };
+      delete next[device.id];
+      return next;
+    });
+    try {
+      const response = await fetch(apiUrl(
+        `/api/research-lab/devices/${encodeURIComponent(device.id)}/presentation`
+      ), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alias }),
+      });
+      if (!response.ok) {
+        throw new Error(await readFailure(response, 'Unable to save device name.'));
+      }
+      const result = await response.json() as AudioDevicePresentationResponse;
+      setDevices((current) => current.map((candidate) =>
+        candidate.id === device.id
+          ? {
+              ...candidate,
+              ...(result.presentation.alias
+                ? { presentation: { alias: result.presentation.alias } }
+                : { presentation: undefined }),
+            }
+          : candidate
+      ));
+      setEditingDeviceId(null);
+      setAliasDraft('');
+    } catch (error) {
+      setRenameErrors((current) => ({
+        ...current,
+        [device.id]: error instanceof Error
+          ? sanitizedErrorMessage(error)
+          : 'Unable to save device name.',
+      }));
+    } finally {
+      setSavingAlias(false);
+    }
+  }
+
   async function runStreamAction(streamId: string, action: 'tone' | 'stop') {
     setBusyActions((current) => ({ ...current, [streamId]: action }));
     setActionError(null);
@@ -588,6 +697,17 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
                     onStart={(targetDevice, targetTransport) =>
                       void startStream(targetDevice, targetTransport)}
                     onIdentify={(targetDevice) => void identifySpeaker(targetDevice)}
+                    editing={editingDeviceId === device.id}
+                    aliasDraft={editingDeviceId === device.id ? aliasDraft : ''}
+                    savingAlias={savingAlias && editingDeviceId === device.id}
+                    renameError={renameErrors[device.id]}
+                    onBeginRename={beginRename}
+                    onAliasDraftChange={setAliasDraft}
+                    onSaveAlias={(targetDevice, alias) => void saveAlias(targetDevice, alias)}
+                    onCancelRename={() => {
+                      setEditingDeviceId(null);
+                      setAliasDraft('');
+                    }}
                   />
                 </ResearchLabErrorBoundary>
               ))}
