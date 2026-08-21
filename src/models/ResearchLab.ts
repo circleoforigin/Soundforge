@@ -100,6 +100,25 @@ export interface AudioStreamHttpClientSnapshot {
   backpressured: boolean;
 }
 
+export type AudioStreamTransportState =
+  | 'starting'
+  | 'binding'
+  | 'bound'
+  | 'stopping'
+  | 'stopped'
+  | 'error';
+
+export interface AudioStreamTransportSnapshot {
+  state: AudioStreamTransportState;
+  targetScope: AudioTransportScope | null;
+  targetDescription: string | null;
+  independentlyTargetable: boolean | null;
+  bound: boolean;
+  providerPlaybackState: string | null;
+  hasBinding: boolean;
+  lastError: string | null;
+}
+
 export interface AudioStreamSnapshot {
   id: string;
   deviceId?: string;
@@ -108,6 +127,7 @@ export interface AudioStreamSnapshot {
   source: AudioStreamSource;
   encoder: AudioStreamEncoderSnapshot;
   httpClient: AudioStreamHttpClientSnapshot;
+  transport: AudioStreamTransportSnapshot | null;
   createdAt: string;
   stoppedAt: string | null;
   lastError: string | null;

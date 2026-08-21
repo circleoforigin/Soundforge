@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { discoverSonosAudioDevices } from './SonosAudioDeviceDiscovery.ts';
+import {
+  discoverSonosAudioDevices,
+  resolveSonosAudioDevice,
+} from './SonosAudioDeviceDiscovery.ts';
 
 test('normalizes each Sonos physical device and keeps transport scope honest', async () => {
   const devices = await discoverSonosAudioDevices({
@@ -59,4 +62,33 @@ test('normalizes each Sonos physical device and keeps transport scope honest', a
     assert.equal(local?.availability, 'experimental');
     assert.match(local?.limitation ?? '', /not implemented/i);
   }
+});
+
+test('resolves opaque device identity back to current topology and standalone scope', async () => {
+  const client = {
+    async getHouseholds() {
+      return { households: [{ id: 'home' }] };
+    },
+    async getGroups() {
+      return {
+        groups: [{ id: 'solo-group', name: 'Office', playerIds: ['solo-player'] }],
+        players: [{
+          id: 'solo-player',
+          name: 'Office PLAY:1',
+          deviceIds: ['solo-physical'],
+          capabilities: ['PLAYBACK'],
+        }],
+      };
+    },
+  };
+  const [device] = await discoverSonosAudioDevices(client);
+  const resolved = await resolveSonosAudioDevice(device.id, client);
+  assert.ok(resolved);
+  assert.equal(resolved.physicalDeviceId, 'solo-physical');
+  assert.equal(resolved.group?.id, 'solo-group');
+  const cloud = device.transports.find((transport) =>
+    transport.id === 'sonos-cloud-continuous'
+  );
+  assert.equal(cloud?.scope, 'group');
+  assert.equal(cloud?.independentlyTargetable, true);
 });

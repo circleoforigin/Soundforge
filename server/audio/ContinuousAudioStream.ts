@@ -9,6 +9,7 @@ import type {
   AudioStreamLifecycleState,
   AudioStreamSnapshot,
   AudioStreamSource,
+  AudioStreamTransportSnapshot,
 } from '../../src/models/ResearchLab.ts';
 
 export const continuousAudioFormat = {
@@ -123,10 +124,21 @@ export class ContinuousAudioStream {
   private stdinBackpressured = false;
   private httpBackpressured = false;
   private lastError: string | null = null;
+  private transportSnapshot: AudioStreamTransportSnapshot | null;
   private readonly events: AudioStreamDiagnosticEvent[] = [];
 
   constructor(id: string, private readonly options: ContinuousAudioStreamOptions = {}) {
     this.id = id;
+    this.transportSnapshot = options.transportId ? {
+      state: 'starting',
+      targetScope: null,
+      targetDescription: null,
+      independentlyTargetable: null,
+      bound: false,
+      providerPlaybackState: null,
+      hasBinding: false,
+      lastError: null,
+    } : null;
     this.record('lifecycle', 'stream-created', 'Continuous audio stream created.');
   }
 
@@ -266,6 +278,31 @@ export class ContinuousAudioStream {
     this.record(category, 'external-diagnostic', message, details);
   }
 
+  updateTransport(
+    update: Partial<AudioStreamTransportSnapshot>,
+    message = 'Transport state updated.'
+  ): void {
+    if (!this.transportSnapshot) {
+      return;
+    }
+    this.transportSnapshot = { ...this.transportSnapshot, ...update };
+    this.record(
+      update.state === 'error' ? 'error' : 'lifecycle',
+      'transport-state',
+      message,
+      {
+        state: this.transportSnapshot.state,
+        targetScope: this.transportSnapshot.targetScope,
+        targetDescription: this.transportSnapshot.targetDescription,
+        independentlyTargetable: this.transportSnapshot.independentlyTargetable,
+        bound: this.transportSnapshot.bound,
+        providerPlaybackState: this.transportSnapshot.providerPlaybackState,
+        hasBinding: this.transportSnapshot.hasBinding,
+        lastError: this.transportSnapshot.lastError,
+      }
+    );
+  }
+
   getSnapshot(): AudioStreamSnapshot {
     const lifecycle = this.getLifecycleState();
     const source: AudioStreamSource = this.toneSamplesRemaining > 0
@@ -297,6 +334,18 @@ export class ContinuousAudioStream {
         writableLength: this.client?.writableLength ?? this.lastClientWritableLength,
         backpressured: this.httpBackpressured,
       },
+      transport: this.transportSnapshot ? {
+        ...this.transportSnapshot,
+        targetDescription: this.transportSnapshot.targetDescription
+          ? sanitizeDiagnosticText(this.transportSnapshot.targetDescription)
+          : null,
+        providerPlaybackState: this.transportSnapshot.providerPlaybackState
+          ? sanitizeDiagnosticText(this.transportSnapshot.providerPlaybackState)
+          : null,
+        lastError: this.transportSnapshot.lastError
+          ? sanitizeDiagnosticText(this.transportSnapshot.lastError)
+          : null,
+      } : null,
       createdAt: this.createdAt.toISOString(),
       stoppedAt: this.stoppedAt?.toISOString() ?? null,
       lastError: this.lastError ? sanitizeDiagnosticText(this.lastError) : null,

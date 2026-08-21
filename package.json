@@ -8,7 +8,7 @@
     "server": "node --env-file=.env.local server/index.ts",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "test:research-lab": "tsx --test server/audio/ContinuousAudioStream.test.ts server/research-lab/SonosAudioDeviceDiscovery.test.ts server/routes/ResearchLabStreamRoute.test.ts",
+    "test:research-lab": "tsx --test server/audio/ContinuousAudioStream.test.ts server/research-lab/SonosAudioDeviceDiscovery.test.ts server/research-lab/ResearchLabStreamService.test.ts server/sonos/SonosCloudContinuousStreamTransport.test.ts server/routes/ResearchLabStreamRoute.test.ts server/routes/SonosGroupStreamRoute.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

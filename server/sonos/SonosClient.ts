@@ -335,7 +335,8 @@ export class SonosClient {
   /** Temporary group-stream experiment; deliberately never falls back to audioClip. */
   async attachGroupStreamPlayback(
     groupId: string,
-    streamUrl: string
+    streamUrl: string,
+    appContext = `group-stream-test-${crypto.randomUUID()}`
   ): Promise<SonosGroupStreamTestResult> {
     const accessToken = await this.getAccessToken();
     const diagnosticBase = { groupId, streamUrl };
@@ -359,7 +360,7 @@ export class SonosClient {
       accessToken,
       {
         appId: 'com.circleoforigin.sacscape',
-        appContext: `group-stream-test-${crypto.randomUUID()}`,
+        appContext,
       },
       'Group playback session creation',
       diagnosticBase
@@ -405,6 +406,18 @@ export class SonosClient {
       sessionSubscription: sessionSubscription.data,
       loadStreamResponse: loadStreamResponse.data,
     };
+  }
+
+  async pauseGroupPlayback(groupId: string): Promise<unknown> {
+    const accessToken = await this.getAccessToken();
+    const result = await this.groupPlaybackRequest(
+      `/groups/${encodeURIComponent(groupId)}/playback/pause`,
+      accessToken,
+      undefined,
+      'Group playback pause',
+      { groupId }
+    );
+    return result.data;
   }
 
   private async groupPlaybackRequest(

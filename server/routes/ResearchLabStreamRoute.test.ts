@@ -9,13 +9,20 @@ import type {
   AudioStreamSnapshotResponse,
 } from '../../src/models/ResearchLab.ts';
 import { ContinuousAudioStreamManager } from '../audio/ContinuousAudioStreamManager.ts';
+import { ContinuousStreamTransportRegistry } from '../audio/transports/ContinuousStreamTransportRegistry.ts';
+import { ResearchLabStreamService } from '../research-lab/ResearchLabStreamService.ts';
 import { registerResearchLabStreamRoute } from './ResearchLabStreamRoute.ts';
 
 test('Research Lab stream diagnostics routes return list, snapshot, and not-found responses', async () => {
   const manager = new ContinuousAudioStreamManager();
   const stream = manager.create({ deviceId: 'route-test-device' });
+  const service = new ResearchLabStreamService(
+    manager,
+    new ContinuousStreamTransportRegistry(),
+    async () => []
+  );
   const app = express();
-  registerResearchLabStreamRoute(app, manager);
+  registerResearchLabStreamRoute(app, { manager, service });
   const server = app.listen(0, '127.0.0.1');
 
   try {

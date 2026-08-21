@@ -16,6 +16,14 @@ interface SonosDiscoveryClient {
   getGroups(householdId: string): ReturnType<SonosClient['getGroups']>;
 }
 
+export interface ResolvedSonosAudioDevice {
+  device: AudioDevice;
+  physicalDeviceId: string;
+  player: SonosPlayer;
+  group: SonosGroup | undefined;
+  householdId: string;
+}
+
 function opaqueId(kind: string, providerId: string): string {
   const digest = crypto
     .createHash('sha256')
@@ -118,6 +126,30 @@ function createTransports(
   ];
 }
 
+function createAudioDevice(
+  householdId: string,
+  group: SonosGroup | undefined,
+  player: SonosPlayer,
+  deviceId: string,
+  index: number
+): AudioDevice {
+  const name = player.deviceIds.length === 1
+    ? player.name
+    : `${player.name} — bonded component ${index + 1}`;
+  return {
+    id: opaqueId('device', deviceId),
+    provider: 'sonos',
+    name,
+    ...(player.model ? { model: player.model } : {}),
+    capabilities: [
+      ...(player.capabilities?.includes('AUDIO_CLIP') ? ['audio-clip' as const] : []),
+      ...(group ? ['continuous-stream' as const] : []),
+    ],
+    topology: createTopology(householdId, group, player, deviceId),
+    transports: createTransports(player, group),
+  };
+}
+
 export async function discoverSonosAudioDevices(
   client: SonosDiscoveryClient = new SonosClient()
 ): Promise<AudioDevice[]> {
@@ -129,26 +161,43 @@ export async function discoverSonosAudioDevices(
     for (const player of topology.players) {
       const group = findOwningGroup(topology.groups, player.id);
       for (const [index, deviceId] of player.deviceIds.entries()) {
-        const name = player.deviceIds.length === 1
-          ? player.name
-          : `${player.name} — bonded component ${index + 1}`;
-        devices.push({
-          id: opaqueId('device', deviceId),
-          provider: 'sonos',
-          name,
-          ...(player.model ? { model: player.model } : {}),
-          capabilities: [
-            ...(player.capabilities?.includes('AUDIO_CLIP')
-              ? ['audio-clip' as const]
-              : []),
-            ...(group ? ['continuous-stream' as const] : []),
-          ],
-          topology: createTopology(household.id, group, player, deviceId),
-          transports: createTransports(player, group),
-        });
+        devices.push(createAudioDevice(household.id, group, player, deviceId, index));
       }
     }
   }
 
   return devices;
+}
+
+
+export async function resolveSonosAudioDevice(
+  genericDeviceId: string,
+  client: SonosDiscoveryClient = new SonosClient()
+): Promise<ResolvedSonosAudioDevice | undefined> {
+  const households = await client.getHouseholds();
+  for (const household of households.households) {
+    const topology = await client.getGroups(household.id);
+    for (const player of topology.players) {
+      const group = findOwningGroup(topology.groups, player.id);
+      for (const [index, physicalDeviceId] of player.deviceIds.entries()) {
+        const device = createAudioDevice(
+          household.id,
+          group,
+          player,
+          physicalDeviceId,
+          index
+        );
+        if (device.id === genericDeviceId) {
+          return {
+            device,
+            physicalDeviceId,
+            player,
+            group,
+            householdId: household.id,
+          };
+        }
+      }
+    }
+  }
+  return undefined;
 }

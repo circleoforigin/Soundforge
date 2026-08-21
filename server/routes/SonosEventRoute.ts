@@ -6,6 +6,7 @@ import {
 } from '../sonos/SonosAudioClipDiagnostics.ts';
 import { logSonosError, logSonosInfo } from '../sonos/SonosDiagnosticLog.ts';
 import { sonosContinuousGroupStream } from '../sonos/SonosContinuousGroupStream.ts';
+import { sonosCloudContinuousStreamTransport } from '../sonos/SonosCloudContinuousStreamTransport.ts';
 
 function header(request: Request, name: string): string {
   const value = request.header(name);
@@ -75,6 +76,10 @@ export function registerSonosEventRoute(app: Express): void {
         });
         const eventBody = request.body as { playbackState?: unknown };
         if (namespace === 'playback' && type === 'playbackError') {
+          sonosCloudContinuousStreamTransport.handlePlaybackError(
+            targetValue,
+            request.body as Record<string, unknown>
+          );
           sonosContinuousGroupStream.invalidateGroupStream(
             targetValue,
             'Sonos playbackError event'
@@ -84,11 +89,19 @@ export function registerSonosEventRoute(app: Express): void {
           type === 'playbackStatus' &&
           typeof eventBody.playbackState === 'string'
         ) {
+          sonosCloudContinuousStreamTransport.handlePlaybackState(
+            targetValue,
+            eventBody.playbackState
+          );
           sonosContinuousGroupStream.handlePlaybackState(
             targetValue,
             eventBody.playbackState
           );
         } else if (namespace === 'playbackSession' && /error/i.test(type)) {
+          sonosCloudContinuousStreamTransport.handleSessionError(
+            targetValue,
+            request.body as Record<string, unknown>
+          );
           sonosContinuousGroupStream.invalidateAttachmentBySessionId(
             targetValue,
             `Sonos playback-session ${type} event`

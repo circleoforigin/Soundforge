@@ -88,7 +88,7 @@ app.use((request, response, next) => {
 
     response.header(
       'Access-Control-Allow-Methods',
-      'GET, HEAD, POST, OPTIONS'
+      'GET, HEAD, POST, DELETE, OPTIONS'
     );
   }
 
