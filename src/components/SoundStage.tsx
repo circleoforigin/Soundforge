@@ -25,6 +25,7 @@ import type { SpeakerMap } from '../models/SpeakerMap';
 import type { SoundAsset } from '../models/SoundAsset';
 import type { DeployedSceneObjectInstance } from '../models/DeployedSceneObjectInstance';
 import { useOutsidePointerDown } from '../hooks/useOutsidePointerDown';
+import { getBalancedFieldPositionalMix } from '../utils/balancedFieldRouting';
 
 interface SoundStageProps {
   scene: SceneInstance;
@@ -446,6 +447,26 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       : [];
   }
 
+  function getSonosSpeakerMixForNode(node: SceneObjectInstance) {
+    const fullSpatialMix = getRoomSpeakerMixForNode(node);
+
+    if ((activeSpeakerMap.spatialOutputMode ?? 'balanced') === 'fullSpatial') {
+      return fullSpatialMix;
+    }
+
+    if (!node.position) {
+      throw new Error('Unable to determine this sound\'s Spatial Field position.');
+    }
+
+    return getBalancedFieldPositionalMix(
+      node.position,
+      activeSpeakerMap.speakers,
+      speakerGeometry,
+      centerRadius,
+      fullVolumeRadius
+    );
+  }
+
   function handleToggleNodePlayback(
     node: SceneObjectInstance
   ) {
@@ -557,9 +578,15 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
           asset,
           node,
           speakerMap: activeSpeakerMap,
-          speakerMix: getRoomSpeakerMixForNode(node),
+          speakerMix: getSonosSpeakerMixForNode(node),
           sceneOneShotVolume: scene.volume.oneShot,
           sceneMasterVolume: scene.volume.master,
+          balancedFieldRoute:
+            (activeSpeakerMap.spatialOutputMode ?? 'balanced') === 'balanced'
+              ? getDistanceFromCenter(node.position ?? { x: 0, y: 0 }) <= centerRadius
+                ? 'center'
+                : 'directional'
+              : undefined,
           roomSpeakerNames: new Map(
             activeRoom?.speakers.map((speaker) => [speaker.speakerId, speaker.name]) ?? []
           ),

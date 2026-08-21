@@ -81,8 +81,7 @@ function RoomLayer({
             <div className="room-speaker-icon" />
 
             <div className="room-speaker-label">
-              {mappedSpeaker?.displayName ??
-                roomSpeaker.name}
+              {roomSpeaker.name}
             </div>
 
             {geometry && (

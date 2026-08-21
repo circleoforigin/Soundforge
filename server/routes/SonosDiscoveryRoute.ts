@@ -107,16 +107,49 @@ export function registerSonosDiscoveryRoute(
   );
 
   app.post(
+    '/api/sonos/resolve-logical-player',
+    json(),
+    async (request, response) => {
+      try {
+        const { deviceIds } = request.body as { deviceIds?: unknown };
+        if (
+          !Array.isArray(deviceIds) ||
+          !deviceIds.every((deviceId) => typeof deviceId === 'string')
+        ) {
+          response.status(400).json({
+            ok: false,
+            message: 'An array of Sonos physical device IDs is required.',
+          });
+          return;
+        }
+
+        const client = new SonosClient();
+        const resolution = await client.resolveLogicalPlayerForDevices(deviceIds);
+        response.json({ ok: true, ...resolution });
+      } catch (error) {
+        logSonosError('Sonos logical-player resolution failed.', error);
+        response.status(409).json({
+          ok: false,
+          message: error instanceof Error
+            ? error.message
+            : 'Unable to resolve the logical Sonos player.',
+        });
+      }
+    }
+  );
+
+  app.post(
     '/api/sonos/audio-clip/:playerId',
     json(),
     async (request, response) => {
       try {
-        const { streamUrl, volume, name, assetId, assetName } = request.body as {
+        const { streamUrl, volume, name, assetId, assetName, routingKind } = request.body as {
           streamUrl?: string;
           volume?: number;
           name?: string;
           assetId?: string;
           assetName?: string;
+          routingKind?: string;
         };
 
         if (
@@ -155,7 +188,11 @@ export function registerSonosDiscoveryRoute(
           Number(volume),
           name?.trim() || 'SACscape One Shot',
           assetId?.trim() || 'unknown',
-          assetName?.trim() || name?.trim() || 'Unknown asset'
+          assetName?.trim() || name?.trim() || 'Unknown asset',
+          routingKind === 'logical-player center' ||
+            routingKind === 'physical-device directional'
+            ? routingKind
+            : undefined
         );
 
         response.json({ ok: true, sonosResponse });

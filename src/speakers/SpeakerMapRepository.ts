@@ -7,6 +7,15 @@ import {
 const SPEAKER_MAPS_KEY =
   'speakerMaps';
 
+function normalizeSpeakerMap(map: SpeakerMap): SpeakerMap {
+  return {
+    ...map,
+    spatialOutputMode:
+      map.spatialOutputMode ??
+      (map.adapterType === 'sonos' ? 'balanced' : 'fullSpatial'),
+  };
+}
+
 export class SpeakerMapRepository {
   loadSpeakerMaps(): SpeakerMap[] {
     const maps =
@@ -17,9 +26,17 @@ export class SpeakerMapRepository {
         []
       );
 
-    return Array.isArray(maps)
-      ? maps
-      : [];
+    if (!Array.isArray(maps)) {
+      return [];
+    }
+
+    const normalizedMaps = maps.map(normalizeSpeakerMap);
+
+    if (maps.some((map) => !map.spatialOutputMode)) {
+      this.saveSpeakerMaps(normalizedMaps);
+    }
+
+    return normalizedMaps;
   }
 
   saveSpeakerMaps(
@@ -34,25 +51,26 @@ export class SpeakerMapRepository {
   saveSpeakerMap(
     speakerMap: SpeakerMap
   ): SpeakerMap[] {
+    const normalizedSpeakerMap = normalizeSpeakerMap(speakerMap);
     const maps =
       this.loadSpeakerMaps();
 
     const exists =
       maps.some(
         (map) =>
-          map.id === speakerMap.id
+          map.id === normalizedSpeakerMap.id
       );
 
     const updatedMaps =
       exists
         ? maps.map((map) =>
-            map.id === speakerMap.id
-              ? speakerMap
+            map.id === normalizedSpeakerMap.id
+              ? normalizedSpeakerMap
               : map
           )
         : [
             ...maps,
-            speakerMap,
+            normalizedSpeakerMap,
           ];
 
     this.saveSpeakerMaps(

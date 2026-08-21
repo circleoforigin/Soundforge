@@ -12,6 +12,7 @@ interface SonosOneShotRequest {
   sceneOneShotVolume: number;
   sceneMasterVolume: number;
   roomSpeakerNames: ReadonlyMap<string, string>;
+  balancedFieldRoute?: 'center' | 'directional';
 }
 
 export interface SonosOneShotTargetResult {
@@ -37,6 +38,26 @@ async function getErrorMessage(response: Response, fallback: string) {
   } catch {
     return fallback;
   }
+}
+
+async function resolveLogicalPlayer(deviceIds: string[]): Promise<{
+  playerId: string;
+  playerName: string;
+}> {
+  const response = await fetch(apiUrl('/api/sonos/resolve-logical-player'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceIds }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(
+      response,
+      'Unable to resolve the logical Sonos player for center playback.'
+    ));
+  }
+
+  return response.json() as Promise<{ playerId: string; playerName: string }>;
 }
 
 async function performLocalAssetSynchronization(asset: SoundAsset): Promise<string> {
@@ -143,17 +164,12 @@ export async function playSonosOneShot({
   sceneOneShotVolume,
   sceneMasterVolume,
   roomSpeakerNames,
+  balancedFieldRoute,
 }: SonosOneShotRequest): Promise<SonosOneShotTargetResult[]> {
   if (node.muted) {
     return [];
   }
 
-  const streamUrl = await resolveSonosStreamUrl(asset);
-  const spatialGains = new Map(
-    speakerMix.map((speaker) => [speaker.speakerId, speaker.gain])
-  );
-  const baseGain = dbToLinear(node.gainDb ?? 0) *
-    sceneOneShotVolume * sceneMasterVolume;
   const mappedSpeakers = speakerMap.speakers.filter(
     (speaker) => speaker.enabled && speaker.deviceId
   );
@@ -162,29 +178,54 @@ export async function playSonosOneShot({
     throw new Error('No enabled Sonos speakers are assigned to this Room.');
   }
 
-  const targets = mappedSpeakers.flatMap((speaker) => {
-    const effectiveGain = baseGain *
-      (spatialGains.get(speaker.speakerId) ?? 0) *
-      dbToLinear(speaker.trim ?? 0);
+  const spatialGains = new Map(
+    speakerMix.map((speaker) => [speaker.speakerId, speaker.gain])
+  );
+  const baseGain = dbToLinear(node.gainDb ?? 0) *
+    sceneOneShotVolume * sceneMasterVolume;
+  const routedSpeakers = mappedSpeakers.filter(
+    (speaker) => (spatialGains.get(speaker.speakerId) ?? 0) > 0
+  );
 
-    return effectiveGain > 0
-      ? [{
+  const targets = balancedFieldRoute === 'center'
+    ? await (async () => {
+        const logicalPlayer = await resolveLogicalPlayer(
+          routedSpeakers.map((speaker) => speaker.deviceId)
+        );
+        return [{
+          speakerId: logicalPlayer.playerId,
+          playerId: logicalPlayer.playerId,
+          label: logicalPlayer.playerName || 'Sonos logical player',
+          volume: Math.min(100, baseGain * 100),
+          routingKind: 'logical-player center' as const,
+        }];
+      })()
+    : routedSpeakers.map((speaker) => {
+        const effectiveGain = baseGain *
+          (spatialGains.get(speaker.speakerId) ?? 0) *
+          dbToLinear(speaker.trim ?? 0);
+
+        return {
           speakerId: speaker.speakerId,
           playerId: speaker.deviceId,
           label: roomSpeakerNames.get(speaker.speakerId) ||
             speaker.displayName ||
             speaker.speakerId,
           volume: Math.min(100, effectiveGain * 100),
-        }]
-      : [];
-  });
+          routingKind: balancedFieldRoute === 'directional'
+            ? 'physical-device directional' as const
+            : undefined,
+        };
+      });
 
   if (targets.length === 0) {
     return [];
   }
 
+  const streamUrl = await resolveSonosStreamUrl(asset);
+
   return Promise.all(
-    targets.map(async ({ speakerId, playerId, label, volume }) => {
+    targets.map(async ({ speakerId, playerId, label, volume, routingKind }) => {
       try {
         const response = await fetch(
           apiUrl(`/api/sonos/audio-clip/${encodeURIComponent(playerId)}`),
@@ -197,6 +238,7 @@ export async function playSonosOneShot({
               name: node.instanceName || asset.name || 'SACscape One Shot',
               assetId: asset.id,
               assetName: asset.name,
+              routingKind,
             }),
           }
         );

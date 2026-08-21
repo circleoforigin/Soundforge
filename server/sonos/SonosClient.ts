@@ -31,6 +31,11 @@ export interface SonosGroupsResponse {
   players: SonosPlayer[];
 }
 
+export interface SonosLogicalPlayerResolution {
+  playerId: string;
+  playerName: string;
+}
+
 export class SonosApiError extends Error {
   status: number;
   details: unknown;
@@ -119,6 +124,56 @@ export class SonosClient {
   return data as SonosGroupsResponse;
 }
 
+  async resolveLogicalPlayerForDevices(
+    deviceIds: string[]
+  ): Promise<SonosLogicalPlayerResolution> {
+    const requestedDeviceIds = [...new Set(deviceIds.filter(Boolean))];
+    if (requestedDeviceIds.length === 0) {
+      throw new Error('No Sonos physical device IDs were provided.');
+    }
+
+    const households = await this.getHouseholds();
+    const owningPlayers = new Map<string, SonosPlayer>();
+
+    for (const household of households.households) {
+      const groups = await this.getGroups(household.id);
+      for (const deviceId of requestedDeviceIds) {
+        const player = groups.players.find((candidate) =>
+          candidate.deviceIds?.includes(deviceId)
+        );
+        if (player) {
+          owningPlayers.set(deviceId, player);
+        }
+      }
+    }
+
+    const unresolvedDeviceIds = requestedDeviceIds.filter(
+      (deviceId) => !owningPlayers.has(deviceId)
+    );
+    if (unresolvedDeviceIds.length > 0) {
+      throw new Error(
+        `Unable to resolve the logical Sonos player for: ${unresolvedDeviceIds.join(', ')}.`
+      );
+    }
+
+    const playerIds = new Set(
+      [...owningPlayers.values()].map((player) => player.id)
+    );
+    if (playerIds.size !== 1) {
+      throw new Error(
+        'Center-circle Sonos speakers span multiple logical players. ' +
+        'Balanced Field cannot synchronize across multiple logical players yet.'
+      );
+    }
+
+    const player = owningPlayers.get(requestedDeviceIds[0]);
+    if (!player) {
+      throw new Error('Unable to determine the owning logical Sonos player.');
+    }
+
+    return { playerId: player.id, playerName: player.name };
+  }
+
   async playTestTone(
     playerId: string
   ): Promise<unknown> {
@@ -178,7 +233,8 @@ export class SonosClient {
     volume: number,
     name: string,
     assetId: string,
-    assetName: string
+    assetName: string,
+    routingKind?: 'logical-player center' | 'physical-device directional'
   ): Promise<unknown> {
     const calculatedVolume = Math.max(1, Math.min(100, Math.round(volume)));
     const diagnosticBase = {
@@ -189,6 +245,7 @@ export class SonosClient {
       clipName: name,
       volume: calculatedVolume,
       streamUrl,
+      routingKind: routingKind ?? null,
     };
 
     logSonosInfo('AUDIO_CLIP', 'Sonos custom audioClip attempt.', diagnosticBase);

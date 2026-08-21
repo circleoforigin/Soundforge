@@ -10,6 +10,7 @@ export const headphonesSpeakerMap: SpeakerMap = {
   updatedAt: now,
 
   adapterType: 'browser-stereo',
+  spatialOutputMode: 'fullSpatial',
 
   speakers: [
     {

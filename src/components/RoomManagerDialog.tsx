@@ -300,6 +300,7 @@ function RoomManagerDialog({
     updatedAt: now,
 
     adapterType: 'none',
+    spatialOutputMode: 'fullSpatial',
 
     speakers:
       room.speakers.map(
@@ -638,6 +639,10 @@ function RoomManagerDialog({
     setDraftSpeakerMap({
       ...draftSpeakerMap,
       adapterType: 'sonos',
+      spatialOutputMode:
+        draftSpeakerMap.adapterType === 'sonos'
+          ? draftSpeakerMap.spatialOutputMode
+          : 'balanced',
       speakers: draftSpeakerMap.speakers.map((speaker) =>
         speaker.speakerId === speakerId
           ? {
@@ -945,6 +950,10 @@ function RoomManagerDialog({
                 ...draftSpeakerMap,
 
                 adapterType,
+                spatialOutputMode:
+                  adapterType === 'sonos' && draftSpeakerMap.adapterType !== 'sonos'
+                    ? 'balanced'
+                    : draftSpeakerMap.spatialOutputMode,
               });
 
               if (
@@ -964,6 +973,33 @@ function RoomManagerDialog({
             </option>
           </select>
         </div>
+
+        {draftSpeakerMap.adapterType === 'sonos' && (
+          <div className="room-feature-row room-spatial-mode-row">
+            <label>Spatial Mode</label>
+
+            <div>
+              <select
+                value={draftSpeakerMap.spatialOutputMode ?? 'balanced'}
+                onChange={(event) =>
+                  setDraftSpeakerMap({
+                    ...draftSpeakerMap,
+                    spatialOutputMode: event.target.value === 'fullSpatial'
+                      ? 'fullSpatial'
+                      : 'balanced',
+                  })
+                }
+              >
+                <option value="balanced">Balanced Field</option>
+                <option value="fullSpatial">Full Spatial Mix (Experimental)</option>
+              </select>
+
+              <small>
+                Balanced Field avoids multi-speaker synchronization outside the center.
+              </small>
+            </div>
+          </div>
+        )}
 
         <div className="room-feature-section">
           Speaker Mapping
