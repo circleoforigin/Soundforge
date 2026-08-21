@@ -2,6 +2,7 @@ import {
   getValidSonosAccessToken,
 } from './SonosTokenStore.ts';
 import { logSonosError, logSonosInfo } from './SonosDiagnosticLog.ts';
+import { rememberAudioClip } from './SonosAudioClipDiagnostics.ts';
 
 const SONOS_API_BASE =
   'https://api.ws.sonos.com/control/api/v1';
@@ -194,6 +195,7 @@ export class SonosClient {
 
     try {
       const accessToken = await this.getAccessToken();
+      await this.subscribeToAudioClipStatus(playerId, accessToken);
       const response = await fetch(
         `${SONOS_API_BASE}/players/${encodeURIComponent(playerId)}/audioClip`,
         {
@@ -239,6 +241,11 @@ export class SonosClient {
         throw new SonosApiError(response.status, data);
       }
 
+      const clipId = responseObject?.id ?? responseObject?.audioClip?.id;
+      if (typeof clipId === 'string') {
+        rememberAudioClip(playerId, clipId, assetId, assetName);
+      }
+
       return data;
     } catch (error) {
       if (!(error instanceof SonosApiError)) {
@@ -252,6 +259,44 @@ export class SonosClient {
       }
 
       throw error;
+    }
+  }
+
+  private async subscribeToAudioClipStatus(
+    playerId: string,
+    accessToken: string
+  ): Promise<void> {
+    try {
+      const response = await fetch(
+        `${SONOS_API_BASE}/players/${encodeURIComponent(playerId)}/audioClip/subscription`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      const responseText = await response.text();
+
+      logSonosInfo('AUDIO_CLIP', 'Sonos audioClip subscription response.', {
+        playerId,
+        httpStatus: response.status,
+        responseBody: responseText || null,
+      });
+
+      if (!response.ok) {
+        logSonosError('Sonos audioClip subscription failed; continuing playback.', {
+          playerId,
+          httpStatus: response.status,
+          responseBody: responseText || null,
+        });
+      }
+    } catch (error) {
+      logSonosError('Sonos audioClip subscription failed; continuing playback.', {
+        playerId,
+        error,
+      });
     }
   }
 }

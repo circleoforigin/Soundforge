@@ -42,6 +42,9 @@ import {
 import {
   registerSonosMediaRoute,
 } from './routes/SonosMediaRoute.ts';
+import {
+  registerSonosEventRoute,
+} from './routes/SonosEventRoute.ts';
 import { initializeSonosTokenStore } from './sonos/SonosTokenStore.ts';
 
 const app = express();
@@ -153,6 +156,7 @@ registerLibraryManifestRoute(app);
 registerSonosAuthRoute(app);
 registerSonosDiscoveryRoute(app);
 registerSonosMediaRoute(app);
+registerSonosEventRoute(app);
 
 app.listen(PORT, () => {
   console.log(
