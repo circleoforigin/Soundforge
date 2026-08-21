@@ -82,11 +82,11 @@ export function registerSonosEventRoute(app: Express): void {
         } else if (
           namespace === 'playback' &&
           type === 'playbackStatus' &&
-          eventBody.playbackState === 'PLAYBACK_STATE_IDLE'
+          typeof eventBody.playbackState === 'string'
         ) {
-          sonosContinuousGroupStream.invalidateGroupStream(
+          sonosContinuousGroupStream.handlePlaybackState(
             targetValue,
-            'Sonos playback entered terminal idle state'
+            eventBody.playbackState
           );
         } else if (namespace === 'playbackSession' && /error/i.test(type)) {
           sonosContinuousGroupStream.invalidateAttachmentBySessionId(

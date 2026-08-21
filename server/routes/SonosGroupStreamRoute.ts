@@ -60,6 +60,7 @@ export function registerSonosGroupStreamRoute(app: Express): void {
       }
 
       const streamUrl = getPublicStreamUrl(request, groupId);
+      sonosContinuousGroupStream.beginAttachment(groupId);
       try {
         const result = await new SonosClient().attachGroupStreamPlayback(groupId, streamUrl);
         sonosContinuousGroupStream.markAttached(groupId, result.sessionId, streamUrl);
@@ -70,6 +71,10 @@ export function registerSonosGroupStreamRoute(app: Express): void {
         });
         response.json({ ok: true, alreadyAttached: false, result });
       } catch (error) {
+        sonosContinuousGroupStream.invalidateAttachment(
+          groupId,
+          'group stream attachment request failed'
+        );
         logSonosError('Continuous Sonos group stream attach failed.', {
           groupId,
           streamUrl,

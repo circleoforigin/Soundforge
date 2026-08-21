@@ -19,14 +19,22 @@ class SonosContinuousGroupStream {
   private readonly clients = new Map<Response, {
     groupId: string;
     details: Record<string, unknown>;
+    firstBytesWritten: boolean;
+    localCloseReason?: string;
   }>();
   private readonly attachedGroups = new Map<string, {
     sessionId: string;
     streamUrl: string;
   }>();
   private readonly backpressuredClients = new Set<Response>();
+  private readonly playbackStates = new Map<string, {
+    state: string;
+    hasReachedActiveState: boolean;
+  }>();
   private toneSamplesRemaining = 0;
   private tonePhase = 0;
+  private encoderStartedAt = 0;
+  private firstEncodedOutputLogged = false;
 
   addClient(
     groupId: string,
@@ -34,7 +42,11 @@ class SonosContinuousGroupStream {
     details: Record<string, unknown>
   ): void {
     this.ensureEncoder();
-    this.clients.set(response, { groupId, details });
+    this.clients.set(response, {
+      groupId,
+      details,
+      firstBytesWritten: false,
+    });
     logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream connected.', {
       ...details,
       groupId,
@@ -47,12 +59,15 @@ class SonosContinuousGroupStream {
         return;
       }
       disconnected = true;
+      const clientState = this.clients.get(response);
       this.clients.delete(response);
       this.backpressuredClients.delete(response);
       logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream disconnected.', {
         ...details,
         groupId,
         connectedClients: this.clients.size,
+        closedBy: clientState?.localCloseReason ? 'SACscape' : 'remote client',
+        localCloseReason: clientState?.localCloseReason ?? null,
       });
       this.resumeEncoderOutputIfDrained();
       if (!this.hasActiveClient(groupId)) {
@@ -79,6 +94,65 @@ class SonosContinuousGroupStream {
     this.attachedGroups.set(groupId, { sessionId, streamUrl });
   }
 
+  beginAttachment(groupId: string): void {
+    this.playbackStates.set(groupId, {
+      state: 'ATTACHING',
+      hasReachedActiveState: false,
+    });
+    logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream playback state initialized.', {
+      groupId,
+      state: 'ATTACHING',
+      hasReachedActiveState: false,
+    });
+  }
+
+  handlePlaybackState(groupId: string, nextState: string): void {
+    const lifecycle = this.playbackStates.get(groupId);
+    if (!lifecycle) {
+      logSonosInfo('GROUP_PLAYBACK', 'Ignoring playback state for an unattached group stream.', {
+        groupId,
+        nextState,
+      });
+      return;
+    }
+
+    const previousState = lifecycle.state;
+    const isActiveState =
+      nextState === 'PLAYBACK_STATE_BUFFERING' ||
+      nextState === 'PLAYBACK_STATE_PLAYING';
+    if (isActiveState) {
+      lifecycle.hasReachedActiveState = true;
+    }
+    lifecycle.state = nextState;
+
+    logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream playback-state transition.', {
+      groupId,
+      previousState,
+      nextState,
+      hasReachedActiveState: lifecycle.hasReachedActiveState,
+    });
+
+    if (nextState !== 'PLAYBACK_STATE_IDLE') {
+      return;
+    }
+    if (!lifecycle.hasReachedActiveState) {
+      logSonosInfo('GROUP_PLAYBACK', 'Initial Sonos group stream IDLE state ignored.', {
+        groupId,
+        previousState,
+        hasReachedActiveState: false,
+      });
+      return;
+    }
+
+    logSonosInfo('GROUP_PLAYBACK', 'Active Sonos group stream returned to IDLE.', {
+      groupId,
+      previousState,
+      hasReachedActiveState: true,
+      action: 'invalidate attachment',
+    });
+    this.invalidateGroupStream(groupId, 'active Sonos playback returned to IDLE');
+  }
+
   getAttachment(groupId: string): { sessionId: string; streamUrl: string } | undefined {
     return this.attachedGroups.get(groupId);
   }
@@ -98,13 +172,11 @@ class SonosContinuousGroupStream {
 
   invalidateAttachment(groupId: string, reason: string): void {
     const attachment = this.attachedGroups.get(groupId);
-    if (!attachment) {
-      return;
-    }
     this.attachedGroups.delete(groupId);
+    this.playbackStates.delete(groupId);
     logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream attachment invalidated.', {
       groupId,
-      sessionId: attachment.sessionId,
+      sessionId: attachment?.sessionId ?? null,
       reason,
     });
   }
@@ -121,7 +193,7 @@ class SonosContinuousGroupStream {
     this.invalidateAttachment(groupId, reason);
     for (const [response, client] of this.clients) {
       if (client.groupId === groupId) {
-        response.destroy();
+        this.closeClientLocally(response, reason);
       }
     }
   }
@@ -165,10 +237,31 @@ class SonosContinuousGroupStream {
     ], { windowsHide: true });
 
     this.encoder = encoder;
+    this.encoderStartedAt = Date.now();
+    this.firstEncodedOutputLogged = false;
     encoder.stdout.on('data', (chunk: Buffer) => {
+      if (!this.firstEncodedOutputLogged) {
+        this.firstEncodedOutputLogged = true;
+        logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream first encoded output.', {
+          timestamp: new Date().toISOString(),
+          millisecondsAfterEncoderStart: Date.now() - this.encoderStartedAt,
+          chunkBytes: chunk.length,
+        });
+      }
       for (const [client, clientState] of this.clients) {
         if (!client.destroyed && !client.writableEnded) {
           const accepted = client.write(chunk);
+          if (!clientState.firstBytesWritten) {
+            clientState.firstBytesWritten = true;
+            logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream first bytes written to client.', {
+              ...clientState.details,
+              timestamp: new Date().toISOString(),
+              groupId: clientState.groupId,
+              chunkBytes: chunk.length,
+              writableLength: client.writableLength,
+              millisecondsAfterEncoderStart: Date.now() - this.encoderStartedAt,
+            });
+          }
           if (!accepted && !this.backpressuredClients.has(client)) {
             this.backpressuredClients.add(client);
             encoder.stdout.pause();
@@ -207,7 +300,7 @@ class SonosContinuousGroupStream {
         [...this.clients.values()].map((client) => client.groupId)
       );
       for (const response of this.clients.keys()) {
-        response.destroy();
+        this.closeClientLocally(response, 'FFmpeg encoder exited');
       }
       for (const groupId of affectedGroups) {
         this.invalidateAttachment(groupId, 'FFmpeg encoder exited');
@@ -277,6 +370,14 @@ class SonosContinuousGroupStream {
     if (this.backpressuredClients.size === 0) {
       this.encoder?.stdout.resume();
     }
+  }
+
+  private closeClientLocally(response: Response, reason: string): void {
+    const client = this.clients.get(response);
+    if (client) {
+      client.localCloseReason = reason;
+    }
+    response.destroy();
   }
 }
 
