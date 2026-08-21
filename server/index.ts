@@ -39,6 +39,10 @@ import {
   registerSonosDiscoveryRoute,
 } from './routes/SonosDiscoveryRoute.ts';
 
+import {
+  registerSonosMediaRoute,
+} from './routes/SonosMediaRoute.ts';
+
 const app = express();
 
 const allowedClientOrigins = new Set([
@@ -67,6 +71,21 @@ app.use((request, response, next) => {
       'Vary',
       'Origin'
     );
+
+    response.header(
+      'Access-Control-Allow-Headers',
+      'Content-Type'
+    );
+
+    response.header(
+      'Access-Control-Allow-Methods',
+      'GET, HEAD, POST, OPTIONS'
+    );
+  }
+
+  if (request.method === 'OPTIONS') {
+    response.sendStatus(204);
+    return;
   }
 
   next();
@@ -130,6 +149,7 @@ registerLibraryImportRoute(app);
 registerLibraryManifestRoute(app);
 registerSonosAuthRoute(app);
 registerSonosDiscoveryRoute(app);
+registerSonosMediaRoute(app);
 
 app.listen(PORT, () => {
   console.log(

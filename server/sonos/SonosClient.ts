@@ -15,6 +15,14 @@ export interface SonosHouseholdsResponse {
 export interface SonosPlayer {
   id: string;
   name: string;
+  devices: SonosDevice[];
+}
+
+export interface SonosDevice {
+  id: string;
+  name?: string;
+  model?: string;
+  modelDisplayName?: string;
 }
 
 export interface SonosGroup {
@@ -187,6 +195,50 @@ export class SonosClient {
         response.status,
         data
       );
+    }
+
+    return data;
+  }
+
+  async playAudioClip(
+    playerId: string,
+    streamUrl: string,
+    volume: number,
+    name: string
+  ): Promise<unknown> {
+    const accessToken = this.getAccessToken();
+    const response = await fetch(
+      `${SONOS_API_BASE}/players/${encodeURIComponent(playerId)}/audioClip`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name,
+          appId: 'com.circleoforigin.sacscape',
+          priority: 'LOW',
+          clipType: 'CUSTOM',
+          streamUrl,
+          volume: Math.max(1, Math.min(100, Math.round(volume))),
+        }),
+      }
+    );
+    const responseText = await response.text();
+    let data: unknown = null;
+
+    if (responseText) {
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        data = responseText;
+      }
+    }
+
+    if (!response.ok) {
+      console.error('Sonos playAudioClip failed:', data);
+      throw new SonosApiError(response.status, data);
     }
 
     return data;

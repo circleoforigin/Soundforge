@@ -66,8 +66,6 @@ function App() {
   const [soundObjectTemplates] =
     useState<SoundObjectTemplate[]>([]);
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
-  const [activeSpeakerMap] =
-    useState<SpeakerMap>(headphonesSpeakerMap);
   const [customRooms, setCustomRooms] =  useState<Room[]>([]);
   const availableRooms: Room[] = [
     headphonesRoom,
@@ -78,6 +76,9 @@ function App() {
   const [showRoomManager, setShowRoomManager] =
     useState(false);
   const [speakerMaps, setSpeakerMaps] = useState<SpeakerMap[]>([]);
+  const activeSpeakerMap: SpeakerMap =
+    speakerMaps.find((speakerMap) => speakerMap.id === activeRoom?.speakerMapId) ??
+    headphonesSpeakerMap;
   
 useEffect(() => {
   async function loadSoundLibrary() {

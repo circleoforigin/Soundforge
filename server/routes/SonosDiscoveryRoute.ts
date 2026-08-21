@@ -1,4 +1,4 @@
-import type { Express } from 'express';
+import { json, type Express } from 'express';
 
 import {
   SonosApiError,
@@ -100,6 +100,68 @@ export function registerSonosDiscoveryRoute(
             error instanceof Error
               ? error.message
               : 'Unable to play Sonos test tone.',
+        });
+      }
+    }
+  );
+
+  app.post(
+    '/api/sonos/audio-clip/:playerId',
+    json(),
+    async (request, response) => {
+      try {
+        const { streamUrl, volume, name } = request.body as {
+          streamUrl?: string;
+          volume?: number;
+          name?: string;
+        };
+
+        if (
+          !streamUrl ||
+          !URL.canParse(streamUrl) ||
+          !streamUrl.startsWith('https://')
+        ) {
+          response.status(400).json({
+            ok: false,
+            message: 'A public HTTPS streamUrl is required.',
+          });
+          return;
+        }
+
+        if (!Number.isFinite(volume) || Number(volume) <= 0) {
+          response.status(400).json({
+            ok: false,
+            message: 'A positive clip volume is required.',
+          });
+          return;
+        }
+
+        const client = new SonosClient();
+        const sonosResponse = await client.playAudioClip(
+          request.params.playerId,
+          streamUrl,
+          Number(volume),
+          name?.trim() || 'SACscape One Shot'
+        );
+
+        response.json({ ok: true, sonosResponse });
+      } catch (error) {
+        console.error(error);
+
+        if (error instanceof SonosApiError) {
+          response.status(error.status).json({
+            ok: false,
+            message: error.message,
+            details: error.details,
+          });
+          return;
+        }
+
+        response.status(500).json({
+          ok: false,
+          message: error instanceof Error
+            ? error.message
+            : 'Unable to play Sonos audio clip.',
         });
       }
     }

@@ -11,6 +11,7 @@ import { getDistanceFromCenter } from '../utils/soundStageMath';
 import SoundNode from './SoundNode';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import type { PlaybackRouting } from '../audio/PlaybackEngine';
+import { playSonosOneShot } from '../audio/SonosOneShotOutput';
 import RoomLayer from './RoomLayer';
 import { getRoomSpeakerGeometry } from '../utils/roomSpeakerMath';
 import { getSpeakerMix } from '../utils/spatialMixMath';
@@ -181,6 +182,7 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       )
     : [];
   const sceneVolume = scene.volume;
+  const isSonosRoom = activeSpeakerMap.adapterType === 'sonos';
 
   useEffect(() => {
     playbackEngine.setSceneVolume(scene.instanceId, sceneVolume);
@@ -202,6 +204,12 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
     scene.positionalObjects,
     scene.ambientObjects,
   ]);
+
+  useEffect(() => {
+    if (isSonosRoom) {
+      playbackEngine.stopScene(scene.instanceId);
+    }
+  }, [isSonosRoom, scene.instanceId]);
 
   function getPositionFromPointer(
     clientX: number,
@@ -427,6 +435,17 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
     };
   }
 
+  function getRoomSpeakerMixForNode(node: SceneObjectInstance) {
+    return node.position
+      ? getSpeakerMix(
+          node.position,
+          speakerGeometry,
+          centerRadius,
+          fullVolumeRadius
+        )
+      : [];
+  }
+
   function handleToggleNodePlayback(
     node: SceneObjectInstance
   ) {
@@ -471,8 +490,17 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       return;
     }
 
-    const stereoMix =
-      getStereoMixForNode(node);
+    if (isSonosRoom) {
+      if (node.playbackMode !== 'oneShot') {
+        showFieldMessage('Sonos looping/ambience playback not implemented yet.');
+        return;
+      }
+
+      void handleStartNodePlayback(node);
+      return;
+    }
+
+    const stereoMix = getStereoMixForNode(node);
 
     void playbackEngine.toggle(
       node,
@@ -486,6 +514,11 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
     node: SceneObjectInstance,
     playing: boolean
   ) {
+    if (isSonosRoom) {
+      showFieldMessage('Sonos looping/ambience playback not implemented yet.');
+      return;
+    }
+
     if (playing) {
       void playbackEngine.stopNode(node);
       return;
@@ -510,6 +543,34 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
 
     if (!asset) {
       console.error(`Sound asset not found: ${soundAssetId}`);
+      return;
+    }
+
+    if (isSonosRoom) {
+      if (node.playbackMode !== 'oneShot') {
+        showFieldMessage('Sonos looping/ambience playback not implemented yet.');
+        return;
+      }
+
+      try {
+        await playSonosOneShot({
+          asset,
+          node,
+          speakerMap: activeSpeakerMap,
+          speakerMix: getRoomSpeakerMixForNode(node),
+          sceneOneShotVolume: scene.volume.oneShot,
+          sceneMasterVolume: scene.volume.master,
+        });
+
+        if (onComplete) {
+          window.setTimeout(onComplete, Math.max(250, asset.durationMs ?? 1000));
+        }
+      } catch (error) {
+        showFieldMessage(
+          error instanceof Error ? error.message : 'Unable to play this One Shot through Sonos.'
+        );
+      }
+
       return;
     }
 
@@ -645,6 +706,11 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       }
     },
     pauseNodes: (nodes) => {
+      if (isSonosRoom && nodes.length > 0) {
+        showFieldMessage('Sonos looping/ambience playback not implemented yet.');
+        return;
+      }
+
       for (const node of nodes) {
         void playbackEngine.pause(node);
       }
