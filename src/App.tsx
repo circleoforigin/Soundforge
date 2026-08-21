@@ -22,6 +22,7 @@ import NewRoomDialog, {
   type NewRoomData,
 } from './components/NewRoomDialog';
 import RoomManagerDialog from './components/RoomManagerDialog';
+import ResearchLabDialog from './components/ResearchLabDialog';
 import { speakerMapRepository } from './speakers/SpeakerMapRepository';
 import { projectRepository } from './projects/ProjectRepository';
 
@@ -74,6 +75,8 @@ function App() {
   const [showNewRoomDialog, setShowNewRoomDialog] =
     useState(false);
   const [showRoomManager, setShowRoomManager] =
+    useState(false);
+  const [showResearchLab, setShowResearchLab] =
     useState(false);
   const [speakerMaps, setSpeakerMaps] = useState<SpeakerMap[]>([]);
   const activeSpeakerMap: SpeakerMap =
@@ -756,6 +759,7 @@ useEffect(() => {
         onImportSound={handleImportSound}
         onNewRoom={handleNewRoom}
         onManageRooms={handleManageRooms}
+        onOpenResearchLab={() => setShowResearchLab(true)}
 
         rooms={availableRooms}
         activeRoomId={activeRoom?.id ?? null}
@@ -1021,6 +1025,10 @@ useEffect(() => {
             setSpeakerMaps(updatedMaps);
           }}
         />
+      )}
+
+      {showResearchLab && (
+        <ResearchLabDialog onClose={() => setShowResearchLab(false)} />
       )}
 
       {notification && (

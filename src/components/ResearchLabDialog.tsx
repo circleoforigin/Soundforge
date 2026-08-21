@@ -1,0 +1,444 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+
+import { apiUrl } from '../config/api';
+import type {
+  AudioDevice,
+  AudioDeviceDiscoveryResponse,
+  AudioStreamListResponse,
+  AudioStreamSnapshot,
+  AudioStreamSnapshotResponse,
+  AudioTopologyKind,
+  AudioTransportOption,
+  AudioTransportScope,
+} from '../models/ResearchLab';
+
+interface ResearchLabDialogProps {
+  onClose: () => void;
+}
+
+type ApiFailure = { message?: string; stream?: AudioStreamSnapshot };
+
+const terminalLifecycles = new Set(['stopped', 'error']);
+
+function titleCase(value: string): string {
+  return value
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatScope(scope: AudioTransportScope | null): string {
+  return scope ? titleCase(scope) : 'Not resolved';
+}
+
+function formatTopologyKind(kind: AudioTopologyKind): string {
+  return titleCase(kind);
+}
+
+function formatBytes(value: number): string {
+  if (value < 1_024) {
+    return `${value} B`;
+  }
+  if (value < 1_048_576) {
+    return `${(value / 1_024).toFixed(1)} KB`;
+  }
+  return `${(value / 1_048_576).toFixed(1)} MB`;
+}
+
+function formatTimestamp(value: string | null): string {
+  return value ? new Date(value).toLocaleString() : '—';
+}
+
+async function readFailure(response: Response, fallback: string): Promise<string> {
+  try {
+    const data = await response.json() as ApiFailure;
+    return data.message ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function TransportRow({
+  device,
+  transport,
+  busy,
+  onStart,
+}: {
+  device: AudioDevice;
+  transport: AudioTransportOption;
+  busy: boolean;
+  onStart: (device: AudioDevice, transport: AudioTransportOption) => void;
+}) {
+  const canStart =
+    transport.operation === 'persistent-stream' && transport.availability === 'available';
+  return (
+    <div className="research-transport-row">
+      <div className="research-transport-main">
+        <div className="research-transport-title">{transport.name}</div>
+        <div className="research-inline-badges">
+          <span className={`research-badge ${transport.availability}`}>
+            {titleCase(transport.availability)}
+          </span>
+          <span className="research-badge neutral">{formatScope(transport.scope)}</span>
+          <span className="research-badge neutral">
+            {transport.independentlyTargetable ? 'Independent' : 'Shared target'}
+          </span>
+        </div>
+        {transport.limitation && (
+          <div className="research-transport-limitation">{transport.limitation}</div>
+        )}
+      </div>
+      {canStart && (
+        <button disabled={busy} onClick={() => onStart(device, transport)}>
+          {busy ? 'Starting…' : 'Start Stream'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function DiagnosticValue({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="research-diagnostic-value">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function StreamExperiment({
+  stream,
+  device,
+  busyAction,
+  onTone,
+  onStop,
+}: {
+  stream: AudioStreamSnapshot;
+  device?: AudioDevice;
+  busyAction?: 'tone' | 'stop';
+  onTone: (streamId: string) => void;
+  onStop: (streamId: string) => void;
+}) {
+  const terminal = terminalLifecycles.has(stream.lifecycle);
+  const canTone = !terminal && stream.transport?.bound && stream.httpClient.connected;
+  return (
+    <article className={`research-stream-card ${stream.lifecycle === 'error' ? 'error' : ''}`}>
+      <header className="research-stream-header">
+        <div>
+          <h3>{device?.name ?? 'Audio stream experiment'}</h3>
+          <div className="research-stream-subtitle">
+            {stream.transportId ? titleCase(stream.transportId) : 'Unspecified transport'}
+          </div>
+        </div>
+        <span className={`research-badge ${terminal ? 'unavailable' : 'available'}`}>
+          {titleCase(stream.lifecycle)}
+        </span>
+      </header>
+
+      <div className="research-stream-actions">
+        <button
+          disabled={!canTone || Boolean(busyAction)}
+          title={!stream.httpClient.connected ? 'Waiting for the audio device to connect.' : ''}
+          onClick={() => onTone(stream.id)}
+        >
+          {busyAction === 'tone' ? 'Sending…' : 'Play Test Tone'}
+        </button>
+        <button disabled={terminal || Boolean(busyAction)} onClick={() => onStop(stream.id)}>
+          {busyAction === 'stop' ? 'Stopping…' : 'Stop Stream'}
+        </button>
+      </div>
+
+      {!terminal && !stream.httpClient.connected && (
+        <div className="research-waiting-message">
+          Stream is attached; waiting for the audio device’s HTTP client.
+        </div>
+      )}
+
+      <div className="research-diagnostic-sections">
+        <section>
+          <h4>Stream</h4>
+          <div className="research-diagnostic-grid">
+            <DiagnosticValue label="Lifecycle" value={titleCase(stream.lifecycle)} />
+            <DiagnosticValue label="Source" value={titleCase(stream.source)} />
+          </div>
+        </section>
+        <section>
+          <h4>Transport</h4>
+          <div className="research-diagnostic-grid">
+            <DiagnosticValue label="State" value={titleCase(stream.transport?.state ?? 'none')} />
+            <DiagnosticValue label="Target scope" value={formatScope(stream.transport?.targetScope ?? null)} />
+            <DiagnosticValue label="Target" value={stream.transport?.targetDescription ?? '—'} />
+            <DiagnosticValue
+              label="Independent"
+              value={stream.transport?.independentlyTargetable == null
+                ? '—'
+                : stream.transport.independentlyTargetable ? 'Yes' : 'No'}
+            />
+            <DiagnosticValue label="Bound" value={stream.transport?.bound ? 'Yes' : 'No'} />
+            <DiagnosticValue label="Provider playback" value={stream.transport?.providerPlaybackState ?? '—'} />
+          </div>
+          {stream.transport?.lastError && (
+            <div className="research-error-message">{stream.transport.lastError}</div>
+          )}
+        </section>
+        <section>
+          <h4>Encoder</h4>
+          <div className="research-diagnostic-grid">
+            <DiagnosticValue label="State" value={titleCase(stream.encoder.state)} />
+            <DiagnosticValue label="Format" value={`${stream.encoder.sampleRate.toLocaleString()} Hz · ${stream.encoder.channels} ch · ${(stream.encoder.bitrate / 1_000).toFixed(0)} kbps`} />
+            <DiagnosticValue label="Frames" value={stream.encoder.framesGenerated.toLocaleString()} />
+            <DiagnosticValue label="PCM bytes" value={formatBytes(stream.encoder.pcmBytesGenerated)} />
+            <DiagnosticValue label="Encoded bytes" value={formatBytes(stream.encoder.encodedBytesProduced)} />
+            <DiagnosticValue label="Input backpressure" value={stream.encoder.stdinBackpressured ? 'Yes' : 'No'} />
+          </div>
+        </section>
+        <section>
+          <h4>Connection</h4>
+          <div className="research-diagnostic-grid">
+            <DiagnosticValue label="Connected" value={stream.httpClient.connected ? 'Yes' : 'No'} />
+            <DiagnosticValue label="Connected at" value={formatTimestamp(stream.httpClient.connectedAt)} />
+            <DiagnosticValue label="Disconnected at" value={formatTimestamp(stream.httpClient.disconnectedAt)} />
+            <DiagnosticValue label="Delivered" value={formatBytes(stream.httpClient.deliveredBytes)} />
+            <DiagnosticValue label="Writable queue" value={formatBytes(stream.httpClient.writableLength)} />
+            <DiagnosticValue label="Backpressure" value={stream.httpClient.backpressured ? 'Yes' : 'No'} />
+          </div>
+        </section>
+      </div>
+
+      <details className="research-event-console">
+        <summary>Events ({stream.recentEvents.length})</summary>
+        <div className="research-events">
+          {stream.recentEvents.length === 0 ? (
+            <div className="research-empty">No diagnostic events yet.</div>
+          ) : stream.recentEvents.map((event, index) => (
+            <div key={`${event.timestamp}:${event.code}:${index}`} className={`research-event ${event.category}`}>
+              <time>{new Date(event.timestamp).toLocaleTimeString()}</time>
+              <span className="research-event-category">{event.category}</span>
+              <span>{event.message}</span>
+              {event.details && Object.keys(event.details).length > 0 && (
+                <pre>{JSON.stringify(event.details, null, 2)}</pre>
+              )}
+            </div>
+          ))}
+        </div>
+      </details>
+
+      <details className="research-identity-details">
+        <summary>Technical details</summary>
+        <div>Stream ID: <code>{stream.id}</code></div>
+        <div>Device ID: <code>{stream.deviceId ?? '—'}</code></div>
+        <div>Transport ID: <code>{stream.transportId ?? '—'}</code></div>
+        <div>Encoder PID: <code>{stream.encoder.pid ?? '—'}</code></div>
+        <div>Created: {formatTimestamp(stream.createdAt)}</div>
+        <div>Stopped: {formatTimestamp(stream.stoppedAt)}</div>
+      </details>
+    </article>
+  );
+}
+
+export default function ResearchLabDialog({ onClose }: ResearchLabDialogProps) {
+  const [devices, setDevices] = useState<AudioDevice[]>([]);
+  const [streams, setStreams] = useState<AudioStreamSnapshot[]>([]);
+  const [discovering, setDiscovering] = useState(true);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [startingKey, setStartingKey] = useState<string | null>(null);
+  const [busyActions, setBusyActions] = useState<Record<string, 'tone' | 'stop'>>({});
+
+  const refreshDevices = useCallback(async () => {
+    setDiscovering(true);
+    setDiscoveryError(null);
+    try {
+      const response = await fetch(apiUrl('/api/research-lab/devices'));
+      if (!response.ok) {
+        throw new Error(await readFailure(response, 'Unable to discover audio devices.'));
+      }
+      const data = await response.json() as AudioDeviceDiscoveryResponse;
+      setDevices(data.devices);
+    } catch (error) {
+      setDiscoveryError(error instanceof Error ? error.message : 'Unable to discover audio devices.');
+    } finally {
+      setDiscovering(false);
+    }
+  }, []);
+
+  const refreshStreams = useCallback(async () => {
+    try {
+      const response = await fetch(apiUrl('/api/research-lab/streams'));
+      if (!response.ok) {
+        throw new Error(await readFailure(response, 'Unable to load stream diagnostics.'));
+      }
+      const data = await response.json() as AudioStreamListResponse;
+      setStreams(data.streams);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Unable to load stream diagnostics.');
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void refreshDevices();
+      void refreshStreams();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [refreshDevices, refreshStreams]);
+
+  const hasActiveStreams = useMemo(
+    () => streams.some((stream) => !terminalLifecycles.has(stream.lifecycle)),
+    [streams]
+  );
+
+  useEffect(() => {
+    if (!hasActiveStreams) {
+      return;
+    }
+    const timer = window.setInterval(() => void refreshStreams(), 1_000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveStreams, refreshStreams]);
+
+  async function startStream(device: AudioDevice, transport: AudioTransportOption) {
+    const key = `${device.id}:${transport.id}`;
+    setStartingKey(key);
+    setActionError(null);
+    try {
+      const response = await fetch(apiUrl('/api/research-lab/streams'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: device.id, transportId: transport.id }),
+      });
+      if (!response.ok) {
+        throw new Error(await readFailure(response, 'Unable to start stream.'));
+      }
+      const data = await response.json() as AudioStreamSnapshotResponse;
+      setStreams((current) => [data.stream, ...current.filter((item) => item.id !== data.stream.id)]);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Unable to start stream.');
+    } finally {
+      setStartingKey(null);
+    }
+  }
+
+  async function runStreamAction(streamId: string, action: 'tone' | 'stop') {
+    setBusyActions((current) => ({ ...current, [streamId]: action }));
+    setActionError(null);
+    try {
+      const response = await fetch(apiUrl(
+        action === 'tone'
+          ? `/api/research-lab/streams/${encodeURIComponent(streamId)}/tone`
+          : `/api/research-lab/streams/${encodeURIComponent(streamId)}`
+      ), { method: action === 'tone' ? 'POST' : 'DELETE' });
+      const data = await response.json() as ApiFailure & Partial<AudioStreamSnapshotResponse>;
+      if (data.stream) {
+        setStreams((current) => current.map((stream) =>
+          stream.id === data.stream?.id ? data.stream : stream
+        ));
+      }
+      if (!response.ok) {
+        throw new Error(data.message ?? `Unable to ${action} stream.`);
+      }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : `Unable to ${action} stream.`);
+    } finally {
+      setBusyActions((current) => {
+        const next = { ...current };
+        delete next[streamId];
+        return next;
+      });
+    }
+  }
+
+  return (
+    <div className="dialog-backdrop research-lab-backdrop">
+      <div className="research-lab-dialog">
+        <header className="research-lab-header">
+          <div>
+            <h2>Research Lab</h2>
+            <p>Experimental audio devices, transports, streams, and diagnostics.</p>
+          </div>
+          <button onClick={onClose}>Close</button>
+        </header>
+
+        <div className="research-lab-content">
+          <section className="research-lab-panel">
+            <div className="research-section-heading">
+              <div>
+                <h3>Audio Devices</h3>
+                <p>Choose a physical device and an available experimental transport.</p>
+              </div>
+              <button disabled={discovering} onClick={() => void refreshDevices()}>
+                {discovering ? 'Discovering…' : 'Refresh Devices'}
+              </button>
+            </div>
+            {discoveryError && <div className="research-error-message">{discoveryError}</div>}
+            {!discovering && !discoveryError && devices.length === 0 && (
+              <div className="research-empty">No physical audio devices were discovered.</div>
+            )}
+            <div className="research-device-list">
+              {devices.map((device) => (
+                <article className="research-device-card" key={device.id}>
+                  <header>
+                    <div>
+                      <h4>{device.name}</h4>
+                      <div>{titleCase(device.provider)}{device.model ? ` · ${device.model}` : ''}</div>
+                    </div>
+                    <span className="research-badge neutral">Physical Device</span>
+                  </header>
+                  <div className="research-transport-list">
+                    {device.transports.map((transport) => (
+                      <TransportRow
+                        key={transport.id}
+                        device={device}
+                        transport={transport}
+                        busy={startingKey === `${device.id}:${transport.id}`}
+                        onStart={(targetDevice, targetTransport) =>
+                          void startStream(targetDevice, targetTransport)}
+                      />
+                    ))}
+                  </div>
+                  <details className="research-identity-details">
+                    <summary>Topology and identity</summary>
+                    <div>Device ID: <code>{device.id}</code></div>
+                    <div className="research-topology-list">
+                      {device.topology.map((node) => (
+                        <div key={node.id} className={node.selected ? 'selected' : ''}>
+                          <span>{formatTopologyKind(node.kind)}</span>
+                          <strong>{node.name}</strong>
+                          {node.selected && <em>Selected device</em>}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="research-lab-panel research-streams-panel">
+            <div className="research-section-heading">
+              <div>
+                <h3>Stream Experiments</h3>
+                <p>Live controls and sanitized runtime diagnostics.</p>
+              </div>
+            </div>
+            {actionError && <div className="research-error-message">{actionError}</div>}
+            {streams.length === 0 ? (
+              <div className="research-empty">Start an available continuous transport to begin.</div>
+            ) : (
+              <div className="research-stream-list">
+                {streams.map((stream) => (
+                  <StreamExperiment
+                    key={stream.id}
+                    stream={stream}
+                    device={devices.find((device) => device.id === stream.deviceId)}
+                    busyAction={busyActions[stream.id]}
+                    onTone={(streamId) => void runStreamAction(streamId, 'tone')}
+                    onStop={(streamId) => void runStreamAction(streamId, 'stop')}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}

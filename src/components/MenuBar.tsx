@@ -15,6 +15,7 @@ interface MenuBarProps {
   onImportSound: () => void;
   onNewRoom: () => void;
   onManageRooms: () => void;
+  onOpenResearchLab: () => void;
 
   rooms: Room[];
   activeRoomId: string | null;
@@ -33,6 +34,7 @@ function MenuBar({
   onImportSound,
   onNewRoom,
   onManageRooms,
+  onOpenResearchLab,
   rooms,
   activeRoomId,
   onSelectRoom,
@@ -55,11 +57,15 @@ function MenuBar({
   const [roomsMenuOpen, setRoomsMenuOpen] =
     useState(false);
 
+  const [settingsMenuOpen, setSettingsMenuOpen] =
+    useState(false);
+
   const menuOpen =
     fileMenuOpen ||
     sceneMenuOpen ||
     soundsMenuOpen ||
-    roomsMenuOpen;
+    roomsMenuOpen ||
+    settingsMenuOpen;
 
   useEffect(() => {
     if (!menuOpen) {
@@ -79,6 +85,7 @@ function MenuBar({
         setSceneMenuOpen(false);
         setSoundsMenuOpen(false);
         setRoomsMenuOpen(false);
+        setSettingsMenuOpen(false);
       }
     }
 
@@ -100,6 +107,7 @@ function MenuBar({
     setSceneMenuOpen(false);
     setSoundsMenuOpen(false);
     setRoomsMenuOpen(false);
+    setSettingsMenuOpen(false);
   }
 
   function handleNewProject() {
@@ -345,9 +353,32 @@ function MenuBar({
         )}
       </div>
 
-      <button className="menu-item">
-        Settings
-      </button>
+      <div className="menu-group">
+        <button
+          className="menu-item"
+          onClick={() => {
+            const opening = !settingsMenuOpen;
+            closeAllMenus();
+            setSettingsMenuOpen(opening);
+          }}
+        >
+          Settings
+        </button>
+
+        {settingsMenuOpen && (
+          <div className="dropdown-menu">
+            <button
+              className="dropdown-item"
+              onClick={() => {
+                closeAllMenus();
+                onOpenResearchLab();
+              }}
+            >
+              Research Lab...
+            </button>
+          </div>
+        )}
+      </div>
 
       {projectName && (
         <div className="project-name">
