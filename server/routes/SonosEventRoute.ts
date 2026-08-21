@@ -56,9 +56,28 @@ export function registerSonosEventRoute(app: Express): void {
 
       response.sendStatus(200);
 
+      const namespace = header(request, 'X-Sonos-Namespace');
+      const type = header(request, 'X-Sonos-Type');
+      const targetType = header(request, 'X-Sonos-Target-Type');
+      const targetValue = header(request, 'X-Sonos-Target-Value');
+
+      if (namespace === 'playback' || namespace === 'playbackSession') {
+        logSonosInfo('GROUP_PLAYBACK', 'Sonos group playback event.', {
+          namespace,
+          type,
+          targetType,
+          groupId: targetType === 'groupId' ? targetValue : null,
+          sessionId: targetType === 'sessionId' ? targetValue : null,
+          targetValue,
+          eventSequenceId: header(request, 'X-Sonos-Event-Seq-Id'),
+          body: request.body,
+        });
+        return;
+      }
+
       if (
-        header(request, 'X-Sonos-Namespace') !== 'audioClip' ||
-        header(request, 'X-Sonos-Type') !== 'audioClipStatus'
+        namespace !== 'audioClip' ||
+        type !== 'audioClipStatus'
       ) {
         return;
       }

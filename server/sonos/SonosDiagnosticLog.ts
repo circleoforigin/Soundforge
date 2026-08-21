@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export type SonosLogCategory = 'AUDIO_CLIP' | 'MEDIA' | 'ERROR';
+export type SonosLogCategory =
+  | 'AUDIO_CLIP'
+  | 'GROUP_PLAYBACK'
+  | 'MEDIA'
+  | 'ERROR';
 
 let writeQueue = Promise.resolve();
 

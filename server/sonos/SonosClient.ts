@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {
   getValidSonosAccessToken,
 } from './SonosTokenStore.ts';
@@ -34,6 +35,16 @@ export interface SonosGroupsResponse {
 export interface SonosLogicalPlayerResolution {
   playerId: string;
   playerName: string;
+}
+
+export interface SonosGroupStreamTestResult {
+  groupId: string;
+  sessionId: string;
+  streamUrl: string;
+  playbackSubscription: unknown;
+  sessionResponse: unknown;
+  sessionSubscription: unknown;
+  loadStreamResponse: unknown;
 }
 
 export class SonosApiError extends Error {
@@ -315,6 +326,134 @@ export class SonosClient {
         });
       }
 
+      throw error;
+    }
+  }
+
+  /**
+   * Temporary diagnostic only. Sonos documents loadStreamUrl for live/radio
+   * streams, not finite on-demand media. This deliberately does not fall back
+   * to audioClip so the group playback-session behavior can be observed.
+   */
+  async testGroupStreamPlayback(
+    groupId: string,
+    streamUrl: string
+  ): Promise<SonosGroupStreamTestResult> {
+    const accessToken = await this.getAccessToken();
+    const diagnosticBase = { groupId, streamUrl };
+
+    logSonosInfo(
+      'GROUP_PLAYBACK',
+      'Starting temporary Sonos group stream test.',
+      diagnosticBase
+    );
+
+    const playbackSubscription = await this.groupPlaybackRequest(
+      `/groups/${encodeURIComponent(groupId)}/playback/subscription`,
+      accessToken,
+      undefined,
+      'Group playback subscription',
+      diagnosticBase
+    );
+
+    const sessionResponse = await this.groupPlaybackRequest(
+      `/groups/${encodeURIComponent(groupId)}/playbackSession`,
+      accessToken,
+      {
+        appId: 'com.circleoforigin.sacscape',
+        appContext: `group-stream-test-${crypto.randomUUID()}`,
+      },
+      'Group playback session creation',
+      diagnosticBase
+    );
+    const sessionObject = sessionResponse.data && typeof sessionResponse.data === 'object'
+      ? sessionResponse.data as {
+        sessionId?: unknown;
+        sessionStatus?: { sessionId?: unknown };
+      }
+      : null;
+    const sessionId = sessionObject?.sessionId ?? sessionObject?.sessionStatus?.sessionId;
+
+    if (typeof sessionId !== 'string' || !sessionId) {
+      logSonosError('Sonos group playback session response had no session ID.', {
+        ...diagnosticBase,
+        responseBody: sessionResponse.data,
+      });
+      throw new Error('Sonos did not return a playback session ID.');
+    }
+
+    const sessionDiagnostic = { ...diagnosticBase, sessionId };
+    const sessionSubscription = await this.groupPlaybackRequest(
+      `/playbackSessions/${encodeURIComponent(sessionId)}/playbackSession/subscription`,
+      accessToken,
+      undefined,
+      'Playback-session subscription',
+      sessionDiagnostic
+    );
+    const loadStreamResponse = await this.groupPlaybackRequest(
+      `/playbackSessions/${encodeURIComponent(sessionId)}/playbackSession/loadStreamUrl`,
+      accessToken,
+      { streamUrl, playOnCompletion: true },
+      'Group loadStreamUrl',
+      sessionDiagnostic
+    );
+
+    return {
+      groupId,
+      sessionId,
+      streamUrl,
+      playbackSubscription: playbackSubscription.data,
+      sessionResponse: sessionResponse.data,
+      sessionSubscription: sessionSubscription.data,
+      loadStreamResponse: loadStreamResponse.data,
+    };
+  }
+
+  private async groupPlaybackRequest(
+    path: string,
+    accessToken: string,
+    body: unknown | undefined,
+    operation: string,
+    diagnostics: Record<string, unknown>
+  ): Promise<{ status: number; data: unknown }> {
+    try {
+      const response = await fetch(`${SONOS_API_BASE}${path}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const responseText = await response.text();
+      let data: unknown = null;
+
+      if (responseText) {
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          data = responseText;
+        }
+      }
+
+      logSonosInfo('GROUP_PLAYBACK', `${operation} response.`, {
+        ...diagnostics,
+        httpStatus: response.status,
+        responseBody: data,
+      });
+
+      if (!response.ok) {
+        throw new SonosApiError(response.status, data);
+      }
+
+      return { status: response.status, data };
+    } catch (error) {
+      if (!(error instanceof SonosApiError)) {
+        logSonosError(`${operation} request failed.`, {
+          ...diagnostics,
+          error,
+        });
+      }
       throw error;
     }
   }
