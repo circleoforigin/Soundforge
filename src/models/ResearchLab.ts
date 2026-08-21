@@ -125,6 +125,7 @@ export interface AudioStreamEncoderSnapshot {
   encodedBytesProduced: number;
   startupBufferBytes: number;
   startupBufferReady: boolean;
+  pcmPausedForReady: boolean;
   stdinBackpressured: boolean;
 }
 

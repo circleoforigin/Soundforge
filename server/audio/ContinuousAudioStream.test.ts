@@ -47,6 +47,7 @@ test('encoder prewarms a bounded valid MP3 prefix before its HTTP client connect
     assert.ok(ready.encoder.startupBufferBytes > 0);
     assert.ok(ready.encoder.startupBufferBytes <= continuousAudioStartup.maximumBufferBytes);
     assert.equal(ready.encoder.encodedBytesProduced, ready.encoder.startupBufferBytes);
+    assert.equal(ready.encoder.pcmPausedForReady, true);
     assert.equal(ready.source, 'silence');
     assert.throws(() => stream.injectTestTone(), /not ready/i);
     assert.ok(ready.recentEvents.some((event) => event.code === 'first-mpeg-frame'));
@@ -59,6 +60,9 @@ test('encoder prewarms a bounded valid MP3 prefix before its HTTP client connect
     const paused = stream.getSnapshot();
     assert.equal(paused.encoder.encodedBytesProduced, ready.encoder.encodedBytesProduced);
     assert.equal(paused.encoder.startupBufferBytes, ready.encoder.startupBufferBytes);
+    assert.equal(paused.encoder.framesGenerated, ready.encoder.framesGenerated);
+    assert.equal(paused.encoder.pcmBytesGenerated, ready.encoder.pcmBytesGenerated);
+    assert.equal(paused.encoder.pid, ready.encoder.pid);
 
     client = new PassThrough();
     const firstChunkPromise = new Promise<Buffer>((resolve) => {
@@ -82,10 +86,30 @@ test('encoder prewarms a bounded valid MP3 prefix before its HTTP client connect
     assert.ok(beginsWithId3 || beginsWithMpegFrameSync, 'MP3 must begin at a valid stream boundary');
     assert.ok(running.recentEvents.some((event) => event.code === 'startup-buffer-flushed'));
     assert.ok(running.recentEvents.some((event) => event.code === 'first-live-bytes'));
+    const pauseEvent = running.recentEvents.find((event) => event.code === 'pcm-paused-ready');
+    const resumeEvent = running.recentEvents.find((event) => event.code === 'pcm-resumed-client');
+    assert.ok(pauseEvent);
+    assert.ok(resumeEvent);
+    assert.equal(pauseEvent.details?.encoderPid, resumeEvent.details?.encoderPid);
+    assert.equal(pauseEvent.details?.pcmFramesGenerated, resumeEvent.details?.pcmFramesAtPause);
+    assert.equal(resumeEvent.details?.pcmFramesAtPause, resumeEvent.details?.pcmFramesAtResume);
+    assert.equal(running.encoder.pcmPausedForReady, false);
+    assert.ok(running.encoder.framesGenerated > ready.encoder.framesGenerated);
     assert.equal(running.httpClient.deliveredBytes, running.encoder.encodedBytesProduced);
 
     stream.injectTestTone();
     assert.equal(stream.getSnapshot().source, 'test-tone');
+    await delay(1_050);
+    const measured = stream.getSnapshot();
+    const first100Ms = measured.recentEvents.find(
+      (event) => event.code === 'delivery-first-100ms'
+    );
+    const first1000Ms = measured.recentEvents.find(
+      (event) => event.code === 'delivery-first-1000ms'
+    );
+    assert.ok(Number(first100Ms?.details?.deliveredBytes) > 0);
+    assert.ok(Number(first1000Ms?.details?.deliveredBytes) >= Number(first100Ms?.details?.deliveredBytes));
+    assert.ok(Number(first1000Ms?.details?.maximumWritableLength) >= 0);
   } finally {
     client?.destroy();
     manager.stopAll('client-driven startup test cleanup');

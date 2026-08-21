@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 
@@ -51,6 +52,43 @@ test('Research Lab stream diagnostics routes return list, snapshot, and not-foun
       `${baseUrl}/api/research-lab/streams/missing-stream`
     );
     assert.equal(missingResponse.status, 404);
+
+    stream.start();
+    await stream.waitUntilReadyForClient();
+    await new Promise<void>((resolve, reject) => {
+      const request = http.get(
+        `${baseUrl}/api/research-lab/streams/${encodeURIComponent(stream.id)}/live.mp3`,
+        {
+          headers: {
+            Accept: 'audio/mpeg',
+            Connection: 'keep-alive',
+            Range: 'bytes=0-',
+            'User-Agent': 'ResearchLabRouteTest/1.0',
+          },
+        },
+        (response) => {
+          response.once('data', () => {
+            response.destroy();
+            resolve();
+          });
+          response.once('error', reject);
+        }
+      );
+      request.once('error', reject);
+    });
+    const httpSnapshot = manager.getSnapshot(stream.id);
+    const requestMetadata = httpSnapshot?.recentEvents.find(
+      (event) => event.code === 'http-request-metadata'
+    );
+    const responseMetadata = httpSnapshot?.recentEvents.find(
+      (event) => event.code === 'http-response-metadata'
+    );
+    assert.equal(requestMetadata?.details?.method, 'GET');
+    assert.equal(requestMetadata?.details?.userAgent, 'ResearchLabRouteTest/1.0');
+    assert.equal(requestMetadata?.details?.range, 'bytes=0-');
+    assert.equal(responseMetadata?.details?.statusCode, 200);
+    assert.equal(responseMetadata?.details?.contentType, 'audio/mpeg');
+    assert.equal(responseMetadata?.details?.transferEncoding, 'chunked');
   } finally {
     manager.stopAll('route test cleanup');
     await new Promise<void>((resolve, reject) => {

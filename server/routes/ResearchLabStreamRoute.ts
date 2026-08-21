@@ -130,6 +130,23 @@ export function registerResearchLabStreamRoute(
       'Content-Type': continuousAudioFormat.outputMimeType,
       'Transfer-Encoding': 'chunked',
     });
+    stream.addDiagnosticEvent('http', 'Research Lab stream HTTP request received.', {
+      method: request.method,
+      pathSegments: ['api', 'research-lab', 'streams', '[stream-id]', 'live.mp3'],
+      userAgent: request.header('user-agent') ?? null,
+      range: request.header('range') ?? null,
+      accept: request.header('accept') ?? null,
+      connection: request.header('connection') ?? null,
+    }, 'http-request-metadata');
+    stream.addDiagnosticEvent('http', 'Research Lab stream HTTP response prepared.', {
+      statusCode: response.statusCode,
+      contentType: response.getHeader('content-type') ?? null,
+      transferEncoding: response.getHeader('transfer-encoding') ?? null,
+      contentLength: response.getHeader('content-length') ?? null,
+      acceptRanges: response.getHeader('accept-ranges') ?? null,
+      cacheControl: response.getHeader('cache-control') ?? null,
+      connection: response.getHeader('connection') ?? null,
+    }, 'http-response-metadata');
     response.flushHeaders();
 
     try {

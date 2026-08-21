@@ -195,6 +195,13 @@ export class ContinuousAudioStream {
   private firstMpegFrameOffset: number | null = null;
   private completeStartupFrameCount = 0;
   private firstLiveBytesDelivered = false;
+  private pcmPausedForReady = false;
+  private pcmPausedAt: Date | null = null;
+  private pcmFramesAtPause = 0;
+  private maximumClientWritableLength = 0;
+  private clientBytesAtConnection = 0;
+  private delivery100MsRecorded = false;
+  private delivery1000MsRecorded = false;
   private resolveReady: (() => void) | null = null;
   private rejectReady: ((error: Error) => void) | null = null;
   private readonly readyPromise: Promise<void>;
@@ -321,12 +328,16 @@ export class ContinuousAudioStream {
     this.clientRemovalHandled = false;
     this.clientLocalCloseReason = null;
     this.clientConnectedAt = new Date();
+    this.clientBytesAtConnection = this.clientBytesWritten;
+    this.maximumClientWritableLength = 0;
     this.record('http', 'client-connected', 'HTTP stream client connected.', {
       encodedBytesBeforeConnection: this.encodedBytesProduced,
       pcmFramesBeforeConnection: this.pcmFramesGenerated,
       encoderAlreadyStarted: Boolean(this.encoder),
       startupBufferReady: this.startupBufferReady,
     });
+    this.scheduleDeliveryDiagnostic(100);
+    this.scheduleDeliveryDiagnostic(1_000);
 
     const removeClient = () => this.handleClientDisconnected(client);
     client.on('close', removeClient);
@@ -337,12 +348,19 @@ export class ContinuousAudioStream {
       }
       this.httpBackpressured = false;
       this.lastClientWritableLength = client.writableLength;
+      this.maximumClientWritableLength = Math.max(
+        this.maximumClientWritableLength,
+        client.writableLength
+      );
       this.record('backpressure', 'http-drain', 'HTTP stream client drained.', {
         writableLength: client.writableLength,
       });
       this.encoder?.stdout.resume();
       if (this.startupBufferFlushed && !this.firstLiveBytesDelivered) {
         this.record('encoder', 'live-output-resumed', 'Live encoded output resumed after HTTP drain.');
+      }
+      if (this.startupBufferFlushed) {
+        this.resumePcmAfterStartupFlush();
       }
     });
 
@@ -475,6 +493,7 @@ export class ContinuousAudioStream {
         encodedBytesProduced: this.encodedBytesProduced,
         startupBufferBytes: this.startupPrefixBytes || this.startupBuffer.length,
         startupBufferReady: this.startupBufferReady,
+        pcmPausedForReady: this.pcmPausedForReady,
         stdinBackpressured: this.stdinBackpressured,
       },
       httpClient: {
@@ -563,12 +582,15 @@ export class ContinuousAudioStream {
       this.startupBufferReady = true;
       this.startupPrefixBytes = this.startupBuffer.length;
       encoder.stdout.pause();
+      this.pausePcmForReady();
       this.record('encoder', 'startup-buffer-ready', 'MP3 startup buffer is ready for a client.', {
         startupBufferBytes: this.startupBuffer.length,
         completeMpegFrames: frameScan.completeFrameCount,
         requiredMpegFrames: startupReadyFrameCount,
         firstMpegFrameOffset: frameScan.firstFrameOffset,
         stdoutPaused: true,
+        encoderStdinWritableLength: encoder.stdin.writableLength,
+        encoderStdoutReadableLength: encoder.stdout.readableLength,
       });
       this.resolveReady?.();
       this.resolveReady = null;
@@ -592,6 +614,10 @@ export class ContinuousAudioStream {
     const accepted = client.write(startupBytes);
     this.clientBytesWritten += startupBytes.length;
     this.lastClientWritableLength = client.writableLength;
+    this.maximumClientWritableLength = Math.max(
+      this.maximumClientWritableLength,
+      client.writableLength
+    );
     this.startupBufferFlushed = true;
     this.startupBuffer = Buffer.alloc(0);
     this.record('http', 'startup-buffer-flushed', 'Complete MP3 startup buffer flushed to client.', {
@@ -620,6 +646,7 @@ export class ContinuousAudioStream {
     }
     encoder.stdout.resume();
     this.record('encoder', 'live-output-resumed', 'Live encoded output resumed after startup flush.');
+    this.resumePcmAfterStartupFlush();
   }
 
   private writeLiveChunk(encoder: ChildProcessWithoutNullStreams, chunk: Buffer): void {
@@ -630,6 +657,10 @@ export class ContinuousAudioStream {
     const accepted = client.write(chunk);
     this.clientBytesWritten += chunk.length;
     this.lastClientWritableLength = client.writableLength;
+    this.maximumClientWritableLength = Math.max(
+      this.maximumClientWritableLength,
+      client.writableLength
+    );
     if (!this.firstLiveBytesDelivered) {
       this.firstLiveBytesDelivered = true;
       this.state = 'running';
@@ -691,19 +722,92 @@ export class ContinuousAudioStream {
         this.record('backpressure', 'stdin-drain', 'FFmpeg input drained.', {
           writableLength: encoder.stdin.writableLength,
         });
-        this.startFrameTimer(encoder);
+        if (!this.pcmPausedForReady) {
+          this.startFrameTimer(encoder);
+        }
       });
     }
   }
 
   private startFrameTimer(encoder: ChildProcessWithoutNullStreams): void {
-    if (this.frameTimer || encoder !== this.encoder) {
+    if (this.frameTimer || encoder !== this.encoder || this.pcmPausedForReady) {
       return;
     }
     this.frameTimer = setInterval(
       () => this.writePcmFrame(encoder),
       continuousAudioFormat.frameDurationMs
     );
+  }
+
+  private pausePcmForReady(): void {
+    if (this.pcmPausedForReady) {
+      return;
+    }
+    this.pcmPausedForReady = true;
+    this.pcmPausedAt = new Date();
+    this.pcmFramesAtPause = this.pcmFramesGenerated;
+    if (this.frameTimer) {
+      clearInterval(this.frameTimer);
+      this.frameTimer = null;
+    }
+    this.record('lifecycle', 'pcm-paused-ready', 'PCM production paused for ready stream.', {
+      pcmFramesGenerated: this.pcmFramesGenerated,
+      pcmBytesGenerated: this.pcmBytesGenerated,
+      startupBufferBytes: this.startupBuffer.length,
+      completeMpegFrames: this.completeStartupFrameCount,
+      encoderPid: this.encoder?.pid ?? null,
+    });
+  }
+
+  private resumePcmAfterStartupFlush(): void {
+    if (!this.pcmPausedForReady || !this.startupBufferFlushed || !this.hasActiveClient()) {
+      return;
+    }
+    const pausedAt = this.pcmPausedAt;
+    const pcmFramesAtPause = this.pcmFramesAtPause;
+    this.pcmPausedForReady = false;
+    this.pcmPausedAt = null;
+    this.record(
+      'lifecycle',
+      'pcm-resumed-client',
+      'PCM production resumed after client attachment.',
+      {
+        millisecondsPaused: pausedAt ? Date.now() - pausedAt.getTime() : null,
+        pcmFramesAtPause,
+        pcmFramesAtResume: this.pcmFramesGenerated,
+        encoderPid: this.encoder?.pid ?? null,
+      }
+    );
+    if (this.encoder && !this.stdinBackpressured) {
+      this.startFrameTimer(this.encoder);
+    }
+  }
+
+  private scheduleDeliveryDiagnostic(windowMilliseconds: 100 | 1_000): void {
+    setTimeout(() => {
+      const alreadyRecorded = windowMilliseconds === 100
+        ? this.delivery100MsRecorded
+        : this.delivery1000MsRecorded;
+      if (alreadyRecorded) {
+        return;
+      }
+      if (windowMilliseconds === 100) {
+        this.delivery100MsRecorded = true;
+      } else {
+        this.delivery1000MsRecorded = true;
+      }
+      this.record(
+        'http',
+        windowMilliseconds === 100 ? 'delivery-first-100ms' : 'delivery-first-1000ms',
+        `Encoded delivery measured for first ${windowMilliseconds} ms after HTTP connection.`,
+        {
+          windowMilliseconds,
+          deliveredBytes: this.clientBytesWritten - this.clientBytesAtConnection,
+          maximumWritableLength: this.maximumClientWritableLength,
+          clientStillConnected: this.hasActiveClient(),
+        }
+      );
+    }, windowMilliseconds);
   }
 
   private handleClientDisconnected(client: HttpStreamClient): void {
