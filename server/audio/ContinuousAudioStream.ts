@@ -175,6 +175,9 @@ export class ContinuousAudioStream {
     this.state = 'running';
     this.record('encoder', 'encoder-started', 'FFmpeg encoder started.', {
       pid: encoder.pid ?? null,
+      millisecondsAfterClientConnection: this.clientConnectedAt
+        ? Date.now() - this.clientConnectedAt.getTime()
+        : null,
       ...continuousAudioFormat,
     });
 
@@ -196,7 +199,6 @@ export class ContinuousAudioStream {
   }
 
   bindHttpClient(client: HttpStreamClient): void {
-    this.start();
     if (this.hasActiveClient()) {
       throw new Error('This continuous audio stream already has an active HTTP client.');
     }
@@ -205,7 +207,10 @@ export class ContinuousAudioStream {
     this.clientRemovalHandled = false;
     this.clientLocalCloseReason = null;
     this.clientConnectedAt = new Date();
-    this.record('http', 'client-connected', 'HTTP stream client connected.');
+    this.record('http', 'client-connected', 'HTTP stream client connected; starting encoder.', {
+      encodedBytesBeforeConnection: this.encodedBytesProduced,
+      pcmFramesBeforeConnection: this.pcmFramesGenerated,
+    });
 
     const removeClient = () => this.handleClientDisconnected(client);
     client.on('close', removeClient);
@@ -221,6 +226,14 @@ export class ContinuousAudioStream {
       });
       this.encoder?.stdout.resume();
     });
+
+    try {
+      this.start();
+    } catch (error) {
+      this.clientLocalCloseReason = 'encoder failed to start';
+      client.destroy(error instanceof Error ? error : undefined);
+      throw error;
+    }
   }
 
   hasActiveClient(): boolean {
@@ -228,8 +241,8 @@ export class ContinuousAudioStream {
   }
 
   injectTestTone(): { frequencyHz: number; durationMs: number } {
-    if (this.state !== 'running') {
-      throw new Error('The continuous audio stream is not running.');
+    if (!this.isReadyForTone()) {
+      throw new Error('The continuous audio stream is not ready for tone injection.');
     }
     this.toneSamplesRemaining = Math.round(
       continuousAudioFormat.sampleRate * toneDurationMs / 1000
@@ -240,6 +253,10 @@ export class ContinuousAudioStream {
       durationMs: toneDurationMs,
     });
     return { frequencyHz: toneFrequencyHz, durationMs: toneDurationMs };
+  }
+
+  isReadyForTone(): boolean {
+    return this.state === 'running' && this.hasActiveClient() && this.clientBytesWritten > 0;
   }
 
   stop(reason = 'stream stopped'): void {
@@ -369,6 +386,9 @@ export class ContinuousAudioStream {
         millisecondsAfterEncoderStart: this.encoderStartedAt
           ? Date.now() - this.encoderStartedAt.getTime()
           : null,
+        millisecondsAfterClientConnection: this.clientConnectedAt
+          ? Date.now() - this.clientConnectedAt.getTime()
+          : null,
       });
     }
 
@@ -382,6 +402,13 @@ export class ContinuousAudioStream {
     if (this.clientBytesWritten === chunk.length) {
       this.record('http', 'first-client-bytes', 'First encoded bytes written to HTTP client.', {
         chunkBytes: chunk.length,
+        encodedBytesProducedBeforeChunk: this.encodedBytesProduced - chunk.length,
+        millisecondsAfterClientConnection: this.clientConnectedAt
+          ? Date.now() - this.clientConnectedAt.getTime()
+          : null,
+        millisecondsAfterEncoderStart: this.encoderStartedAt
+          ? Date.now() - this.encoderStartedAt.getTime()
+          : null,
       });
     }
     if (!accepted && !this.httpBackpressured) {
@@ -502,7 +529,7 @@ export class ContinuousAudioStream {
 
   private getLifecycleState(): AudioStreamLifecycleState {
     if (this.state === 'created') {
-      return 'starting';
+      return 'waiting-for-client';
     }
     if (this.state === 'stopping') {
       return 'stopping';
@@ -514,7 +541,7 @@ export class ContinuousAudioStream {
       return 'error';
     }
     if (!this.hasActiveClient()) {
-      return this.encodedBytesProduced === 0 ? 'starting' : 'waiting-for-client';
+      return 'waiting-for-client';
     }
     return this.clientBytesWritten === 0 ? 'buffering' : 'running';
   }
@@ -524,6 +551,9 @@ export class ContinuousAudioStream {
       return 'error';
     }
     if (this.state === 'stopped' || this.state === 'stopping') {
+      return 'stopped';
+    }
+    if (this.state === 'created') {
       return 'stopped';
     }
     return this.encodedBytesProduced === 0 ? 'starting' : 'running';

@@ -144,10 +144,10 @@ export class ResearchLabStreamService {
     if (!binding || !stream.getSnapshot().transport?.bound) {
       throw new ResearchLabRequestError(409, 'The stream transport is not bound.');
     }
-    if (!stream.hasActiveClient()) {
+    if (!stream.isReadyForTone()) {
       throw new ResearchLabRequestError(
         409,
-        'The continuous stream has no connected audio client yet.'
+        'The continuous stream is not ready for tone injection yet.'
       );
     }
     stream.injectTestTone();

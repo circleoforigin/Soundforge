@@ -95,6 +95,19 @@ function createService(devices: AudioDevice[]): {
   };
 }
 
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMilliseconds = 4_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error('Timed out waiting for Research Lab stream state.');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 test('generic creation binds device and group-scoped transport metadata', async () => {
   const bonded = device('bonded-device', false);
   const standalone = device('standalone-device', true);
@@ -137,6 +150,10 @@ test('tone and transport diagnostics remain isolated per stream', async () => {
       manager.getActive(streamId)?.bindHttpClient(client);
     }
 
+    await waitFor(() => Boolean(
+      manager.getActive(snapshotA.id)?.isReadyForTone() &&
+      manager.getActive(snapshotB.id)?.isReadyForTone()
+    ));
     const toneA = service.injectTone(snapshotA.id);
     assert.equal(toneA.source, 'test-tone');
     assert.equal(manager.getSnapshot(snapshotB.id)?.source, 'silence');
@@ -146,6 +163,40 @@ test('tone and transport diagnostics remain isolated per stream', async () => {
       client.destroy();
     }
     manager.stopAll('tone test cleanup');
+  }
+});
+
+test('disconnecting one HTTP consumer tears down only its own stream', async () => {
+  const first = device('disconnect-first', false);
+  const second = device('disconnect-second', false);
+  const { manager, service } = createService([first, second]);
+  const clientA = new PassThrough();
+  const clientB = new PassThrough();
+  clientA.resume();
+  clientB.resume();
+
+  try {
+    const snapshotA = await service.start(first.id, 'sonos-cloud-continuous', () => 'https://a');
+    const snapshotB = await service.start(second.id, 'sonos-cloud-continuous', () => 'https://b');
+    manager.getActive(snapshotA.id)?.bindHttpClient(clientA);
+    manager.getActive(snapshotB.id)?.bindHttpClient(clientB);
+    await waitFor(() => Boolean(
+      manager.getActive(snapshotA.id)?.isReadyForTone() &&
+      manager.getActive(snapshotB.id)?.isReadyForTone()
+    ));
+
+    const secondPid = manager.getSnapshot(snapshotB.id)?.encoder.pid;
+    clientA.destroy();
+    await waitFor(() => !manager.getActive(snapshotA.id));
+
+    assert.equal(manager.getSnapshot(snapshotA.id)?.lifecycle, 'stopped');
+    assert.equal(manager.getSnapshot(snapshotB.id)?.lifecycle, 'running');
+    assert.equal(manager.getSnapshot(snapshotB.id)?.encoder.pid, secondPid);
+    assert.equal(manager.getActive(snapshotB.id)?.isReadyForTone(), true);
+  } finally {
+    clientA.destroy();
+    clientB.destroy();
+    manager.stopAll('disconnect isolation test cleanup');
   }
 });
 

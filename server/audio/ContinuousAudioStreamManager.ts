@@ -15,7 +15,6 @@ export class ContinuousAudioStreamManager {
   create(options: ContinuousAudioStreamOptions = {}): ContinuousAudioStream {
     const stream = new ContinuousAudioStream(crypto.randomUUID(), options);
     this.streams.set(stream.id, stream);
-    stream.start();
     return stream;
   }
 
