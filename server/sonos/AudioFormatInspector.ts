@@ -4,6 +4,7 @@ export interface AudioFormatInspection {
   sampleRateHz: number | null;
   channels: number | null;
   bitDepth: number | null;
+  bitRateKbps: number | null;
 }
 
 function inspectWave(data: Buffer): AudioFormatInspection | null {
@@ -37,7 +38,14 @@ function inspectWave(data: Buffer): AudioFormatInspection | null {
           ? 'IEEE float PCM'
           : `WAVE format tag 0x${formatTag.toString(16).padStart(4, '0')}`;
 
-      return { container: 'WAV', codec, sampleRateHz, channels, bitDepth };
+      return {
+        container: 'WAV',
+        codec,
+        sampleRateHz,
+        channels,
+        bitDepth,
+        bitRateKbps: null,
+      };
     }
 
     offset = chunkStart + chunkSize + (chunkSize % 2);
@@ -49,6 +57,7 @@ function inspectWave(data: Buffer): AudioFormatInspection | null {
     sampleRateHz: null,
     channels: null,
     bitDepth: null,
+    bitRateKbps: null,
   };
 }
 
@@ -70,7 +79,14 @@ function inspectMp3(data: Buffer): AudioFormatInspection | null {
     const versionBits = (data[offset + 1] >> 3) & 0x03;
     const layerBits = (data[offset + 1] >> 1) & 0x03;
     const sampleRateIndex = (data[offset + 2] >> 2) & 0x03;
-    if (versionBits === 1 || layerBits === 0 || sampleRateIndex === 3) {
+    const bitRateIndex = (data[offset + 2] >> 4) & 0x0f;
+    if (
+      versionBits === 1 ||
+      layerBits === 0 ||
+      sampleRateIndex === 3 ||
+      bitRateIndex === 0 ||
+      bitRateIndex === 15
+    ) {
       continue;
     }
 
@@ -83,6 +99,8 @@ function inspectMp3(data: Buffer): AudioFormatInspection | null {
     const baseRates = [44100, 48000, 32000];
     const sampleRateHz = baseRates[sampleRateIndex] / (version === 1 ? 1 : version === 2 ? 2 : 4);
     const channelMode = (data[offset + 3] >> 6) & 0x03;
+    const mpeg1BitRates = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+    const mpeg2BitRates = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
 
     return {
       container: 'MP3',
@@ -90,6 +108,7 @@ function inspectMp3(data: Buffer): AudioFormatInspection | null {
       sampleRateHz,
       channels: channelMode === 3 ? 1 : 2,
       bitDepth: null,
+      bitRateKbps: (version === 1 ? mpeg1BitRates : mpeg2BitRates)[bitRateIndex],
     };
   }
 
@@ -103,5 +122,6 @@ export function inspectAudioFormat(data: Buffer): AudioFormatInspection {
     sampleRateHz: null,
     channels: null,
     bitDepth: null,
+    bitRateKbps: null,
   };
 }

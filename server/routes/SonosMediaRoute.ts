@@ -1,14 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import type { Express, Request } from 'express';
 import multer from 'multer';
 import { logSonosError, logSonosInfo } from '../sonos/SonosDiagnosticLog.ts';
 import { inspectAudioFormat } from '../sonos/AudioFormatInspector.ts';
+import {
+  prepareSonosMedia,
+  type SonosMediaMetadata,
+} from '../sonos/SonosMediaNormalizer.ts';
 
-const routeDirectory = path.dirname(fileURLToPath(import.meta.url));
-const mediaDirectory = path.resolve(routeDirectory, '../../data/sonos-media');
 const assetIdPattern = /^[a-zA-Z0-9-]{1,100}$/;
 const supportedMedia = new Map([
   ['audio/mpeg', '.mp3'],
@@ -26,6 +27,15 @@ const upload = multer({
   limits: { fileSize: 100 * 1024 * 1024 },
 });
 
+function getMediaDirectory(): string {
+  const dataRoot = process.env.SACSCAPE_DATA_DIR?.trim() || 'C:\\SACscapeData';
+  return path.join(dataRoot, 'sonos-media');
+}
+
+function getMetadataPath(assetId: string): string {
+  return path.join(getMediaDirectory(), `${assetId}.json`);
+}
+
 function getAssetId(request: Request): string {
   const rawAssetId = request.params.assetId;
   const assetId = Array.isArray(rawAssetId) ? rawAssetId[0] : rawAssetId;
@@ -39,7 +49,7 @@ function getAssetId(request: Request): string {
 
 function findMediaPath(assetId: string): string | null {
   for (const extension of mediaTypes.keys()) {
-    const mediaPath = path.join(mediaDirectory, `${assetId}${extension}`);
+    const mediaPath = path.join(getMediaDirectory(), `${assetId}${extension}`);
 
     if (fs.existsSync(mediaPath)) {
       return mediaPath;
@@ -47,6 +57,32 @@ function findMediaPath(assetId: string): string | null {
   }
 
   return null;
+}
+
+async function readMediaMetadata(assetId: string): Promise<SonosMediaMetadata | null> {
+  try {
+    return JSON.parse(await fs.promises.readFile(getMetadataPath(assetId), 'utf8')) as SonosMediaMetadata;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function writeMediaMetadata(metadata: SonosMediaMetadata): Promise<void> {
+  const metadataPath = getMetadataPath(metadata.assetId);
+  const temporaryPath = `${metadataPath}.${crypto.randomUUID()}.tmp`;
+  try {
+    await fs.promises.writeFile(temporaryPath, JSON.stringify(metadata, null, 2), {
+      encoding: 'utf8',
+      flag: 'wx',
+    });
+    await fs.promises.rm(metadataPath, { force: true });
+    await fs.promises.rename(temporaryPath, metadataPath);
+  } finally {
+    await fs.promises.rm(temporaryPath, { force: true });
+  }
 }
 
 function getPublicMediaUrl(request: Request, assetId: string): string {
@@ -120,26 +156,22 @@ export function registerSonosMediaRoute(app: Express) {
           return;
         }
 
-        await fs.promises.mkdir(mediaDirectory, { recursive: true });
-
         const existingPath = findMediaPath(assetId);
-        const destination = path.join(mediaDirectory, `${assetId}${extension}`);
-        const temporaryPath = `${destination}.${crypto.randomUUID()}.tmp`;
+        const metadata = await prepareSonosMedia(getMediaDirectory(), assetId, file.buffer);
+        const destination = path.join(getMediaDirectory(), metadata.fileName);
+        await writeMediaMetadata(metadata);
 
-        try {
-          await fs.promises.writeFile(temporaryPath, file.buffer, { flag: 'wx' });
-
-          if (existingPath) {
-            await fs.promises.rm(existingPath);
-          }
-
-          await fs.promises.rename(temporaryPath, destination);
-        } catch (error) {
-          await fs.promises.rm(temporaryPath, { force: true });
-          throw error;
+        if (existingPath && existingPath !== destination) {
+          await fs.promises.rm(existingPath, { force: true });
         }
 
-        await logMediaFormat(assetId, destination);
+        logSonosInfo('MEDIA', 'Sonos media synchronization format.', {
+          assetId,
+          declaredMimeType: file.mimetype,
+          normalizedDerivative: metadata.normalizedDerivative,
+          originalFormat: metadata.originalFormat,
+          outputFormat: metadata.outputFormat,
+        });
 
         response.json({
           ok: true,
@@ -174,6 +206,13 @@ export function registerSonosMediaRoute(app: Express) {
         logSonosError('Sonos media format inspection failed.', { assetId, error });
       });
       response.locals.totalBytes = stats.size;
+      void readMediaMetadata(assetId).then((metadata) => {
+        if (metadata) {
+          logSonosInfo('MEDIA', 'Sonos cached media metadata.', metadata);
+        }
+      }).catch((error) => {
+        logSonosError('Unable to read Sonos media metadata.', { assetId, error });
+      });
       response.set({
         'Accept-Ranges': 'bytes',
         'Content-Length': stats.size.toString(),
