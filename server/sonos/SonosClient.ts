@@ -330,12 +330,8 @@ export class SonosClient {
     }
   }
 
-  /**
-   * Temporary diagnostic only. Sonos documents loadStreamUrl for live/radio
-   * streams, not finite on-demand media. This deliberately does not fall back
-   * to audioClip so the group playback-session behavior can be observed.
-   */
-  async testGroupStreamPlayback(
+  /** Temporary group-stream experiment; deliberately never falls back to audioClip. */
+  async attachGroupStreamPlayback(
     groupId: string,
     streamUrl: string
   ): Promise<SonosGroupStreamTestResult> {
@@ -344,7 +340,7 @@ export class SonosClient {
 
     logSonosInfo(
       'GROUP_PLAYBACK',
-      'Starting temporary Sonos group stream test.',
+      'Starting Sonos group stream playback.',
       diagnosticBase
     );
 

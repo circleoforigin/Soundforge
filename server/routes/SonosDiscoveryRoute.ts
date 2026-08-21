@@ -139,60 +139,6 @@ export function registerSonosDiscoveryRoute(
   );
 
   app.post(
-    '/api/sonos/group-stream-test/:groupId',
-    json(),
-    async (request, response) => {
-      try {
-        const { streamUrl } = request.body as { streamUrl?: unknown };
-        if (
-          typeof streamUrl !== 'string' ||
-          !URL.canParse(streamUrl) ||
-          !streamUrl.startsWith('https://')
-        ) {
-          response.status(400).json({
-            ok: false,
-            message: 'A public HTTPS streamUrl is required.',
-          });
-          return;
-        }
-
-        const client = new SonosClient();
-        const result = await client.testGroupStreamPlayback(
-          request.params.groupId,
-          streamUrl
-        );
-        response.json({
-          ok: true,
-          warning:
-            'Temporary diagnostic: Sonos supports loadStreamUrl for live/radio streams, not on-demand files.',
-          result,
-        });
-      } catch (error) {
-        logSonosError('Sonos group stream test route failed.', {
-          groupId: request.params.groupId,
-          error,
-        });
-
-        if (error instanceof SonosApiError) {
-          response.status(error.status).json({
-            ok: false,
-            message: error.message,
-            details: error.details,
-          });
-          return;
-        }
-
-        response.status(500).json({
-          ok: false,
-          message: error instanceof Error
-            ? error.message
-            : 'Unable to run Sonos group stream test.',
-        });
-      }
-    }
-  );
-
-  app.post(
     '/api/sonos/audio-clip/:playerId',
     json(),
     async (request, response) => {
