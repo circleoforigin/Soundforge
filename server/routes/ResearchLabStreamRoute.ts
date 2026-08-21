@@ -1,11 +1,42 @@
 import type { Express } from 'express';
+import type {
+  AudioStreamListResponse,
+  AudioStreamSnapshotResponse,
+} from '../../src/models/ResearchLab.ts';
 
 import { continuousAudioFormat } from '../audio/ContinuousAudioStream.ts';
-import { continuousAudioStreamManager } from '../audio/ContinuousAudioStreamManager.ts';
+import {
+  ContinuousAudioStreamManager,
+  continuousAudioStreamManager,
+} from '../audio/ContinuousAudioStreamManager.ts';
 
-export function registerResearchLabStreamRoute(app: Express): void {
+export function registerResearchLabStreamRoute(
+  app: Express,
+  manager: ContinuousAudioStreamManager = continuousAudioStreamManager
+): void {
+  app.get('/api/research-lab/streams', (_request, response) => {
+    const result: AudioStreamListResponse = {
+      ok: true,
+      streams: manager.listSnapshots(),
+    };
+    response.json(result);
+  });
+
+  app.get('/api/research-lab/streams/:streamId', (request, response) => {
+    const stream = manager.getSnapshot(request.params.streamId);
+    if (!stream) {
+      response.status(404).json({
+        ok: false,
+        message: 'Continuous audio stream not found.',
+      });
+      return;
+    }
+    const result: AudioStreamSnapshotResponse = { ok: true, stream };
+    response.json(result);
+  });
+
   app.get('/api/research-lab/streams/:streamId/live.mp3', (request, response) => {
-    const stream = continuousAudioStreamManager.get(request.params.streamId);
+    const stream = manager.getActive(request.params.streamId);
     if (!stream) {
       response.status(404).json({ ok: false, message: 'Continuous audio stream not found.' });
       return;

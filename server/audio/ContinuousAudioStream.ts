@@ -3,6 +3,14 @@ import type { Writable } from 'node:stream';
 
 import ffmpegPath from 'ffmpeg-static';
 
+import type {
+  AudioStreamDiagnosticCategory,
+  AudioStreamDiagnosticEvent,
+  AudioStreamLifecycleState,
+  AudioStreamSnapshot,
+  AudioStreamSource,
+} from '../../src/models/ResearchLab.ts';
+
 export const continuousAudioFormat = {
   sampleRate: 44_100,
   channelCount: 2,
@@ -19,43 +27,68 @@ const toneDurationMs = 1_000;
 const toneAmplitude = 0.4;
 const maximumDiagnosticEvents = 200;
 const ffmpegExecutable = ffmpegPath as unknown as string | null;
+const sensitiveKeyPattern = /authorization|cookie|credential|password|secret|token/i;
 
-export type ContinuousAudioSource = 'silence' | 'test-tone';
-export type ContinuousAudioStreamState =
+function sanitizeDiagnosticText(value: string): string {
+  return value
+    .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
+    .replace(/(authorization|password|secret|token)\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]')
+    .replace(/[A-Za-z]:\\(?:[^\s\\]+\\)*[^\s\\]*/g, '[redacted-path]')
+    .replace(/(?:\/[A-Za-z0-9._-]+){2,}/g, '[redacted-path]');
+}
+
+function sanitizeDiagnosticValue(
+  value: unknown,
+  seen = new WeakSet<object>(),
+  depth = 0
+): unknown {
+  if (depth > 6) {
+    return '[truncated]';
+  }
+  if (value === null || typeof value === 'boolean' || typeof value === 'number') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    return sanitizeDiagnosticText(value);
+  }
+  if (typeof value === 'bigint') {
+    return value.toString();
+  }
+  if (typeof value !== 'object') {
+    return String(value);
+  }
+  if (seen.has(value)) {
+    return '[circular]';
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeDiagnosticValue(item, seen, depth + 1));
+  }
+
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    sanitized[key] = sensitiveKeyPattern.test(key)
+      ? '[redacted]'
+      : sanitizeDiagnosticValue(item, seen, depth + 1);
+  }
+  return sanitized;
+}
+
+function sanitizeDetails(details: Record<string, unknown>): Record<string, unknown> {
+  return sanitizeDiagnosticValue(details) as Record<string, unknown>;
+}
+
+type ContinuousAudioStreamState =
   | 'created'
   | 'running'
+  | 'stopping'
   | 'stopped'
   | 'error';
 
-export interface ContinuousAudioStreamDiagnosticEvent {
-  timestamp: string;
-  type: string;
-  details?: Record<string, unknown>;
-}
-
-export interface ContinuousAudioStreamSnapshot {
-  id: string;
-  state: ContinuousAudioStreamState;
-  source: ContinuousAudioSource;
-  encoderPid: number | null;
-  encoderStartedAt: string | null;
-  createdAt: string;
-  stoppedAt: string | null;
-  clientConnected: boolean;
-  clientConnectedAt: string | null;
-  lastClientDisconnectedAt: string | null;
-  pcmFramesGenerated: number;
-  pcmBytesGenerated: number;
-  encodedBytesProduced: number;
-  clientBytesWritten: number;
-  stdinBackpressured: boolean;
-  httpBackpressured: boolean;
-  lastError: string | null;
-  recentEvents: ContinuousAudioStreamDiagnosticEvent[];
-}
-
 export interface ContinuousAudioStreamOptions {
-  onEvent?: (event: ContinuousAudioStreamDiagnosticEvent) => void;
+  deviceId?: string;
+  transportId?: string;
+  onEvent?: (event: AudioStreamDiagnosticEvent) => void;
   onClientDisconnected?: (reason: string) => void;
   onEncoderExit?: (details: { code: number | null; signal: NodeJS.Signals | null }) => void;
 }
@@ -86,14 +119,15 @@ export class ContinuousAudioStream {
   private pcmBytesGenerated = 0;
   private encodedBytesProduced = 0;
   private clientBytesWritten = 0;
+  private lastClientWritableLength = 0;
   private stdinBackpressured = false;
   private httpBackpressured = false;
   private lastError: string | null = null;
-  private readonly events: ContinuousAudioStreamDiagnosticEvent[] = [];
+  private readonly events: AudioStreamDiagnosticEvent[] = [];
 
   constructor(id: string, private readonly options: ContinuousAudioStreamOptions = {}) {
     this.id = id;
-    this.record('stream-created');
+    this.record('lifecycle', 'stream-created', 'Continuous audio stream created.');
   }
 
   start(): void {
@@ -125,7 +159,7 @@ export class ContinuousAudioStream {
     this.encoder = encoder;
     this.encoderStartedAt = new Date();
     this.state = 'running';
-    this.record('encoder-started', {
+    this.record('encoder', 'encoder-started', 'FFmpeg encoder started.', {
       pid: encoder.pid ?? null,
       ...continuousAudioFormat,
     });
@@ -135,7 +169,9 @@ export class ContinuousAudioStream {
       const message = chunk.toString('utf8').trim();
       if (message) {
         this.lastError = message;
-        this.record('encoder-diagnostic', { message });
+        this.record('error', 'encoder-diagnostic', 'FFmpeg emitted a diagnostic error.', {
+          message,
+        });
       }
     });
     encoder.stdin.on('error', (error) => this.recordError('encoder-input-error', error));
@@ -155,7 +191,7 @@ export class ContinuousAudioStream {
     this.clientRemovalHandled = false;
     this.clientLocalCloseReason = null;
     this.clientConnectedAt = new Date();
-    this.record('client-connected');
+    this.record('http', 'client-connected', 'HTTP stream client connected.');
 
     const removeClient = () => this.handleClientDisconnected(client);
     client.on('close', removeClient);
@@ -165,7 +201,10 @@ export class ContinuousAudioStream {
         return;
       }
       this.httpBackpressured = false;
-      this.record('http-drain', { writableLength: client.writableLength });
+      this.lastClientWritableLength = client.writableLength;
+      this.record('backpressure', 'http-drain', 'HTTP stream client drained.', {
+        writableLength: client.writableLength,
+      });
       this.encoder?.stdout.resume();
     });
   }
@@ -182,7 +221,10 @@ export class ContinuousAudioStream {
       continuousAudioFormat.sampleRate * toneDurationMs / 1000
     );
     this.tonePhase = 0;
-    this.record('tone-injected', { frequencyHz: toneFrequencyHz, durationMs: toneDurationMs });
+    this.record('source', 'tone-injected', 'Diagnostic test tone injected.', {
+      frequencyHz: toneFrequencyHz,
+      durationMs: toneDurationMs,
+    });
     return { frequencyHz: toneFrequencyHz, durationMs: toneDurationMs };
   }
 
@@ -190,8 +232,10 @@ export class ContinuousAudioStream {
     if (this.state === 'stopped') {
       return;
     }
-    this.state = 'stopped';
-    this.stoppedAt = new Date();
+    this.state = 'stopping';
+    this.record('lifecycle', 'stream-stopping', 'Continuous audio stream stopping.', {
+      reason,
+    });
     this.toneSamplesRemaining = 0;
     if (this.frameTimer) {
       clearInterval(this.frameTimer);
@@ -207,29 +251,59 @@ export class ContinuousAudioStream {
       encoder.stdin.end();
       encoder.kill();
     }
-    this.record('stream-stopped', { reason });
+    this.state = 'stopped';
+    this.stoppedAt = new Date();
+    this.record('lifecycle', 'stream-stopped', 'Continuous audio stream stopped.', {
+      reason,
+    });
   }
 
-  getSnapshot(): ContinuousAudioStreamSnapshot {
+  addDiagnosticEvent(
+    category: AudioStreamDiagnosticCategory,
+    message: string,
+    details?: Record<string, unknown>
+  ): void {
+    this.record(category, 'external-diagnostic', message, details);
+  }
+
+  getSnapshot(): AudioStreamSnapshot {
+    const lifecycle = this.getLifecycleState();
+    const source: AudioStreamSource = this.toneSamplesRemaining > 0
+      ? 'test-tone'
+      : 'silence';
     return {
       id: this.id,
-      state: this.state,
-      source: this.toneSamplesRemaining > 0 ? 'test-tone' : 'silence',
-      encoderPid: this.encoder?.pid ?? null,
-      encoderStartedAt: this.encoderStartedAt?.toISOString() ?? null,
+      ...(this.options.deviceId ? { deviceId: this.options.deviceId } : {}),
+      ...(this.options.transportId ? { transportId: this.options.transportId } : {}),
+      lifecycle,
+      source,
+      encoder: {
+        state: this.getEncoderState(),
+        pid: this.encoder?.pid ?? null,
+        startedAt: this.encoderStartedAt?.toISOString() ?? null,
+        sampleRate: continuousAudioFormat.sampleRate,
+        channels: continuousAudioFormat.channelCount,
+        bitrate: continuousAudioFormat.outputBitrate,
+        framesGenerated: this.pcmFramesGenerated,
+        pcmBytesGenerated: this.pcmBytesGenerated,
+        encodedBytesProduced: this.encodedBytesProduced,
+        stdinBackpressured: this.stdinBackpressured,
+      },
+      httpClient: {
+        connected: this.hasActiveClient(),
+        connectedAt: this.clientConnectedAt?.toISOString() ?? null,
+        disconnectedAt: this.lastClientDisconnectedAt?.toISOString() ?? null,
+        deliveredBytes: this.clientBytesWritten,
+        writableLength: this.client?.writableLength ?? this.lastClientWritableLength,
+        backpressured: this.httpBackpressured,
+      },
       createdAt: this.createdAt.toISOString(),
       stoppedAt: this.stoppedAt?.toISOString() ?? null,
-      clientConnected: this.hasActiveClient(),
-      clientConnectedAt: this.clientConnectedAt?.toISOString() ?? null,
-      lastClientDisconnectedAt: this.lastClientDisconnectedAt?.toISOString() ?? null,
-      pcmFramesGenerated: this.pcmFramesGenerated,
-      pcmBytesGenerated: this.pcmBytesGenerated,
-      encodedBytesProduced: this.encodedBytesProduced,
-      clientBytesWritten: this.clientBytesWritten,
-      stdinBackpressured: this.stdinBackpressured,
-      httpBackpressured: this.httpBackpressured,
-      lastError: this.lastError,
-      recentEvents: [...this.events],
+      lastError: this.lastError ? sanitizeDiagnosticText(this.lastError) : null,
+      recentEvents: this.events.map((event) => ({
+        ...event,
+        ...(event.details ? { details: sanitizeDetails(event.details) } : {}),
+      })),
     };
   }
 
@@ -239,7 +313,7 @@ export class ContinuousAudioStream {
     }
     this.encodedBytesProduced += chunk.length;
     if (this.encodedBytesProduced === chunk.length) {
-      this.record('first-encoded-output', {
+      this.record('encoder', 'first-encoded-output', 'FFmpeg produced its first encoded bytes.', {
         chunkBytes: chunk.length,
         millisecondsAfterEncoderStart: this.encoderStartedAt
           ? Date.now() - this.encoderStartedAt.getTime()
@@ -253,13 +327,18 @@ export class ContinuousAudioStream {
     }
     const accepted = client.write(chunk);
     this.clientBytesWritten += chunk.length;
+    this.lastClientWritableLength = client.writableLength;
     if (this.clientBytesWritten === chunk.length) {
-      this.record('first-client-bytes', { chunkBytes: chunk.length });
+      this.record('http', 'first-client-bytes', 'First encoded bytes written to HTTP client.', {
+        chunkBytes: chunk.length,
+      });
     }
     if (!accepted && !this.httpBackpressured) {
       this.httpBackpressured = true;
       encoder.stdout.pause();
-      this.record('http-backpressure', { writableLength: client.writableLength });
+      this.record('backpressure', 'http-backpressure', 'HTTP stream client is backpressured.', {
+        writableLength: client.writableLength,
+      });
     }
   }
 
@@ -290,13 +369,17 @@ export class ContinuousAudioStream {
         clearInterval(this.frameTimer);
         this.frameTimer = null;
       }
-      this.record('stdin-backpressure', { writableLength: encoder.stdin.writableLength });
+      this.record('backpressure', 'stdin-backpressure', 'FFmpeg input is backpressured.', {
+        writableLength: encoder.stdin.writableLength,
+      });
       encoder.stdin.once('drain', () => {
         if (encoder !== this.encoder) {
           return;
         }
         this.stdinBackpressured = false;
-        this.record('stdin-drain', { writableLength: encoder.stdin.writableLength });
+        this.record('backpressure', 'stdin-drain', 'FFmpeg input drained.', {
+          writableLength: encoder.stdin.writableLength,
+        });
         this.startFrameTimer(encoder);
       });
     }
@@ -320,8 +403,9 @@ export class ContinuousAudioStream {
     this.client = null;
     this.httpBackpressured = false;
     this.lastClientDisconnectedAt = new Date();
+    this.lastClientWritableLength = client.writableLength;
     const reason = this.clientLocalCloseReason ?? 'remote client disconnected';
-    this.record('client-disconnected', {
+    this.record('http', 'client-disconnected', 'HTTP stream client disconnected.', {
       closedBy: this.clientLocalCloseReason ? 'local' : 'remote',
       reason,
     });
@@ -346,7 +430,12 @@ export class ContinuousAudioStream {
       this.state = 'error';
       this.lastError = `FFmpeg exited (code ${String(code)}, signal ${String(signal)}).`;
     }
-    this.record('encoder-exited', { code, signal });
+    this.record(
+      this.state === 'error' ? 'error' : 'encoder',
+      'encoder-exited',
+      'FFmpeg encoder exited.',
+      { code, signal }
+    );
     if (this.client) {
       this.clientLocalCloseReason = 'FFmpeg encoder exited';
       this.client.destroy();
@@ -357,14 +446,50 @@ export class ContinuousAudioStream {
   private recordError(type: string, error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
     this.lastError = message;
-    this.record(type, { message });
+    this.record('error', type, 'Continuous audio stream error.', { message });
   }
 
-  private record(type: string, details?: Record<string, unknown>): void {
-    const event: ContinuousAudioStreamDiagnosticEvent = {
+  private getLifecycleState(): AudioStreamLifecycleState {
+    if (this.state === 'created') {
+      return 'starting';
+    }
+    if (this.state === 'stopping') {
+      return 'stopping';
+    }
+    if (this.state === 'stopped') {
+      return 'stopped';
+    }
+    if (this.state === 'error') {
+      return 'error';
+    }
+    if (!this.hasActiveClient()) {
+      return this.encodedBytesProduced === 0 ? 'starting' : 'waiting-for-client';
+    }
+    return this.clientBytesWritten === 0 ? 'buffering' : 'running';
+  }
+
+  private getEncoderState(): 'starting' | 'running' | 'stopped' | 'error' {
+    if (this.state === 'error') {
+      return 'error';
+    }
+    if (this.state === 'stopped' || this.state === 'stopping') {
+      return 'stopped';
+    }
+    return this.encodedBytesProduced === 0 ? 'starting' : 'running';
+  }
+
+  private record(
+    category: AudioStreamDiagnosticCategory,
+    code: string,
+    message: string,
+    details?: Record<string, unknown>
+  ): void {
+    const event: AudioStreamDiagnosticEvent = {
       timestamp: new Date().toISOString(),
-      type,
-      ...(details ? { details } : {}),
+      category,
+      code,
+      message: sanitizeDiagnosticText(message),
+      ...(details ? { details: sanitizeDetails(details) } : {}),
     };
     this.events.push(event);
     if (this.events.length > maximumDiagnosticEvents) {

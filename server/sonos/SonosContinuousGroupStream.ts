@@ -1,6 +1,6 @@
 import type { Response } from 'express';
 
-import type { ContinuousAudioStreamDiagnosticEvent } from '../audio/ContinuousAudioStream.ts';
+import type { AudioStreamDiagnosticEvent } from '../../src/models/ResearchLab.ts';
 import { continuousAudioStreamManager } from '../audio/ContinuousAudioStreamManager.ts';
 import { logSonosError, logSonosInfo } from './SonosDiagnosticLog.ts';
 
@@ -172,7 +172,7 @@ class SonosContinuousGroupStream {
   private logRuntimeEvent(
     groupId: string,
     details: Record<string, unknown>,
-    event: ContinuousAudioStreamDiagnosticEvent
+    event: AudioStreamDiagnosticEvent
   ): void {
     const messages: Record<string, string> = {
       'encoder-started': 'Continuous group stream encoder started.',
@@ -189,7 +189,7 @@ class SonosContinuousGroupStream {
       'encoder-input-error': 'Continuous group stream encoder input failed.',
       'encoder-start-error': 'Continuous group stream encoder failed to start.',
     };
-    const message = messages[event.type];
+    const message = messages[event.code];
     if (!message) {
       return;
     }
@@ -200,10 +200,10 @@ class SonosContinuousGroupStream {
       ...event.details,
     };
     if (
-      event.type === 'encoder-exited' ||
-      event.type === 'encoder-diagnostic' ||
-      event.type === 'encoder-input-error' ||
-      event.type === 'encoder-start-error'
+      event.code === 'encoder-exited' ||
+      event.code === 'encoder-diagnostic' ||
+      event.code === 'encoder-input-error' ||
+      event.code === 'encoder-start-error'
     ) {
       logSonosError(message, diagnosticDetails);
       return;
