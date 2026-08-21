@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { logSonosError } from './SonosDiagnosticLog.ts';
 
 export interface SonosTokens {
   accessToken: string;
@@ -80,7 +81,7 @@ async function refreshSonosTokens(currentTokens: SonosTokens): Promise<SonosToke
   };
 
   if (!response.ok || !data.access_token || typeof data.expires_in !== 'number') {
-    console.error('Sonos token refresh failed:', response.status);
+    logSonosError('Sonos token refresh failed.', { httpStatus: response.status });
     throw new Error('SACscape is not connected to Sonos. Reconnect Sonos to continue.');
   }
 
@@ -112,10 +113,7 @@ export async function initializeSonosTokenStore(): Promise<void> {
     tokens = storedTokens;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.error(
-        'Unable to load persisted Sonos authorization:',
-        error instanceof Error ? error.message : error
-      );
+      logSonosError('Unable to load persisted Sonos authorization.', error);
     }
 
     tokens = null;

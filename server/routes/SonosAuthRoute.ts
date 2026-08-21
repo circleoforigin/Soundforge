@@ -1,6 +1,7 @@
 import type { Express } from 'express';
 import crypto from 'node:crypto';
 import { setSonosTokens } from '../sonos/SonosTokenStore.ts';
+import { logSonosError } from '../sonos/SonosDiagnosticLog.ts';
 
 export function registerSonosAuthRoute(
   app: Express
@@ -111,10 +112,7 @@ export function registerSonosAuthRoute(
         await tokenResponse.json();
 
       if (!tokenResponse.ok) {
-        console.error(
-          'Sonos token exchange failed:',
-          tokenData
-        );
+        logSonosError('Sonos token exchange failed.', tokenData);
 
         response.status(500).send(
           'Sonos authorization failed.'
@@ -155,7 +153,7 @@ await setSonosTokens({
         'SACscape successfully connected to Sonos.'
       );
     } catch (error) {
-      console.error(error);
+      logSonosError('Sonos OAuth callback failed.', error);
 
       response.status(500).send(
         'Unable to connect SACscape to Sonos.'

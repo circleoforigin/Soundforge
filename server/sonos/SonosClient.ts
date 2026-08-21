@@ -1,6 +1,7 @@
 import {
   getValidSonosAccessToken,
 } from './SonosTokenStore.ts';
+import { logSonosError, logSonosInfo } from './SonosDiagnosticLog.ts';
 
 const SONOS_API_BASE =
   'https://api.ws.sonos.com/control/api/v1';
@@ -71,10 +72,7 @@ export class SonosClient {
     const data = await response.json();
 
     if (!response.ok) {
-      console.error(
-        'Sonos getHouseholds failed:',
-        data
-      );
+      logSonosError('Sonos getHouseholds failed.', data);
 
       throw new Error(
         `Sonos request failed: ${response.status}`
@@ -110,10 +108,7 @@ export class SonosClient {
     await response.json();
 
   if (!response.ok) {
-    console.error(
-      'Sonos getGroups failed:',
-      data
-    );
+    logSonosError('Sonos getGroups failed.', data);
 
     throw new Error(
       `Sonos request failed: ${response.status}`
@@ -165,10 +160,7 @@ export class SonosClient {
     }
 
     if (!response.ok) {
-      console.error(
-        'Sonos playTestTone failed:',
-        data
-      );
+      logSonosError('Sonos playTestTone failed.', data);
 
       throw new SonosApiError(
         response.status,
@@ -198,7 +190,7 @@ export class SonosClient {
       streamUrl,
     };
 
-    console.info('Sonos custom audioClip attempt:', diagnosticBase);
+    logSonosInfo('AUDIO_CLIP', 'Sonos custom audioClip attempt.', diagnosticBase);
 
     try {
       const accessToken = await this.getAccessToken();
@@ -235,7 +227,7 @@ export class SonosClient {
         ? data as { id?: unknown; audioClip?: { id?: unknown } }
         : null;
 
-      console.info('Sonos custom audioClip response:', {
+      logSonosInfo('AUDIO_CLIP', 'Sonos custom audioClip response.', {
         ...diagnosticBase,
         timestamp: new Date().toISOString(),
         httpStatus: response.status,
@@ -250,7 +242,7 @@ export class SonosClient {
       return data;
     } catch (error) {
       if (!(error instanceof SonosApiError)) {
-        console.error('Sonos custom audioClip request error:', {
+        logSonosError('Sonos custom audioClip request error.', {
           ...diagnosticBase,
           timestamp: new Date().toISOString(),
           httpStatus: null,

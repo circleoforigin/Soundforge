@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import type { Express, Request } from 'express';
 import multer from 'multer';
+import { logSonosError, logSonosInfo } from '../sonos/SonosDiagnosticLog.ts';
 
 const routeDirectory = path.dirname(fileURLToPath(import.meta.url));
 const mediaDirectory = path.resolve(routeDirectory, '../../data/sonos-media');
@@ -62,7 +63,7 @@ export function registerSonosMediaRoute(app: Express) {
     const startedAt = new Date().toISOString();
 
     response.on('finish', () => {
-      console.info('Sonos media request:', {
+      logSonosInfo('MEDIA', 'Sonos media request.', {
         timestamp: startedAt,
         method: request.method,
         assetId: request.params.assetId,
@@ -126,6 +127,10 @@ export function registerSonosMediaRoute(app: Express) {
           streamUrl: getPublicMediaUrl(request, assetId),
         });
       } catch (error) {
+        logSonosError('Sonos media synchronization failed.', {
+          assetId: request.params.assetId,
+          error,
+        });
         response.status(400).json({
           ok: false,
           message: error instanceof Error ? error.message : 'Unable to synchronize Sonos media.',
@@ -152,7 +157,11 @@ export function registerSonosMediaRoute(app: Express) {
         'Content-Type': mediaTypes.get(path.extname(mediaPath)) ?? 'application/octet-stream',
       });
       response.status(200).end();
-    } catch {
+    } catch (error) {
+      logSonosError('Sonos media HEAD failed.', {
+        assetId: request.params.assetId,
+        error,
+      });
       response.sendStatus(400);
     }
   });
@@ -217,6 +226,10 @@ export function registerSonosMediaRoute(app: Express) {
       response.locals.servedRange = `bytes ${start}-${end}/${stats.size}`;
       fs.createReadStream(mediaPath, { start, end }).pipe(response);
     } catch (error) {
+      logSonosError('Sonos media request failed.', {
+        assetId: request.params.assetId,
+        error,
+      });
       response.status(400).json({
         ok: false,
         message: error instanceof Error ? error.message : 'Unable to serve Sonos media.',

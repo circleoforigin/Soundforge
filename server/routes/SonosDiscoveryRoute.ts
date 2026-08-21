@@ -4,6 +4,7 @@ import {
   SonosApiError,
   SonosClient,
 } from '../sonos/SonosClient.ts';
+import { logSonosError } from '../sonos/SonosDiagnosticLog.ts';
 
 export function registerSonosDiscoveryRoute(
   app: Express
@@ -23,7 +24,7 @@ export function registerSonosDiscoveryRoute(
           ...households,
         });
       } catch (error) {
-        console.error(error);
+        logSonosError('Sonos test-tone route failed.', error);
 
         response.status(500).json({
           ok: false,
@@ -54,7 +55,7 @@ export function registerSonosDiscoveryRoute(
           ...groups,
         });
       } catch (error) {
-        console.error(error);
+        logSonosError('Sonos custom audioClip route failed.', error);
 
         response.status(500).json({
           ok: false,
@@ -82,7 +83,7 @@ export function registerSonosDiscoveryRoute(
 
         response.json(sonosResponse);
       } catch (error) {
-        console.error(error);
+        logSonosError('Sonos household discovery route failed.', error);
 
         if (error instanceof SonosApiError) {
           response.status(error.status).json({
@@ -123,6 +124,10 @@ export function registerSonosDiscoveryRoute(
           !URL.canParse(streamUrl) ||
           !streamUrl.startsWith('https://')
         ) {
+          logSonosError('Sonos custom audioClip rejected invalid stream URL.', {
+            playerId: request.params.playerId,
+            assetId: assetId?.trim() || 'unknown',
+          });
           response.status(400).json({
             ok: false,
             message: 'A public HTTPS streamUrl is required.',
@@ -131,6 +136,11 @@ export function registerSonosDiscoveryRoute(
         }
 
         if (!Number.isFinite(volume) || Number(volume) <= 0) {
+          logSonosError('Sonos custom audioClip rejected invalid volume.', {
+            playerId: request.params.playerId,
+            assetId: assetId?.trim() || 'unknown',
+            volume,
+          });
           response.status(400).json({
             ok: false,
             message: 'A positive clip volume is required.',
@@ -150,7 +160,7 @@ export function registerSonosDiscoveryRoute(
 
         response.json({ ok: true, sonosResponse });
       } catch (error) {
-        console.error(error);
+        logSonosError('Sonos group discovery route failed.', error);
 
         if (error instanceof SonosApiError) {
           response.status(error.status).json({
