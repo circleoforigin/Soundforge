@@ -183,43 +183,83 @@ export class SonosClient {
     playerId: string,
     streamUrl: string,
     volume: number,
-    name: string
+    name: string,
+    assetId: string,
+    assetName: string
   ): Promise<unknown> {
-    const accessToken = await this.getAccessToken();
-    const response = await fetch(
-      `${SONOS_API_BASE}/players/${encodeURIComponent(playerId)}/audioClip`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          name,
-          appId: 'com.circleoforigin.sacscape',
-          priority: 'LOW',
-          clipType: 'CUSTOM',
-          streamUrl,
-          volume: Math.max(1, Math.min(100, Math.round(volume))),
-        }),
+    const calculatedVolume = Math.max(1, Math.min(100, Math.round(volume)));
+    const diagnosticBase = {
+      timestamp: new Date().toISOString(),
+      playerId,
+      assetId,
+      assetName,
+      clipName: name,
+      volume: calculatedVolume,
+      streamUrl,
+    };
+
+    console.info('Sonos custom audioClip attempt:', diagnosticBase);
+
+    try {
+      const accessToken = await this.getAccessToken();
+      const response = await fetch(
+        `${SONOS_API_BASE}/players/${encodeURIComponent(playerId)}/audioClip`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            name,
+            appId: 'com.circleoforigin.sacscape',
+            priority: 'LOW',
+            clipType: 'CUSTOM',
+            streamUrl,
+            volume: calculatedVolume,
+          }),
+        }
+      );
+      const responseText = await response.text();
+      let data: unknown = null;
+
+      if (responseText) {
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          data = responseText;
+        }
       }
-    );
-    const responseText = await response.text();
-    let data: unknown = null;
 
-    if (responseText) {
-      try {
-        data = JSON.parse(responseText);
-      } catch {
-        data = responseText;
+      const responseObject = data && typeof data === 'object'
+        ? data as { id?: unknown; audioClip?: { id?: unknown } }
+        : null;
+
+      console.info('Sonos custom audioClip response:', {
+        ...diagnosticBase,
+        timestamp: new Date().toISOString(),
+        httpStatus: response.status,
+        responseBody: data,
+        clipId: responseObject?.id ?? responseObject?.audioClip?.id ?? null,
+      });
+
+      if (!response.ok) {
+        throw new SonosApiError(response.status, data);
       }
-    }
 
-    if (!response.ok) {
-      console.error('Sonos playAudioClip failed:', data);
-      throw new SonosApiError(response.status, data);
-    }
+      return data;
+    } catch (error) {
+      if (!(error instanceof SonosApiError)) {
+        console.error('Sonos custom audioClip request error:', {
+          ...diagnosticBase,
+          timestamp: new Date().toISOString(),
+          httpStatus: null,
+          responseBody: error instanceof Error ? error.message : error,
+          clipId: null,
+        });
+      }
 
-    return data;
+      throw error;
+    }
   }
 }

@@ -11,6 +11,16 @@ interface SonosOneShotRequest {
   speakerMix: SpeakerMix[];
   sceneOneShotVolume: number;
   sceneMasterVolume: number;
+  roomSpeakerNames: ReadonlyMap<string, string>;
+}
+
+export interface SonosOneShotTargetResult {
+  speakerId: string;
+  playerId: string;
+  label: string;
+  accepted: boolean;
+  httpStatus?: number;
+  message: string;
 }
 
 const synchronizedStreamUrls = new Map<string, string>();
@@ -132,9 +142,10 @@ export async function playSonosOneShot({
   speakerMix,
   sceneOneShotVolume,
   sceneMasterVolume,
-}: SonosOneShotRequest): Promise<void> {
+  roomSpeakerNames,
+}: SonosOneShotRequest): Promise<SonosOneShotTargetResult[]> {
   if (node.muted) {
-    return;
+    return [];
   }
 
   const streamUrl = await resolveSonosStreamUrl(asset);
@@ -157,41 +168,67 @@ export async function playSonosOneShot({
       dbToLinear(speaker.trim ?? 0);
 
     return effectiveGain > 0
-      ? [{ playerId: speaker.deviceId, volume: Math.min(100, effectiveGain * 100) }]
+      ? [{
+          speakerId: speaker.speakerId,
+          playerId: speaker.deviceId,
+          label: roomSpeakerNames.get(speaker.speakerId) ||
+            speaker.displayName ||
+            speaker.speakerId,
+          volume: Math.min(100, effectiveGain * 100),
+        }]
       : [];
   });
 
   if (targets.length === 0) {
-    return;
+    return [];
   }
 
-  const results = await Promise.allSettled(
-    targets.map(async ({ playerId, volume }) => {
-      const response = await fetch(
-        apiUrl(`/api/sonos/audio-clip/${encodeURIComponent(playerId)}`),
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            streamUrl,
-            volume,
-            name: node.instanceName || asset.name || 'SACscape One Shot',
-          }),
-        }
-      );
+  return Promise.all(
+    targets.map(async ({ speakerId, playerId, label, volume }) => {
+      try {
+        const response = await fetch(
+          apiUrl(`/api/sonos/audio-clip/${encodeURIComponent(playerId)}`),
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              streamUrl,
+              volume,
+              name: node.instanceName || asset.name || 'SACscape One Shot',
+              assetId: asset.id,
+              assetName: asset.name,
+            }),
+          }
+        );
 
-      if (!response.ok) {
-        throw new Error(await getErrorMessage(response, `Unable to play on ${playerId}.`));
+        if (response.ok) {
+          return {
+            speakerId,
+            playerId,
+            label,
+            accepted: true,
+            httpStatus: response.status,
+            message: 'accepted',
+          };
+        }
+
+        return {
+          speakerId,
+          playerId,
+          label,
+          accepted: false,
+          httpStatus: response.status,
+          message: await getErrorMessage(response, `Sonos ${response.status}`),
+        };
+      } catch (error) {
+        return {
+          speakerId,
+          playerId,
+          label,
+          accepted: false,
+          message: error instanceof Error ? error.message : 'Request failed',
+        };
       }
     })
   );
-  const failures = results.filter((result) => result.status === 'rejected');
-
-  if (failures.length > 0) {
-    throw new Error(
-      failures.length === results.length
-        ? 'Sonos could not play this One Shot on any mapped speaker.'
-        : `Sonos played on ${results.length - failures.length} of ${results.length} mapped speakers.`
-    );
-  }
 }

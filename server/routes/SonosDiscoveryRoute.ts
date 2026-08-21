@@ -110,10 +110,12 @@ export function registerSonosDiscoveryRoute(
     json(),
     async (request, response) => {
       try {
-        const { streamUrl, volume, name } = request.body as {
+        const { streamUrl, volume, name, assetId, assetName } = request.body as {
           streamUrl?: string;
           volume?: number;
           name?: string;
+          assetId?: string;
+          assetName?: string;
         };
 
         if (
@@ -141,7 +143,9 @@ export function registerSonosDiscoveryRoute(
           request.params.playerId,
           streamUrl,
           Number(volume),
-          name?.trim() || 'SACscape One Shot'
+          name?.trim() || 'SACscape One Shot',
+          assetId?.trim() || 'unknown',
+          assetName?.trim() || name?.trim() || 'Unknown asset'
         );
 
         response.json({ ok: true, sonosResponse });

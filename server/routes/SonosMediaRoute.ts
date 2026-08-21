@@ -58,6 +58,26 @@ function getPublicMediaUrl(request: Request, assetId: string): string {
 }
 
 export function registerSonosMediaRoute(app: Express) {
+  app.use('/api/sonos/media/:assetId', (request, response, next) => {
+    const startedAt = new Date().toISOString();
+
+    response.on('finish', () => {
+      console.info('Sonos media request:', {
+        timestamp: startedAt,
+        method: request.method,
+        assetId: request.params.assetId,
+        userAgent: request.header('user-agent') ?? null,
+        range: request.header('range') ?? null,
+        responseStatus: response.statusCode,
+        bytesServed: response.locals.bytesServed ?? 0,
+        servedRange: response.locals.servedRange ?? null,
+        totalBytes: response.locals.totalBytes ?? null,
+      });
+    });
+
+    next();
+  });
+
   app.post(
     '/api/sonos/media/:assetId',
     upload.single('file'),
@@ -125,6 +145,7 @@ export function registerSonosMediaRoute(app: Express) {
       }
 
       const stats = fs.statSync(mediaPath);
+      response.locals.totalBytes = stats.size;
       response.set({
         'Accept-Ranges': 'bytes',
         'Content-Length': stats.size.toString(),
@@ -147,6 +168,7 @@ export function registerSonosMediaRoute(app: Express) {
       }
 
       const stats = fs.statSync(mediaPath);
+      response.locals.totalBytes = stats.size;
       const mimeType = mediaTypes.get(path.extname(mediaPath)) ?? 'application/octet-stream';
       const range = request.headers.range;
 
@@ -154,6 +176,8 @@ export function registerSonosMediaRoute(app: Express) {
       response.set('Content-Type', mimeType);
 
       if (!range) {
+        response.locals.bytesServed = stats.size;
+        response.locals.servedRange = `bytes 0-${stats.size - 1}/${stats.size}`;
         response.set('Content-Length', stats.size.toString());
         fs.createReadStream(mediaPath).pipe(response);
         return;
@@ -189,6 +213,8 @@ export function registerSonosMediaRoute(app: Express) {
         'Content-Length': (end - start + 1).toString(),
         'Content-Range': `bytes ${start}-${end}/${stats.size}`,
       });
+      response.locals.bytesServed = end - start + 1;
+      response.locals.servedRange = `bytes ${start}-${end}/${stats.size}`;
       fs.createReadStream(mediaPath, { start, end }).pipe(response);
     } catch (error) {
       response.status(400).json({

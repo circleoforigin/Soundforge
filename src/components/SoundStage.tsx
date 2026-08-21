@@ -553,16 +553,33 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       }
 
       try {
-        await playSonosOneShot({
+        const results = await playSonosOneShot({
           asset,
           node,
           speakerMap: activeSpeakerMap,
           speakerMix: getRoomSpeakerMixForNode(node),
           sceneOneShotVolume: scene.volume.oneShot,
           sceneMasterVolume: scene.volume.master,
+          roomSpeakerNames: new Map(
+            activeRoom?.speakers.map((speaker) => [speaker.speakerId, speaker.name]) ?? []
+          ),
         });
 
-        if (onComplete) {
+        if (results.length > 0) {
+          showFieldMessage(
+            results.map((result) => {
+              const idSuffix = result.playerId.slice(-8);
+              return result.accepted
+                ? `${result.label} (…${idSuffix}): accepted`
+                : `${result.label} (…${idSuffix}): Sonos ${result.httpStatus ?? 'request failed'}`;
+            }).join(' · ')
+          );
+        }
+
+        if (
+          onComplete &&
+          (results.length === 0 || results.every((result) => result.accepted))
+        ) {
           window.setTimeout(onComplete, Math.max(250, asset.durationMs ?? 1000));
         }
       } catch (error) {
