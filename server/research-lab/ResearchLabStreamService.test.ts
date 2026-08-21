@@ -130,6 +130,14 @@ test('generic creation binds device and group-scoped transport metadata', async 
     assert.equal(bondedSnapshot.transport?.independentlyTargetable, false);
     assert.equal(standaloneSnapshot.transport?.independentlyTargetable, true);
     assert.equal(transport.started.length, 2);
+    assert.equal(bondedSnapshot.encoder.startupBufferReady, true);
+    const readyIndex = bondedSnapshot.recentEvents.findIndex(
+      (event) => event.code === 'startup-buffer-ready'
+    );
+    const attachIndex = bondedSnapshot.recentEvents.findIndex(
+      (event) => event.code === 'transport-attachment-begin'
+    );
+    assert.ok(readyIndex >= 0 && attachIndex > readyIndex);
   } finally {
     manager.stopAll('creation test cleanup');
   }

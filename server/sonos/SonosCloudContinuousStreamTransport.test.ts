@@ -106,6 +106,8 @@ function runtimeSnapshot(deliveredBytes: number): AudioStreamSnapshot {
       framesGenerated: 1,
       pcmBytesGenerated: 3_528,
       encodedBytesProduced: deliveredBytes,
+      startupBufferBytes: 5_000,
+      startupBufferReady: true,
       stdinBackpressured: false,
     },
     httpClient: {

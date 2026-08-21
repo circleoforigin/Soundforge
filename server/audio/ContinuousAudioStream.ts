@@ -27,8 +27,84 @@ const toneFrequencyHz = 880;
 const toneDurationMs = 1_000;
 const toneAmplitude = 0.4;
 const maximumDiagnosticEvents = 200;
+const startupReadyFrameCount = 8;
+const maximumStartupBufferBytes = 256 * 1_024;
 const ffmpegExecutable = ffmpegPath as unknown as string | null;
 const sensitiveKeyPattern = /authorization|cookie|credential|password|secret|token/i;
+
+export const continuousAudioStartup = {
+  readyFrameCount: startupReadyFrameCount,
+  maximumBufferBytes: maximumStartupBufferBytes,
+} as const;
+
+interface Mp3FrameScan {
+  firstFrameOffset: number | null;
+  firstFrameBytes: number | null;
+  completeFrameCount: number;
+}
+
+function mp3FrameLength(buffer: Buffer, offset: number): number | null {
+  if (offset + 4 > buffer.length) {
+    return null;
+  }
+  const header = buffer.readUInt32BE(offset);
+  if ((header >>> 21) !== 0x7ff) {
+    return null;
+  }
+  const versionBits = (header >>> 19) & 0x3;
+  const layerBits = (header >>> 17) & 0x3;
+  const bitrateIndex = (header >>> 12) & 0xf;
+  const sampleRateIndex = (header >>> 10) & 0x3;
+  const padding = (header >>> 9) & 0x1;
+  if (versionBits === 1 || layerBits !== 1 || bitrateIndex === 0 || bitrateIndex === 15 || sampleRateIndex === 3) {
+    return null;
+  }
+  const mpeg1Bitrates = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+  const mpeg2Bitrates = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+  const sampleRates = versionBits === 3
+    ? [44_100, 48_000, 32_000]
+    : versionBits === 2
+      ? [22_050, 24_000, 16_000]
+      : [11_025, 12_000, 8_000];
+  const bitrateKbps = (versionBits === 3 ? mpeg1Bitrates : mpeg2Bitrates)[bitrateIndex];
+  const sampleRate = sampleRates[sampleRateIndex];
+  if (!bitrateKbps || !sampleRate) {
+    return null;
+  }
+  const coefficient = versionBits === 3 ? 144_000 : 72_000;
+  return Math.floor(coefficient * bitrateKbps / sampleRate) + padding;
+}
+
+function inspectMp3Frames(buffer: Buffer): Mp3FrameScan {
+  let best: Mp3FrameScan = {
+    firstFrameOffset: null,
+    firstFrameBytes: null,
+    completeFrameCount: 0,
+  };
+  for (let candidate = 0; candidate + 4 <= buffer.length; candidate += 1) {
+    const firstFrameBytes = mp3FrameLength(buffer, candidate);
+    if (!firstFrameBytes || candidate + firstFrameBytes > buffer.length) {
+      continue;
+    }
+    let cursor = candidate;
+    let completeFrameCount = 0;
+    while (cursor + 4 <= buffer.length) {
+      const frameBytes = mp3FrameLength(buffer, cursor);
+      if (!frameBytes || cursor + frameBytes > buffer.length) {
+        break;
+      }
+      completeFrameCount += 1;
+      cursor += frameBytes;
+    }
+    if (completeFrameCount > best.completeFrameCount) {
+      best = { firstFrameOffset: candidate, firstFrameBytes, completeFrameCount };
+    }
+    if (completeFrameCount >= startupReadyFrameCount) {
+      return best;
+    }
+  }
+  return best;
+}
 
 function sanitizeDiagnosticText(value: string): string {
   return value
@@ -81,6 +157,7 @@ function sanitizeDetails(details: Record<string, unknown>): Record<string, unkno
 
 type ContinuousAudioStreamState =
   | 'created'
+  | 'preparing'
   | 'running'
   | 'stopping'
   | 'stopped'
@@ -111,6 +188,16 @@ export class ContinuousAudioStream {
   private clientLocalCloseReason: string | null = null;
   private toneSamplesRemaining = 0;
   private tonePhase = 0;
+  private startupBuffer = Buffer.alloc(0);
+  private startupPrefixBytes = 0;
+  private startupBufferReady = false;
+  private startupBufferFlushed = false;
+  private firstMpegFrameOffset: number | null = null;
+  private completeStartupFrameCount = 0;
+  private firstLiveBytesDelivered = false;
+  private resolveReady: (() => void) | null = null;
+  private rejectReady: ((error: Error) => void) | null = null;
+  private readonly readyPromise: Promise<void>;
   private state: ContinuousAudioStreamState = 'created';
   private readonly createdAt = new Date();
   private stoppedAt: Date | null = null;
@@ -131,6 +218,11 @@ export class ContinuousAudioStream {
   constructor(id: string, options: ContinuousAudioStreamOptions = {}) {
     this.id = id;
     this.options = options;
+    this.readyPromise = new Promise<void>((resolve, reject) => {
+      this.resolveReady = resolve;
+      this.rejectReady = reject;
+    });
+    void this.readyPromise.catch(() => undefined);
     this.transportSnapshot = options.transportId ? {
       state: 'starting',
       targetScope: null,
@@ -145,7 +237,7 @@ export class ContinuousAudioStream {
   }
 
   start(): void {
-    if (this.state === 'running') {
+    if (this.state === 'preparing' || this.state === 'running') {
       return;
     }
     if (this.state === 'stopped') {
@@ -172,7 +264,7 @@ export class ContinuousAudioStream {
 
     this.encoder = encoder;
     this.encoderStartedAt = new Date();
-    this.state = 'running';
+    this.state = 'preparing';
     this.record('encoder', 'encoder-started', 'FFmpeg encoder started.', {
       pid: encoder.pid ?? null,
       millisecondsAfterClientConnection: this.clientConnectedAt
@@ -196,6 +288,28 @@ export class ContinuousAudioStream {
     encoder.on('exit', (code, signal) => this.handleEncoderExit(encoder, code, signal));
 
     this.startFrameTimer(encoder);
+    this.record('lifecycle', 'pcm-clock-started', 'PCM generation clock started.', {
+      frameDurationMs: continuousAudioFormat.frameDurationMs,
+    });
+  }
+
+  async waitUntilReadyForClient(timeoutMilliseconds = 15_000): Promise<void> {
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        this.readyPromise,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('Continuous audio stream startup buffer did not become ready.')),
+            timeoutMilliseconds
+          );
+        }),
+      ]);
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    }
   }
 
   bindHttpClient(client: HttpStreamClient): void {
@@ -207,9 +321,11 @@ export class ContinuousAudioStream {
     this.clientRemovalHandled = false;
     this.clientLocalCloseReason = null;
     this.clientConnectedAt = new Date();
-    this.record('http', 'client-connected', 'HTTP stream client connected; starting encoder.', {
+    this.record('http', 'client-connected', 'HTTP stream client connected.', {
       encodedBytesBeforeConnection: this.encodedBytesProduced,
       pcmFramesBeforeConnection: this.pcmFramesGenerated,
+      encoderAlreadyStarted: Boolean(this.encoder),
+      startupBufferReady: this.startupBufferReady,
     });
 
     const removeClient = () => this.handleClientDisconnected(client);
@@ -225,10 +341,18 @@ export class ContinuousAudioStream {
         writableLength: client.writableLength,
       });
       this.encoder?.stdout.resume();
+      if (this.startupBufferFlushed && !this.firstLiveBytesDelivered) {
+        this.record('encoder', 'live-output-resumed', 'Live encoded output resumed after HTTP drain.');
+      }
     });
 
     try {
-      this.start();
+      if (this.state === 'created') {
+        this.start();
+      }
+      if (this.startupBufferReady) {
+        this.flushStartupBuffer();
+      }
     } catch (error) {
       this.clientLocalCloseReason = 'encoder failed to start';
       client.destroy(error instanceof Error ? error : undefined);
@@ -256,7 +380,7 @@ export class ContinuousAudioStream {
   }
 
   isReadyForTone(): boolean {
-    return this.state === 'running' && this.hasActiveClient() && this.clientBytesWritten > 0;
+    return this.state === 'running' && this.hasActiveClient() && this.firstLiveBytesDelivered;
   }
 
   stop(reason = 'stream stopped'): void {
@@ -268,6 +392,11 @@ export class ContinuousAudioStream {
       reason,
     });
     this.toneSamplesRemaining = 0;
+    if (!this.startupBufferReady) {
+      this.rejectReady?.(new Error(`Continuous audio stream stopped before startup was ready: ${reason}`));
+    }
+    this.resolveReady = null;
+    this.rejectReady = null;
     if (this.frameTimer) {
       clearInterval(this.frameTimer);
       this.frameTimer = null;
@@ -292,9 +421,10 @@ export class ContinuousAudioStream {
   addDiagnosticEvent(
     category: AudioStreamDiagnosticCategory,
     message: string,
-    details?: Record<string, unknown>
+    details?: Record<string, unknown>,
+    code = 'external-diagnostic'
   ): void {
-    this.record(category, 'external-diagnostic', message, details);
+    this.record(category, code, message, details);
   }
 
   updateTransport(
@@ -343,6 +473,8 @@ export class ContinuousAudioStream {
         framesGenerated: this.pcmFramesGenerated,
         pcmBytesGenerated: this.pcmBytesGenerated,
         encodedBytesProduced: this.encodedBytesProduced,
+        startupBufferBytes: this.startupPrefixBytes || this.startupBuffer.length,
+        startupBufferReady: this.startupBufferReady,
         stdinBackpressured: this.stdinBackpressured,
       },
       httpClient: {
@@ -392,6 +524,105 @@ export class ContinuousAudioStream {
       });
     }
 
+    if (!this.startupBufferFlushed) {
+      this.retainStartupChunk(encoder, chunk);
+      return;
+    }
+
+    this.writeLiveChunk(encoder, chunk);
+  }
+
+  private retainStartupChunk(encoder: ChildProcessWithoutNullStreams, chunk: Buffer): void {
+    if (this.startupBuffer.length + chunk.length > maximumStartupBufferBytes) {
+      const error = new Error(
+        `MP3 startup buffer exceeded ${maximumStartupBufferBytes} bytes before becoming ready.`
+      );
+      this.rejectReady?.(error);
+      this.rejectReady = null;
+      this.recordError('startup-buffer-overflow', error);
+      this.state = 'error';
+      encoder.kill();
+      return;
+    }
+
+    this.startupBuffer = Buffer.concat([this.startupBuffer, chunk]);
+    this.record('encoder', 'startup-buffer-progress', 'MP3 startup buffer retained.', {
+      startupBufferBytes: this.startupBuffer.length,
+      maximumStartupBufferBytes,
+    });
+    const frameScan = inspectMp3Frames(this.startupBuffer);
+    if (frameScan.firstFrameOffset !== null && this.firstMpegFrameOffset === null) {
+      this.firstMpegFrameOffset = frameScan.firstFrameOffset;
+      this.record('encoder', 'first-mpeg-frame', 'First complete MPEG audio frame found.', {
+        byteOffset: frameScan.firstFrameOffset,
+        frameBytes: frameScan.firstFrameBytes,
+      });
+    }
+    this.completeStartupFrameCount = frameScan.completeFrameCount;
+    if (!this.startupBufferReady && frameScan.completeFrameCount >= startupReadyFrameCount) {
+      this.startupBufferReady = true;
+      this.startupPrefixBytes = this.startupBuffer.length;
+      encoder.stdout.pause();
+      this.record('encoder', 'startup-buffer-ready', 'MP3 startup buffer is ready for a client.', {
+        startupBufferBytes: this.startupBuffer.length,
+        completeMpegFrames: frameScan.completeFrameCount,
+        requiredMpegFrames: startupReadyFrameCount,
+        firstMpegFrameOffset: frameScan.firstFrameOffset,
+        stdoutPaused: true,
+      });
+      this.resolveReady?.();
+      this.resolveReady = null;
+      this.rejectReady = null;
+      if (this.hasActiveClient()) {
+        this.flushStartupBuffer();
+      }
+    }
+  }
+
+  private flushStartupBuffer(): void {
+    const client = this.client;
+    const encoder = this.encoder;
+    if (
+      !client || !encoder || !this.startupBufferReady || this.startupBufferFlushed ||
+      client.destroyed || client.writableEnded
+    ) {
+      return;
+    }
+    const startupBytes = this.startupBuffer;
+    const accepted = client.write(startupBytes);
+    this.clientBytesWritten += startupBytes.length;
+    this.lastClientWritableLength = client.writableLength;
+    this.startupBufferFlushed = true;
+    this.startupBuffer = Buffer.alloc(0);
+    this.record('http', 'startup-buffer-flushed', 'Complete MP3 startup buffer flushed to client.', {
+      chunkBytes: startupBytes.length,
+      completeMpegFrames: this.completeStartupFrameCount,
+      beganAtEncodedByte: 0,
+      accepted,
+    });
+    this.record('http', 'first-client-bytes', 'First encoded bytes written to HTTP client.', {
+      chunkBytes: startupBytes.length,
+      encodedBytesProducedBeforeChunk: 0,
+      startupBuffer: true,
+      millisecondsAfterClientConnection: this.clientConnectedAt
+        ? Date.now() - this.clientConnectedAt.getTime()
+        : null,
+      millisecondsAfterEncoderStart: this.encoderStartedAt
+        ? Date.now() - this.encoderStartedAt.getTime()
+        : null,
+    });
+    if (!accepted) {
+      this.httpBackpressured = true;
+      this.record('backpressure', 'http-backpressure', 'HTTP startup flush is backpressured.', {
+        writableLength: client.writableLength,
+      });
+      return;
+    }
+    encoder.stdout.resume();
+    this.record('encoder', 'live-output-resumed', 'Live encoded output resumed after startup flush.');
+  }
+
+  private writeLiveChunk(encoder: ChildProcessWithoutNullStreams, chunk: Buffer): void {
     const client = this.client;
     if (!client || client.destroyed || client.writableEnded) {
       return;
@@ -399,10 +630,11 @@ export class ContinuousAudioStream {
     const accepted = client.write(chunk);
     this.clientBytesWritten += chunk.length;
     this.lastClientWritableLength = client.writableLength;
-    if (this.clientBytesWritten === chunk.length) {
-      this.record('http', 'first-client-bytes', 'First encoded bytes written to HTTP client.', {
+    if (!this.firstLiveBytesDelivered) {
+      this.firstLiveBytesDelivered = true;
+      this.state = 'running';
+      this.record('http', 'first-live-bytes', 'First live bytes followed the MP3 startup prefix.', {
         chunkBytes: chunk.length,
-        encodedBytesProducedBeforeChunk: this.encodedBytesProduced - chunk.length,
         millisecondsAfterClientConnection: this.clientConnectedAt
           ? Date.now() - this.clientConnectedAt.getTime()
           : null,
@@ -410,6 +642,7 @@ export class ContinuousAudioStream {
           ? Date.now() - this.encoderStartedAt.getTime()
           : null,
       });
+      this.record('lifecycle', 'stream-running', 'Continuous audio stream is running.');
     }
     if (!accepted && !this.httpBackpressured) {
       this.httpBackpressured = true;
@@ -487,7 +720,6 @@ export class ContinuousAudioStream {
       closedBy: this.clientLocalCloseReason ? 'local' : 'remote',
       reason,
     });
-    this.encoder?.stdout.resume();
     this.options.onClientDisconnected?.(reason);
   }
 
@@ -507,6 +739,11 @@ export class ContinuousAudioStream {
     if (this.state !== 'stopped') {
       this.state = 'error';
       this.lastError = `FFmpeg exited (code ${String(code)}, signal ${String(signal)}).`;
+    }
+    if (!this.startupBufferReady) {
+      this.rejectReady?.(new Error(this.lastError ?? 'FFmpeg exited before startup was ready.'));
+      this.resolveReady = null;
+      this.rejectReady = null;
     }
     this.record(
       this.state === 'error' ? 'error' : 'encoder',
@@ -531,6 +768,9 @@ export class ContinuousAudioStream {
     if (this.state === 'created') {
       return 'waiting-for-client';
     }
+    if (this.state === 'preparing' && !this.startupBufferReady) {
+      return 'preparing';
+    }
     if (this.state === 'stopping') {
       return 'stopping';
     }
@@ -541,9 +781,12 @@ export class ContinuousAudioStream {
       return 'error';
     }
     if (!this.hasActiveClient()) {
-      return 'waiting-for-client';
+      return this.startupBufferReady ? 'ready-for-client' : 'waiting-for-client';
     }
-    return this.clientBytesWritten === 0 ? 'buffering' : 'running';
+    if (!this.startupBufferFlushed) {
+      return 'flushing-startup';
+    }
+    return this.firstLiveBytesDelivered ? 'running' : 'buffering';
   }
 
   private getEncoderState(): 'starting' | 'running' | 'stopped' | 'error' {

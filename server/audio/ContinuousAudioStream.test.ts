@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
+import {
+  continuousAudioStartup,
+} from './ContinuousAudioStream.ts';
 import { ContinuousAudioStreamManager } from './ContinuousAudioStreamManager.ts';
 
 function delay(milliseconds: number): Promise<void> {
@@ -28,42 +31,58 @@ function bindClient(stream: { bindHttpClient(client: PassThrough): void }): Pass
   return client;
 }
 
-test('encoder waits for its HTTP client and delivers MP3 from byte zero', async () => {
+test('encoder prewarms a bounded valid MP3 prefix before its HTTP client connects', async () => {
   const manager = new ContinuousAudioStreamManager();
   const stream = manager.create();
   let client: PassThrough | undefined;
 
   try {
+    stream.start();
+    assert.throws(() => stream.injectTestTone(), /not ready/i);
+    await stream.waitUntilReadyForClient();
+    const ready = stream.getSnapshot();
+    assert.equal(ready.lifecycle, 'ready-for-client');
+    assert.ok(ready.encoder.pid);
+    assert.equal(ready.encoder.startupBufferReady, true);
+    assert.ok(ready.encoder.startupBufferBytes > 0);
+    assert.ok(ready.encoder.startupBufferBytes <= continuousAudioStartup.maximumBufferBytes);
+    assert.equal(ready.encoder.encodedBytesProduced, ready.encoder.startupBufferBytes);
+    assert.equal(ready.source, 'silence');
+    assert.throws(() => stream.injectTestTone(), /not ready/i);
+    assert.ok(ready.recentEvents.some((event) => event.code === 'first-mpeg-frame'));
+    const readyEvent = ready.recentEvents.find((event) => event.code === 'startup-buffer-ready');
+    assert.ok(
+      Number(readyEvent?.details?.completeMpegFrames) >= continuousAudioStartup.readyFrameCount
+    );
+
     await delay(120);
-    const waiting = stream.getSnapshot();
-    assert.equal(waiting.lifecycle, 'waiting-for-client');
-    assert.equal(waiting.encoder.state, 'stopped');
-    assert.equal(waiting.encoder.pid, null);
-    assert.equal(waiting.encoder.framesGenerated, 0);
-    assert.equal(waiting.encoder.encodedBytesProduced, 0);
+    const paused = stream.getSnapshot();
+    assert.equal(paused.encoder.encodedBytesProduced, ready.encoder.encodedBytesProduced);
+    assert.equal(paused.encoder.startupBufferBytes, ready.encoder.startupBufferBytes);
 
     client = new PassThrough();
     const firstChunkPromise = new Promise<Buffer>((resolve) => {
       client?.once('data', (chunk: Buffer) => resolve(Buffer.from(chunk)));
     });
     stream.bindHttpClient(client);
-    const connected = stream.getSnapshot();
-    assert.ok(connected.encoder.pid);
-    assert.ok(connected.encoder.startedAt);
-    assert.equal(connected.encoder.encodedBytesProduced, 0);
-
     await waitFor(() => stream.isReadyForTone());
     const firstChunk = await firstChunkPromise;
     const running = stream.getSnapshot();
     const connectedEvent = running.recentEvents.find((event) => event.code === 'client-connected');
     const firstDelivery = running.recentEvents.find((event) => event.code === 'first-client-bytes');
-    assert.equal(connectedEvent?.details?.encodedBytesBeforeConnection, 0);
+    assert.equal(
+      connectedEvent?.details?.encodedBytesBeforeConnection,
+      ready.encoder.encodedBytesProduced
+    );
     assert.equal(firstDelivery?.details?.encodedBytesProducedBeforeChunk, 0);
-    assert.ok(Number(firstDelivery?.details?.chunkBytes) > 0);
+    assert.equal(Number(firstDelivery?.details?.chunkBytes), ready.encoder.startupBufferBytes);
     const beginsWithId3 = firstChunk.subarray(0, 3).toString('ascii') === 'ID3';
     const beginsWithMpegFrameSync =
       firstChunk[0] === 0xff && (firstChunk[1] & 0xe0) === 0xe0;
     assert.ok(beginsWithId3 || beginsWithMpegFrameSync, 'MP3 must begin at a valid stream boundary');
+    assert.ok(running.recentEvents.some((event) => event.code === 'startup-buffer-flushed'));
+    assert.ok(running.recentEvents.some((event) => event.code === 'first-live-bytes'));
+    assert.equal(running.httpClient.deliveredBytes, running.encoder.encodedBytesProduced);
 
     stream.injectTestTone();
     assert.equal(stream.getSnapshot().source, 'test-tone');
@@ -84,6 +103,12 @@ test('two continuous streams isolate encoder, source, counters, and cleanup', as
     assert.equal(streamA.getSnapshot().encoder.pid, null);
     assert.equal(streamB.getSnapshot().encoder.pid, null);
 
+    streamA.start();
+    streamB.start();
+    await Promise.all([
+      streamA.waitUntilReadyForClient(),
+      streamB.waitUntilReadyForClient(),
+    ]);
     clients.push(bindClient(streamA), bindClient(streamB));
 
     await delay(160);
@@ -153,6 +178,8 @@ test('snapshot exposes progress, source events, retained stop state, and metadat
     assert.equal(created.lifecycle, 'waiting-for-client');
     assert.equal(created.encoder.pid, null);
 
+    stream.start();
+    await stream.waitUntilReadyForClient();
     client = bindClient(stream);
     await delay(160);
     const advancing = manager.getSnapshot(stream.id);

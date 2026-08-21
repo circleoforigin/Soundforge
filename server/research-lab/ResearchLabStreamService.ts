@@ -94,6 +94,14 @@ export class ResearchLabStreamService {
     const streamUrl = createStreamUrl(stream.id);
 
     try {
+      stream.start();
+      await stream.waitUntilReadyForClient();
+      stream.addDiagnosticEvent(
+        'lifecycle',
+        'Startup buffer is ready; beginning transport attachment.',
+        undefined,
+        'transport-attachment-begin'
+      );
       const binding = await transport.start({
         device,
         transport: transportOption,

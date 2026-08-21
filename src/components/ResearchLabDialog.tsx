@@ -379,6 +379,8 @@ function StreamExperiment({
             <DiagnosticValue label="Frames" value={stream.encoder.framesGenerated.toLocaleString()} />
             <DiagnosticValue label="PCM bytes" value={formatBytes(stream.encoder.pcmBytesGenerated)} />
             <DiagnosticValue label="Encoded bytes" value={formatBytes(stream.encoder.encodedBytesProduced)} />
+            <DiagnosticValue label="Startup buffer" value={formatBytes(stream.encoder.startupBufferBytes)} />
+            <DiagnosticValue label="Startup ready" value={stream.encoder.startupBufferReady ? 'Yes' : 'No'} />
             <DiagnosticValue label="Input backpressure" value={stream.encoder.stdinBackpressured ? 'Yes' : 'No'} />
           </div>
         </section>

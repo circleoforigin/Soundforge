@@ -85,7 +85,10 @@ export interface AudioDevicePresentationResponse {
 
 export type AudioStreamLifecycleState =
   | 'starting'
+  | 'preparing'
+  | 'ready-for-client'
   | 'waiting-for-client'
+  | 'flushing-startup'
   | 'buffering'
   | 'running'
   | 'stopping'
@@ -120,6 +123,8 @@ export interface AudioStreamEncoderSnapshot {
   framesGenerated: number;
   pcmBytesGenerated: number;
   encodedBytesProduced: number;
+  startupBufferBytes: number;
+  startupBufferReady: boolean;
   stdinBackpressured: boolean;
 }
 
