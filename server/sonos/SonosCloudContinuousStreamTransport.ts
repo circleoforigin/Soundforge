@@ -1,4 +1,8 @@
-import type { AudioStreamTransportSnapshot } from '../../src/models/ResearchLab.ts';
+import type {
+  AudioStreamDiagnosticEvent,
+  AudioStreamSnapshot,
+  AudioStreamTransportSnapshot,
+} from '../../src/models/ResearchLab.ts';
 import type {
   ContinuousStreamTransport,
   ContinuousStreamTransportBinding,
@@ -31,7 +35,11 @@ interface ActiveSonosCloudStream {
   streamId: string;
   groupId: string;
   sessionId: string | null;
-  hasReachedActiveState: boolean;
+  phase: 'binding' | 'bound' | 'active' | 'terminal';
+  hasSeenProviderActiveState: boolean;
+  httpClientConnected: boolean;
+  hasDeliveredBytes: boolean;
+  terminalMonitoringArmed: boolean;
   playbackState: string;
   context: ContinuousStreamTransportContext;
 }
@@ -45,6 +53,7 @@ export class SonosCloudContinuousStreamTransport implements ContinuousStreamTran
   ) => Promise<ResolvedSonosAudioDevice | undefined>;
   private readonly byGroupId = new Map<string, ActiveSonosCloudStream>();
   private readonly bySessionId = new Map<string, ActiveSonosCloudStream>();
+  private readonly byStreamId = new Map<string, ActiveSonosCloudStream>();
 
   constructor(
     client: SonosCloudClient = new SonosClient(),
@@ -76,11 +85,16 @@ export class SonosCloudContinuousStreamTransport implements ContinuousStreamTran
       streamId: context.streamId,
       groupId,
       sessionId: null,
-      hasReachedActiveState: false,
+      phase: 'binding',
+      hasSeenProviderActiveState: false,
+      httpClientConnected: false,
+      hasDeliveredBytes: false,
+      terminalMonitoringArmed: false,
       playbackState: 'ATTACHING',
       context,
     };
     this.byGroupId.set(groupId, active);
+    this.byStreamId.set(context.streamId, active);
     context.updateTransport({
       state: 'binding',
       targetScope: 'group',
@@ -98,8 +112,13 @@ export class SonosCloudContinuousStreamTransport implements ContinuousStreamTran
         context.streamUrl,
         `research-lab-${context.streamId}`
       );
+      if (active.phase === 'terminal' || this.byGroupId.get(groupId) !== active) {
+        await this.client.pauseGroupPlayback(groupId).catch(() => undefined);
+        throw new Error('Sonos Cloud transport became terminal while binding was in progress.');
+      }
       active.sessionId = result.sessionId;
       this.bySessionId.set(result.sessionId, active);
+      active.phase = 'bound';
       context.updateTransport({
         state: 'bound',
         bound: true,
@@ -109,7 +128,18 @@ export class SonosCloudContinuousStreamTransport implements ContinuousStreamTran
         groupId,
         sessionId: result.sessionId,
         targetScope: 'group',
+        phase: active.phase,
+        httpClientConnected: active.httpClientConnected,
+        hasDeliveredBytes: active.hasDeliveredBytes,
       });
+      if (active.hasDeliveredBytes) {
+        this.armTerminalMonitoring(active, 'Encoded stream bytes were delivered during binding.');
+      } else {
+        context.addDiagnostic('Sonos Cloud transport is bound and waiting for stream client.', {
+          groupId,
+          phase: active.phase,
+        });
+      }
       return {
         transportId: this.id,
         targetScope: 'group',
@@ -118,7 +148,7 @@ export class SonosCloudContinuousStreamTransport implements ContinuousStreamTran
         providerBinding: { groupId, sessionId: result.sessionId } satisfies SonosCloudBindingData,
       };
     } catch (error) {
-      this.byGroupId.delete(groupId);
+      this.removeBinding(groupId, active.sessionId, active.streamId);
       const message = error instanceof Error ? error.message : 'Sonos Cloud transport failed.';
       context.updateTransport({
         state: 'error',
@@ -139,6 +169,38 @@ export class SonosCloudContinuousStreamTransport implements ContinuousStreamTran
     }
   }
 
+  handleRuntimeEvent(
+    streamId: string,
+    event: AudioStreamDiagnosticEvent,
+    snapshot: AudioStreamSnapshot | undefined
+  ): void {
+    const active = this.byStreamId.get(streamId);
+    if (!active || active.phase === 'terminal') {
+      return;
+    }
+    if (event.code === 'client-connected') {
+      active.httpClientConnected = true;
+      active.context.addDiagnostic('Sonos HTTP stream client connected.', {
+        groupId: active.groupId,
+        phase: active.phase,
+        connectedAt: snapshot?.httpClient.connectedAt ?? event.timestamp,
+      });
+      return;
+    }
+    if (event.code === 'first-client-bytes') {
+      active.httpClientConnected = snapshot?.httpClient.connected ?? true;
+      active.hasDeliveredBytes = true;
+      active.context.addDiagnostic('First encoded bytes delivered to Sonos HTTP client.', {
+        groupId: active.groupId,
+        phase: active.phase,
+        deliveredBytes: snapshot?.httpClient.deliveredBytes ?? null,
+      });
+      if (active.phase === 'bound') {
+        this.armTerminalMonitoring(active, 'Transport binding and delivered stream bytes confirmed.');
+      }
+    }
+  }
+
   handlePlaybackState(groupId: string, nextState: string): void {
     const active = this.byGroupId.get(groupId);
     if (!active) {
@@ -148,7 +210,7 @@ export class SonosCloudContinuousStreamTransport implements ContinuousStreamTran
     const isActive =
       nextState === 'PLAYBACK_STATE_BUFFERING' || nextState === 'PLAYBACK_STATE_PLAYING';
     if (isActive) {
-      active.hasReachedActiveState = true;
+      active.hasSeenProviderActiveState = true;
     }
     active.playbackState = nextState;
     active.context.updateTransport({ providerPlaybackState: nextState },
@@ -157,17 +219,40 @@ export class SonosCloudContinuousStreamTransport implements ContinuousStreamTran
       groupId,
       previousState,
       nextState,
-      hasReachedActiveState: active.hasReachedActiveState,
+      phase: active.phase,
+      bindingComplete: active.phase !== 'binding',
+      hasSeenProviderActiveState: active.hasSeenProviderActiveState,
+      httpClientConnected: active.httpClientConnected,
+      hasDeliveredBytes: active.hasDeliveredBytes,
+      terminalMonitoringArmed: active.terminalMonitoringArmed,
     });
 
     if (nextState !== 'PLAYBACK_STATE_IDLE') {
       return;
     }
-    if (!active.hasReachedActiveState) {
-      active.context.addDiagnostic('Initial Sonos IDLE state ignored.', { groupId });
+    if (active.phase === 'binding') {
+      active.context.addDiagnostic(
+        'Sonos IDLE state ignored because transport binding is still in progress.',
+        { groupId, phase: active.phase, hasSeenProviderActiveState: active.hasSeenProviderActiveState }
+      );
       return;
     }
-    this.failActive(active, 'Active Sonos Cloud playback returned to IDLE.');
+    if (!active.terminalMonitoringArmed) {
+      active.context.addDiagnostic(
+        'Sonos IDLE state ignored until HTTP stream delivery is confirmed.',
+        {
+          groupId,
+          phase: active.phase,
+          httpClientConnected: active.httpClientConnected,
+          hasDeliveredBytes: active.hasDeliveredBytes,
+        }
+      );
+      return;
+    }
+    this.failActive(
+      active,
+      'Established Sonos Cloud stream returned to IDLE after HTTP audio delivery.'
+    );
   }
 
   handlePlaybackError(groupId: string, details?: Record<string, unknown>): void {
@@ -187,7 +272,8 @@ export class SonosCloudContinuousStreamTransport implements ContinuousStreamTran
   }
 
   private failActive(active: ActiveSonosCloudStream, reason: string): void {
-    this.removeBinding(active.groupId, active.sessionId);
+    active.phase = 'terminal';
+    this.removeBinding(active.groupId, active.sessionId, active.streamId);
     const update: Partial<AudioStreamTransportSnapshot> = {
       state: 'error',
       bound: false,
@@ -198,8 +284,38 @@ export class SonosCloudContinuousStreamTransport implements ContinuousStreamTran
     active.context.terminate(reason);
   }
 
-  private removeBinding(groupId: string, sessionId: string | null): void {
+  private armTerminalMonitoring(active: ActiveSonosCloudStream, reason: string): void {
+    if (active.terminalMonitoringArmed || active.phase === 'terminal') {
+      return;
+    }
+    active.phase = 'active';
+    active.terminalMonitoringArmed = true;
+    active.context.updateTransport({ state: 'active' },
+      'Sonos Cloud stream is active and terminal monitoring is armed.');
+    active.context.addDiagnostic('Sonos terminal playback monitoring armed.', {
+      groupId: active.groupId,
+      phase: active.phase,
+      reason,
+      httpClientConnected: active.httpClientConnected,
+      hasDeliveredBytes: active.hasDeliveredBytes,
+    });
+  }
+
+  private removeBinding(
+    groupId: string,
+    sessionId: string | null,
+    streamId?: string
+  ): void {
     this.byGroupId.delete(groupId);
+    if (streamId) {
+      this.byStreamId.delete(streamId);
+    } else {
+      for (const [candidateStreamId, active] of this.byStreamId) {
+        if (active.groupId === groupId) {
+          this.byStreamId.delete(candidateStreamId);
+        }
+      }
+    }
     if (sessionId) {
       this.bySessionId.delete(sessionId);
     }

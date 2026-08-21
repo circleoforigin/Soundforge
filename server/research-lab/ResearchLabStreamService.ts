@@ -79,6 +79,11 @@ export class ResearchLabStreamService {
     const stream = this.manager.create({
       deviceId,
       transportId,
+      onEvent: (event) => transport.handleRuntimeEvent?.(
+        streamId,
+        event,
+        this.manager.getSnapshot(streamId)
+      ),
       onClientDisconnected: (reason) => void this.terminateRuntime(streamId, reason),
       onEncoderExit: () => void this.terminateRuntime(
         streamId,
@@ -104,8 +109,11 @@ export class ResearchLabStreamService {
         throw new Error('The stream became unhealthy while its transport was starting.');
       }
       this.bindings.set(stream.id, { transport, binding });
+      const transportState = stream.getSnapshot().transport?.state === 'active'
+        ? 'active'
+        : 'bound';
       stream.updateTransport({
-        state: 'bound',
+        state: transportState,
         targetScope: binding.targetScope,
         targetDescription: binding.targetDescription,
         independentlyTargetable: binding.independentlyTargetable,

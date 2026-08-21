@@ -1,5 +1,7 @@
 import type {
   AudioDevice,
+  AudioStreamDiagnosticEvent,
+  AudioStreamSnapshot,
   AudioStreamTransportSnapshot,
   AudioTransportOption,
   AudioTransportScope,
@@ -27,4 +29,9 @@ export interface ContinuousStreamTransport {
   readonly id: string;
   start(context: ContinuousStreamTransportContext): Promise<ContinuousStreamTransportBinding>;
   stop(binding: ContinuousStreamTransportBinding): Promise<void>;
+  handleRuntimeEvent?(
+    streamId: string,
+    event: AudioStreamDiagnosticEvent,
+    snapshot: AudioStreamSnapshot | undefined
+  ): void;
 }

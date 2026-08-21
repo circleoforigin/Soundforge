@@ -136,6 +136,7 @@ export type AudioStreamTransportState =
   | 'starting'
   | 'binding'
   | 'bound'
+  | 'active'
   | 'stopping'
   | 'stopped'
   | 'error';
