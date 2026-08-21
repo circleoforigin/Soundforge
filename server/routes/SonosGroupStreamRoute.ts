@@ -4,19 +4,25 @@ import { SonosApiError, SonosClient } from '../sonos/SonosClient.ts';
 import { sonosContinuousGroupStream } from '../sonos/SonosContinuousGroupStream.ts';
 import { logSonosError, logSonosInfo } from '../sonos/SonosDiagnosticLog.ts';
 
-const attachedGroups = new Map<string, { sessionId: string; streamUrl: string }>();
-
-function getPublicStreamUrl(request: Request): string {
+function getPublicStreamUrl(request: Request, groupId: string): string {
   const configuredBaseUrl = process.env.PUBLIC_API_BASE_URL?.trim();
   const forwardedProtocol = request.header('x-forwarded-proto')?.split(',')[0]?.trim();
   const baseUrl = (
     configuredBaseUrl || `${forwardedProtocol || request.protocol}://${request.get('host')}`
   ).replace(/\/+$/, '');
-  return `${baseUrl}/api/sonos/group-stream/live.mp3`;
+  return `${baseUrl}/api/sonos/group-stream/live.mp3?groupId=${encodeURIComponent(groupId)}`;
 }
 
 export function registerSonosGroupStreamRoute(app: Express): void {
   app.get('/api/sonos/group-stream/live.mp3', (request, response) => {
+    const groupId = typeof request.query.groupId === 'string'
+      ? request.query.groupId
+      : '';
+    if (!groupId) {
+      response.status(400).json({ ok: false, message: 'A Sonos groupId is required.' });
+      return;
+    }
+
     response.status(200).set({
       'Cache-Control': 'no-store, no-cache, must-revalidate, no-transform',
       Connection: 'keep-alive',
@@ -26,7 +32,7 @@ export function registerSonosGroupStreamRoute(app: Express): void {
     response.flushHeaders();
 
     try {
-      sonosContinuousGroupStream.addClient(response, {
+      sonosContinuousGroupStream.addClient(groupId, response, {
         userAgent: request.header('user-agent') ?? null,
         remoteAddress: request.ip,
       });
@@ -41,16 +47,22 @@ export function registerSonosGroupStreamRoute(app: Express): void {
     json(),
     async (request, response) => {
       const groupId = request.params.groupId;
-      const existing = attachedGroups.get(groupId);
-      if (existing) {
+      const existing = sonosContinuousGroupStream.getAttachment(groupId);
+      if (existing && sonosContinuousGroupStream.hasActiveClient(groupId)) {
         response.json({ ok: true, alreadyAttached: true, groupId, ...existing });
         return;
       }
+      if (existing) {
+        sonosContinuousGroupStream.invalidateAttachment(
+          groupId,
+          'reattachment requested without an active stream client'
+        );
+      }
 
-      const streamUrl = getPublicStreamUrl(request);
+      const streamUrl = getPublicStreamUrl(request, groupId);
       try {
         const result = await new SonosClient().attachGroupStreamPlayback(groupId, streamUrl);
-        attachedGroups.set(groupId, { sessionId: result.sessionId, streamUrl });
+        sonosContinuousGroupStream.markAttached(groupId, result.sessionId, streamUrl);
         logSonosInfo('GROUP_PLAYBACK', 'Continuous stream attached to Sonos group.', {
           groupId,
           sessionId: result.sessionId,
@@ -83,11 +95,21 @@ export function registerSonosGroupStreamRoute(app: Express): void {
 
   app.post('/api/sonos/group-stream-test/:groupId/tone', json(), (request, response) => {
     const groupId = request.params.groupId;
-    const attachment = attachedGroups.get(groupId);
-    if (!attachment) {
+    const attachment = sonosContinuousGroupStream.getAttachment(groupId);
+    if (!attachment || !sonosContinuousGroupStream.hasActiveClient(groupId)) {
+      if (attachment) {
+        sonosContinuousGroupStream.invalidateAttachment(
+          groupId,
+          'tone rejected because no active stream client is connected'
+        );
+      }
+      logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream tone rejected.', {
+        groupId,
+        reason: 'no active stream client is connected',
+      });
       response.status(409).json({
         ok: false,
-        message: 'Attach the continuous stream to this Sonos group before injecting a tone.',
+        message: 'Sonos group stream is not currently connected. Reattach the group first.',
       });
       return;
     }

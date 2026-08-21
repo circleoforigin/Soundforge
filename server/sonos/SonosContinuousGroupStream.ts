@@ -16,16 +16,28 @@ const toneAmplitude = 0.4;
 class SonosContinuousGroupStream {
   private encoder: ChildProcessWithoutNullStreams | null = null;
   private frameTimer: NodeJS.Timeout | null = null;
-  private readonly clients = new Set<Response>();
+  private readonly clients = new Map<Response, {
+    groupId: string;
+    details: Record<string, unknown>;
+  }>();
+  private readonly attachedGroups = new Map<string, {
+    sessionId: string;
+    streamUrl: string;
+  }>();
+  private readonly backpressuredClients = new Set<Response>();
   private toneSamplesRemaining = 0;
   private tonePhase = 0;
-  private restartTimer: NodeJS.Timeout | null = null;
 
-  addClient(response: Response, details: Record<string, unknown>): void {
+  addClient(
+    groupId: string,
+    response: Response,
+    details: Record<string, unknown>
+  ): void {
     this.ensureEncoder();
-    this.clients.add(response);
+    this.clients.set(response, { groupId, details });
     logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream connected.', {
       ...details,
+      groupId,
       connectedClients: this.clients.size,
     });
 
@@ -36,14 +48,82 @@ class SonosContinuousGroupStream {
       }
       disconnected = true;
       this.clients.delete(response);
+      this.backpressuredClients.delete(response);
       logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream disconnected.', {
         ...details,
+        groupId,
         connectedClients: this.clients.size,
       });
+      this.resumeEncoderOutputIfDrained();
+      if (!this.hasActiveClient(groupId)) {
+        this.invalidateAttachment(groupId, 'stream client disconnected');
+      }
     };
 
     response.on('close', removeClient);
     response.on('finish', removeClient);
+    response.on('drain', () => {
+      if (!this.backpressuredClients.delete(response)) {
+        return;
+      }
+      logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream HTTP output drained.', {
+        ...details,
+        groupId,
+        writableLength: response.writableLength,
+      });
+      this.resumeEncoderOutputIfDrained();
+    });
+  }
+
+  markAttached(groupId: string, sessionId: string, streamUrl: string): void {
+    this.attachedGroups.set(groupId, { sessionId, streamUrl });
+  }
+
+  getAttachment(groupId: string): { sessionId: string; streamUrl: string } | undefined {
+    return this.attachedGroups.get(groupId);
+  }
+
+  hasActiveClient(groupId: string): boolean {
+    for (const [response, client] of this.clients) {
+      if (
+        client.groupId === groupId &&
+        !response.destroyed &&
+        !response.writableEnded
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  invalidateAttachment(groupId: string, reason: string): void {
+    const attachment = this.attachedGroups.get(groupId);
+    if (!attachment) {
+      return;
+    }
+    this.attachedGroups.delete(groupId);
+    logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream attachment invalidated.', {
+      groupId,
+      sessionId: attachment.sessionId,
+      reason,
+    });
+  }
+
+  invalidateAttachmentBySessionId(sessionId: string, reason: string): void {
+    for (const [groupId, attachment] of this.attachedGroups) {
+      if (attachment.sessionId === sessionId) {
+        this.invalidateGroupStream(groupId, reason);
+      }
+    }
+  }
+
+  invalidateGroupStream(groupId: string, reason: string): void {
+    this.invalidateAttachment(groupId, reason);
+    for (const [response, client] of this.clients) {
+      if (client.groupId === groupId) {
+        response.destroy();
+      }
+    }
   }
 
   injectTone(
@@ -86,9 +166,18 @@ class SonosContinuousGroupStream {
 
     this.encoder = encoder;
     encoder.stdout.on('data', (chunk: Buffer) => {
-      for (const client of this.clients) {
+      for (const [client, clientState] of this.clients) {
         if (!client.destroyed && !client.writableEnded) {
-          client.write(chunk);
+          const accepted = client.write(chunk);
+          if (!accepted && !this.backpressuredClients.has(client)) {
+            this.backpressuredClients.add(client);
+            encoder.stdout.pause();
+            logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream HTTP backpressure.', {
+              ...clientState.details,
+              groupId: clientState.groupId,
+              writableLength: client.writableLength,
+            });
+          }
         }
       }
     });
@@ -114,19 +203,21 @@ class SonosContinuousGroupStream {
         this.frameTimer = null;
       }
       logSonosError('Continuous group stream encoder exited.', { code, signal });
-      if (this.clients.size > 0 && !this.restartTimer) {
-        this.restartTimer = setTimeout(() => {
-          this.restartTimer = null;
-          try {
-            this.ensureEncoder();
-          } catch (error) {
-            logSonosError('Continuous group stream encoder restart failed.', { error });
-          }
-        }, 1_000);
+      const affectedGroups = new Set(
+        [...this.clients.values()].map((client) => client.groupId)
+      );
+      for (const response of this.clients.keys()) {
+        response.destroy();
       }
+      for (const groupId of affectedGroups) {
+        this.invalidateAttachment(groupId, 'FFmpeg encoder exited');
+      }
+      logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream requires clean reattachment.', {
+        affectedGroupIds: [...affectedGroups],
+      });
     });
 
-    this.frameTimer = setInterval(() => this.writePcmFrame(encoder), frameDurationMs);
+    this.startFrameTimer(encoder);
     logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream encoder started.', {
       format: 'MP3',
       bitrate: 192_000,
@@ -154,7 +245,38 @@ class SonosContinuousGroupStream {
       frame.writeInt16LE(sample, offset + 2);
     }
 
-    encoder.stdin.write(frame);
+    const accepted = encoder.stdin.write(frame);
+    if (!accepted) {
+      if (this.frameTimer) {
+        clearInterval(this.frameTimer);
+        this.frameTimer = null;
+      }
+      logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream FFmpeg stdin backpressure.', {
+        writableLength: encoder.stdin.writableLength,
+      });
+      encoder.stdin.once('drain', () => {
+        if (encoder !== this.encoder) {
+          return;
+        }
+        logSonosInfo('GROUP_PLAYBACK', 'Continuous group stream FFmpeg stdin drained.', {
+          writableLength: encoder.stdin.writableLength,
+        });
+        this.startFrameTimer(encoder);
+      });
+    }
+  }
+
+  private startFrameTimer(encoder: ChildProcessWithoutNullStreams): void {
+    if (this.frameTimer || encoder !== this.encoder) {
+      return;
+    }
+    this.frameTimer = setInterval(() => this.writePcmFrame(encoder), frameDurationMs);
+  }
+
+  private resumeEncoderOutputIfDrained(): void {
+    if (this.backpressuredClients.size === 0) {
+      this.encoder?.stdout.resume();
+    }
   }
 }
 

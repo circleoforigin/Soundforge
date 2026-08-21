@@ -5,6 +5,7 @@ import {
   type SonosAudioClipStatus,
 } from '../sonos/SonosAudioClipDiagnostics.ts';
 import { logSonosError, logSonosInfo } from '../sonos/SonosDiagnosticLog.ts';
+import { sonosContinuousGroupStream } from '../sonos/SonosContinuousGroupStream.ts';
 
 function header(request: Request, name: string): string {
   const value = request.header(name);
@@ -72,6 +73,27 @@ export function registerSonosEventRoute(app: Express): void {
           eventSequenceId: header(request, 'X-Sonos-Event-Seq-Id'),
           body: request.body,
         });
+        const eventBody = request.body as { playbackState?: unknown };
+        if (namespace === 'playback' && type === 'playbackError') {
+          sonosContinuousGroupStream.invalidateGroupStream(
+            targetValue,
+            'Sonos playbackError event'
+          );
+        } else if (
+          namespace === 'playback' &&
+          type === 'playbackStatus' &&
+          eventBody.playbackState === 'PLAYBACK_STATE_IDLE'
+        ) {
+          sonosContinuousGroupStream.invalidateGroupStream(
+            targetValue,
+            'Sonos playback entered terminal idle state'
+          );
+        } else if (namespace === 'playbackSession' && /error/i.test(type)) {
+          sonosContinuousGroupStream.invalidateAttachmentBySessionId(
+            targetValue,
+            `Sonos playback-session ${type} event`
+          );
+        }
         return;
       }
 
