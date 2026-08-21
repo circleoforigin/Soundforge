@@ -25,20 +25,31 @@ export interface StopResearchLabStreamResult {
 }
 
 export class ResearchLabRequestError extends Error {
-  constructor(readonly status: number, message: string) {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
     super(message);
+    this.status = status;
     this.name = 'ResearchLabRequestError';
   }
 }
 
 export class ResearchLabStreamService {
+  readonly manager: ContinuousAudioStreamManager;
+
+  private readonly registry: ContinuousStreamTransportRegistry;
+  private readonly discoverDevices: () => Promise<AudioDevice[]>;
   private readonly bindings = new Map<string, ActiveTransportBinding>();
 
   constructor(
-    readonly manager: ContinuousAudioStreamManager,
-    private readonly registry: ContinuousStreamTransportRegistry,
-    private readonly discoverDevices: () => Promise<AudioDevice[]> = discoverSonosAudioDevices
-  ) {}
+    manager: ContinuousAudioStreamManager,
+    registry: ContinuousStreamTransportRegistry,
+    discoverDevices: () => Promise<AudioDevice[]> = discoverSonosAudioDevices
+  ) {
+    this.manager = manager;
+    this.registry = registry;
+    this.discoverDevices = discoverDevices;
+  }
 
   async start(
     deviceId: string,

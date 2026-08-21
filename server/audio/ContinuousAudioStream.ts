@@ -103,6 +103,7 @@ interface HttpStreamClient extends Writable {
 export class ContinuousAudioStream {
   readonly id: string;
 
+  private readonly options: ContinuousAudioStreamOptions;
   private encoder: ChildProcessWithoutNullStreams | null = null;
   private frameTimer: NodeJS.Timeout | null = null;
   private client: HttpStreamClient | null = null;
@@ -127,8 +128,9 @@ export class ContinuousAudioStream {
   private transportSnapshot: AudioStreamTransportSnapshot | null;
   private readonly events: AudioStreamDiagnosticEvent[] = [];
 
-  constructor(id: string, private readonly options: ContinuousAudioStreamOptions = {}) {
+  constructor(id: string, options: ContinuousAudioStreamOptions = {}) {
     this.id = id;
+    this.options = options;
     this.transportSnapshot = options.transportId ? {
       state: 'starting',
       targetScope: null,

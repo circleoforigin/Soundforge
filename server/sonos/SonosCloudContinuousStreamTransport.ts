@@ -39,15 +39,22 @@ interface ActiveSonosCloudStream {
 export class SonosCloudContinuousStreamTransport implements ContinuousStreamTransport {
   readonly id = 'sonos-cloud-continuous';
 
+  private readonly client: SonosCloudClient;
+  private readonly resolveDevice: (
+    deviceId: string
+  ) => Promise<ResolvedSonosAudioDevice | undefined>;
   private readonly byGroupId = new Map<string, ActiveSonosCloudStream>();
   private readonly bySessionId = new Map<string, ActiveSonosCloudStream>();
 
   constructor(
-    private readonly client: SonosCloudClient = new SonosClient(),
-    private readonly resolveDevice: (
+    client: SonosCloudClient = new SonosClient(),
+    resolveDevice: (
       deviceId: string
     ) => Promise<ResolvedSonosAudioDevice | undefined> = resolveSonosAudioDevice
-  ) {}
+  ) {
+    this.client = client;
+    this.resolveDevice = resolveDevice;
+  }
 
   async start(
     context: ContinuousStreamTransportContext

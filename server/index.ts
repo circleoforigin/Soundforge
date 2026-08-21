@@ -15,9 +15,14 @@ const envPath =
     '../.env.local'
   );
 
-dotenv.config({
-  path: envPath,
-});
+const nativeStartupSmokeTest =
+  process.env.SACSCAPE_NATIVE_STARTUP_SMOKE_TEST === '1';
+
+if (!nativeStartupSmokeTest) {
+  dotenv.config({
+    path: envPath,
+  });
+}
 
 import express from 'express';
 
@@ -154,7 +159,9 @@ app.post(
   }
 );
 
-await initializeSonosTokenStore();
+if (!nativeStartupSmokeTest) {
+  await initializeSonosTokenStore();
+}
 
 registerLibraryImportRoute(app);
 registerLibraryManifestRoute(app);
@@ -166,7 +173,12 @@ registerSonosEventRoute(app);
 registerResearchLabDeviceRoute(app);
 registerResearchLabStreamRoute(app);
 
-app.listen(PORT, () => {
+const server = app.listen(nativeStartupSmokeTest ? 0 : PORT, () => {
+  if (nativeStartupSmokeTest) {
+    console.log('SACscape native TypeScript startup smoke test reached listening state.');
+    server.close();
+    return;
+  }
   console.log(
     `Soundforge server running at http://localhost:${PORT}`
   );
