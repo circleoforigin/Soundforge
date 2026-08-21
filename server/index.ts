@@ -48,6 +48,8 @@ import {
 import {
   registerSonosEventRoute,
 } from './routes/SonosEventRoute.ts';
+import { registerResearchLabDeviceRoute } from './routes/ResearchLabDeviceRoute.ts';
+import { registerResearchLabStreamRoute } from './routes/ResearchLabStreamRoute.ts';
 import { initializeSonosTokenStore } from './sonos/SonosTokenStore.ts';
 
 const app = express();
@@ -161,6 +163,8 @@ registerSonosDiscoveryRoute(app);
 registerSonosMediaRoute(app);
 registerSonosGroupStreamRoute(app);
 registerSonosEventRoute(app);
+registerResearchLabDeviceRoute(app);
+registerResearchLabStreamRoute(app);
 
 app.listen(PORT, () => {
   console.log(

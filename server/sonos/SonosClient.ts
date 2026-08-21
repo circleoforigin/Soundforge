@@ -19,6 +19,8 @@ export interface SonosPlayer {
   id: string;
   name: string;
   deviceIds: string[];
+  capabilities?: string[];
+  model?: string;
 }
 
 export interface SonosGroup {

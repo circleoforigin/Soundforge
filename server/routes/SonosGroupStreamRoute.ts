@@ -120,7 +120,7 @@ export function registerSonosGroupStreamRoute(app: Express): void {
     }
 
     try {
-      const tone = sonosContinuousGroupStream.injectTone({
+      const tone = sonosContinuousGroupStream.injectTone(groupId, {
         groupId,
         sessionId: attachment.sessionId,
       });
