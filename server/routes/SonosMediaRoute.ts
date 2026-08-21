@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { Express, Request } from 'express';
 import multer from 'multer';
 import { logSonosError, logSonosInfo } from '../sonos/SonosDiagnosticLog.ts';
+import { inspectAudioFormat } from '../sonos/AudioFormatInspector.ts';
 
 const routeDirectory = path.dirname(fileURLToPath(import.meta.url));
 const mediaDirectory = path.resolve(routeDirectory, '../../data/sonos-media');
@@ -56,6 +57,23 @@ function getPublicMediaUrl(request: Request, assetId: string): string {
     .replace(/\/+$/, '');
 
   return `${baseUrl}/api/sonos/media/${encodeURIComponent(assetId)}`;
+}
+
+async function logMediaFormat(assetId: string, mediaPath: string): Promise<void> {
+  const handle = await fs.promises.open(mediaPath, 'r');
+  try {
+    const stats = await handle.stat();
+    const probe = Buffer.alloc(Math.min(stats.size, 256 * 1024));
+    const { bytesRead } = await handle.read(probe, 0, probe.length, 0);
+    logSonosInfo('MEDIA', 'Sonos media format inspection.', {
+      assetId,
+      fileSizeBytes: stats.size,
+      declaredMimeType: mediaTypes.get(path.extname(mediaPath)) ?? null,
+      ...inspectAudioFormat(probe.subarray(0, bytesRead)),
+    });
+  } finally {
+    await handle.close();
+  }
 }
 
 export function registerSonosMediaRoute(app: Express) {
@@ -121,6 +139,8 @@ export function registerSonosMediaRoute(app: Express) {
           throw error;
         }
 
+        await logMediaFormat(assetId, destination);
+
         response.json({
           ok: true,
           assetId,
@@ -150,6 +170,9 @@ export function registerSonosMediaRoute(app: Express) {
       }
 
       const stats = fs.statSync(mediaPath);
+      void logMediaFormat(assetId, mediaPath).catch((error) => {
+        logSonosError('Sonos media format inspection failed.', { assetId, error });
+      });
       response.locals.totalBytes = stats.size;
       response.set({
         'Accept-Ranges': 'bytes',

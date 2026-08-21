@@ -12,6 +12,7 @@ export interface SonosAudioClipStatus {
   errorCode?: unknown;
   name?: unknown;
   appId?: unknown;
+  error?: { errorCode?: unknown };
 }
 
 const correlations = new Map<string, AudioClipCorrelation>();
@@ -35,7 +36,8 @@ export function rememberAudioClip(
 
 export function logAudioClipStatus(
   playerId: string,
-  clip: SonosAudioClipStatus
+  clip: SonosAudioClipStatus,
+  eventErrorCode?: unknown
 ): void {
   const clipId = typeof clip.id === 'string' ? clip.id : null;
   const correlation = clipId
@@ -46,7 +48,7 @@ export function logAudioClipStatus(
     playerId,
     clipId,
     status: clip.status ?? null,
-    errorCode: clip.errorCode ?? null,
+    errorCode: clip.errorCode ?? clip.error?.errorCode ?? eventErrorCode ?? null,
     name: clip.name ?? null,
     appId: clip.appId ?? null,
     correlated: Boolean(correlation),
@@ -54,10 +56,7 @@ export function logAudioClipStatus(
     assetName: correlation?.assetName ?? null,
   });
 
-  if (
-    clipId &&
-    ['DONE', 'DISMISSED', 'ERROR', 'INTERRUPTED'].includes(String(clip.status))
-  ) {
+  if (clipId && ['DONE', 'DISMISSED', 'INTERRUPTED'].includes(String(clip.status))) {
     correlations.delete(correlationKey(playerId, clipId));
   }
 }

@@ -4,7 +4,7 @@ import {
   logAudioClipStatus,
   type SonosAudioClipStatus,
 } from '../sonos/SonosAudioClipDiagnostics.ts';
-import { logSonosError } from '../sonos/SonosDiagnosticLog.ts';
+import { logSonosError, logSonosInfo } from '../sonos/SonosDiagnosticLog.ts';
 
 function header(request: Request, name: string): string {
   const value = request.header(name);
@@ -64,7 +64,16 @@ export function registerSonosEventRoute(app: Express): void {
       }
 
       const playerId = header(request, 'X-Sonos-Target-Value');
-      const body = request.body as { audioClips?: unknown };
+      const body = request.body as {
+        audioClips?: unknown;
+        errorCode?: unknown;
+        error?: { errorCode?: unknown };
+      };
+      logSonosInfo('AUDIO_CLIP', 'Raw Sonos audioClipStatus event.', {
+        playerId,
+        eventSequenceId: header(request, 'X-Sonos-Event-Seq-Id'),
+        body,
+      });
       if (!Array.isArray(body.audioClips)) {
         logSonosError('Sonos audioClipStatus event had no audioClips array.', {
           playerId,
@@ -74,7 +83,11 @@ export function registerSonosEventRoute(app: Express): void {
 
       for (const clip of body.audioClips) {
         if (clip && typeof clip === 'object') {
-          logAudioClipStatus(playerId, clip as SonosAudioClipStatus);
+          logAudioClipStatus(
+            playerId,
+            clip as SonosAudioClipStatus,
+            body.errorCode ?? body.error?.errorCode
+          );
         }
       }
     }
