@@ -21,6 +21,7 @@ export interface SonosPlayer {
   deviceIds: string[];
   capabilities?: string[];
   model?: string;
+  modelDisplayName?: string;
 }
 
 export interface SonosGroup {
@@ -62,6 +63,19 @@ export class SonosApiError extends Error {
     this.status = status;
     this.details = details;
   }
+}
+
+export function getSonosErrorCode(details: unknown): string | null {
+  if (!details || typeof details !== 'object') {
+    return null;
+  }
+  const value = details as {
+    errorCode?: unknown;
+    code?: unknown;
+    error?: { code?: unknown };
+  };
+  const code = value.errorCode ?? value.code ?? value.error?.code;
+  return typeof code === 'string' || typeof code === 'number' ? String(code) : null;
 }
 
 export class SonosClient {
@@ -190,54 +204,65 @@ export class SonosClient {
   async playTestTone(
     playerId: string
   ): Promise<unknown> {
-    const accessToken =
-      await this.getAccessToken();
+    const diagnosticBase = {
+      timestamp: new Date().toISOString(),
+      playerId,
+      playerIdSuffix: playerId.slice(-10),
+      clipType: 'CHIME',
+      volume: 20,
+    };
+    logSonosInfo('AUDIO_CLIP', 'Sonos identification CHIME attempt.', diagnosticBase);
 
-    const response = await fetch(
-      `${SONOS_API_BASE}/players/${encodeURIComponent(
-        playerId
-      )}/audioClip`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization:
-            `Bearer ${accessToken}`,
-          'Content-Type':
-            'application/json',
-        },
-        body: JSON.stringify({
-          name: 'SACscape test tone',
-          appId: 'com.circleoforigin.sacscape',
-          priority: 'LOW',
-          clipType: 'CHIME',
-          volume: 20,
-        }),
-      }
-    );
-
-    const responseText =
-      await response.text();
-
-    let data: unknown = null;
-
-    if (responseText) {
-      try {
-        data = JSON.parse(responseText);
-      } catch {
-        data = responseText;
-      }
-    }
-
-    if (!response.ok) {
-      logSonosError('Sonos playTestTone failed.', data);
-
-      throw new SonosApiError(
-        response.status,
-        data
+    try {
+      const accessToken = await this.getAccessToken();
+      const response = await fetch(
+        `${SONOS_API_BASE}/players/${encodeURIComponent(playerId)}/audioClip`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            name: 'SACscape test tone',
+            appId: 'com.circleoforigin.sacscape',
+            priority: 'LOW',
+            clipType: 'CHIME',
+            volume: 20,
+          }),
+        }
       );
-    }
+      const responseText = await response.text();
+      let data: unknown = null;
+      if (responseText) {
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          data = responseText;
+        }
+      }
 
-    return data;
+      logSonosInfo('AUDIO_CLIP', 'Sonos identification CHIME response.', {
+        ...diagnosticBase,
+        completedAt: new Date().toISOString(),
+        httpStatus: response.status,
+        errorCode: getSonosErrorCode(data),
+        responseBody: data,
+      });
+      if (!response.ok) {
+        throw new SonosApiError(response.status, data);
+      }
+      return data;
+    } catch (error) {
+      logSonosError('Sonos identification CHIME failed.', {
+        ...diagnosticBase,
+        failedAt: new Date().toISOString(),
+        httpStatus: error instanceof SonosApiError ? error.status : null,
+        errorCode: error instanceof SonosApiError ? getSonosErrorCode(error.details) : null,
+        reason: error instanceof Error ? error.message : error,
+      });
+      throw error;
+    }
   }
 
   async playAudioClip(

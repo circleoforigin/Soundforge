@@ -9,6 +9,12 @@ export type SonosLogCategory =
 
 let writeQueue = Promise.resolve();
 
+function sanitizeString(value: string): string {
+  return value
+    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/[A-Za-z]:\\[^\s)]+/g, '[REDACTED_PATH]');
+}
+
 function getLogPath(): string {
   const dataRoot = process.env.SACSCAPE_DATA_DIR?.trim() || 'C:\\SACscapeData';
   return path.join(dataRoot, 'logs', 'sonos.log');
@@ -28,9 +34,12 @@ function sanitizeDetails(details: unknown): unknown {
       if (value instanceof Error) {
         return {
           name: value.name,
-          message: value.message,
-          stack: value.stack,
+          message: sanitizeString(value.message),
         };
+      }
+
+      if (typeof value === 'string') {
+        return sanitizeString(value);
       }
 
       return value;

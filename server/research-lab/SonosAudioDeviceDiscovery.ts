@@ -10,10 +10,27 @@ import {
   type SonosGroup,
   type SonosPlayer,
 } from '../sonos/SonosClient.ts';
+import { logSonosError, logSonosInfo } from '../sonos/SonosDiagnosticLog.ts';
 
 interface SonosDiscoveryClient {
   getHouseholds(): ReturnType<SonosClient['getHouseholds']>;
   getGroups(householdId: string): ReturnType<SonosClient['getGroups']>;
+}
+
+interface SonosIdentificationClient extends SonosDiscoveryClient {
+  playTestTone(playerId: string): Promise<unknown>;
+}
+
+export class SonosDeviceIdentificationError extends Error {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+    this.name = 'SonosDeviceIdentificationError';
+  }
 }
 
 export interface ResolvedSonosAudioDevice {
@@ -133,18 +150,36 @@ function createAudioDevice(
   deviceId: string,
   index: number
 ): AudioDevice {
+  const componentRole = player.deviceIds.length === 1
+    ? undefined
+    : `Bonded component ${index + 1}`;
   const name = player.deviceIds.length === 1
     ? player.name
-    : `${player.name} — bonded component ${index + 1}`;
+    : componentRole ?? player.name;
+  const supportsAudioClip = player.capabilities?.includes('AUDIO_CLIP') ?? false;
+  const model = player.modelDisplayName?.trim() || player.model?.trim();
   return {
     id: opaqueId('device', deviceId),
     provider: 'sonos',
     name,
-    ...(player.model ? { model: player.model } : {}),
+    ...(model ? { model } : {}),
+    identity: {
+      providerIdentifierSuffix: deviceId.slice(-10),
+      logicalPlayerName: player.name,
+      ...(componentRole ? { componentRole } : {}),
+    },
     capabilities: [
-      ...(player.capabilities?.includes('AUDIO_CLIP') ? ['audio-clip' as const] : []),
+      ...(supportsAudioClip ? ['audio-clip' as const] : []),
       ...(group ? ['continuous-stream' as const] : []),
     ],
+    diagnosticActions: [{
+      id: 'identify-speaker',
+      name: 'Identify Speaker',
+      availability: supportsAudioClip ? 'available' : 'unavailable',
+      ...(!supportsAudioClip ? {
+        limitation: 'Physical-device AudioClip is not available for this device.',
+      } : {}),
+    }],
     topology: createTopology(householdId, group, player, deviceId),
     transports: createTransports(player, group),
   };
@@ -200,4 +235,60 @@ export async function resolveSonosAudioDevice(
     }
   }
   return undefined;
+}
+
+export async function identifySonosAudioDevice(
+  genericDeviceId: string,
+  client: SonosIdentificationClient = new SonosClient()
+): Promise<void> {
+  const attempt = {
+    timestamp: new Date().toISOString(),
+    genericDeviceId,
+    provider: 'sonos',
+  };
+  logSonosInfo('AUDIO_CLIP', 'Research Lab Identify Speaker attempt.', attempt);
+
+  try {
+    const resolved = await resolveSonosAudioDevice(genericDeviceId, client);
+    if (!resolved) {
+      throw new SonosDeviceIdentificationError(
+        404,
+        'DEVICE_NOT_RESOLVED',
+        'Physical device could not be resolved from current Sonos topology.'
+      );
+    }
+    const supportsAudioClip =
+      resolved.player.capabilities?.includes('AUDIO_CLIP') ?? false;
+    logSonosInfo('AUDIO_CLIP', 'Research Lab physical device resolved.', {
+      ...attempt,
+      resolvedAt: new Date().toISOString(),
+      physicalDeviceId: resolved.physicalDeviceId,
+      physicalDeviceIdSuffix: resolved.physicalDeviceId.slice(-10),
+      logicalPlayerId: resolved.player.id,
+      audioClipCapabilityPresent: supportsAudioClip,
+    });
+    if (!supportsAudioClip) {
+      throw new SonosDeviceIdentificationError(
+        409,
+        'AUDIO_CLIP_UNSUPPORTED',
+        'AudioClip is not supported by this physical device.'
+      );
+    }
+
+    await client.playTestTone(resolved.physicalDeviceId);
+    logSonosInfo('AUDIO_CLIP', 'Research Lab Identify Speaker succeeded.', {
+      ...attempt,
+      succeededAt: new Date().toISOString(),
+      physicalDeviceIdSuffix: resolved.physicalDeviceId.slice(-10),
+    });
+  } catch (error) {
+    logSonosError('Research Lab Identify Speaker failed.', {
+      ...attempt,
+      failedAt: new Date().toISOString(),
+      status: error instanceof SonosDeviceIdentificationError ? error.status : null,
+      code: error instanceof SonosDeviceIdentificationError ? error.code : null,
+      reason: error instanceof Error ? error.message : error,
+    });
+    throw error;
+  }
 }

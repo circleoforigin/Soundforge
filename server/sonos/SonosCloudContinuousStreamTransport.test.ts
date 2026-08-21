@@ -27,7 +27,12 @@ function fixture(): {
     id: 'opaque-device',
     provider: 'sonos',
     name: 'Bonded component',
+    identity: {
+      providerIdentifierSuffix: 'physical-id',
+      logicalPlayerName: 'Logical player',
+    },
     capabilities: ['continuous-stream'],
+    diagnosticActions: [],
     topology: [],
     transports: [option],
   };

@@ -36,12 +36,27 @@ export interface AudioTransportOption {
   limitation?: string;
 }
 
+export interface AudioDeviceDiagnosticAction {
+  id: 'identify-speaker';
+  name: string;
+  availability: AudioTransportAvailability;
+  limitation?: string;
+}
+
+export interface AudioDeviceIdentityDetails {
+  providerIdentifierSuffix: string;
+  logicalPlayerName: string;
+  componentRole?: string;
+}
+
 export interface AudioDevice {
   id: string;
   provider: string;
   name: string;
   model?: string;
+  identity: AudioDeviceIdentityDetails;
   capabilities: AudioDeviceCapability[];
+  diagnosticActions: AudioDeviceDiagnosticAction[];
   topology: AudioTopologyNode[];
   transports: AudioTransportOption[];
 }
@@ -49,6 +64,12 @@ export interface AudioDevice {
 export interface AudioDeviceDiscoveryResponse {
   ok: true;
   devices: AudioDevice[];
+}
+
+export interface AudioDeviceActionResponse {
+  ok: true;
+  deviceId: string;
+  actionId: AudioDeviceDiagnosticAction['id'];
 }
 
 export type AudioStreamLifecycleState =

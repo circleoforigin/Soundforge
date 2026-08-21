@@ -24,7 +24,12 @@ function device(
     id,
     provider: 'sonos',
     name: id,
+    identity: {
+      providerIdentifierSuffix: id,
+      logicalPlayerName: id,
+    },
     capabilities: ['continuous-stream'],
+    diagnosticActions: [],
     topology: [],
     transports: [{
       id: availability === 'experimental'

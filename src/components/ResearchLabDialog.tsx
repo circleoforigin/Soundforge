@@ -1,8 +1,22 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Component,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
 
 import { apiUrl } from '../config/api';
+import { normalizeDiscoveredAudioDevices } from '../services/research-lab/normalizeAudioDevices';
+import {
+  readResearchLabIdentifyFailure,
+  sanitizeDiagnosticForDisplay,
+  type DeviceActionMessage,
+} from '../services/research-lab/researchLabErrors';
 import type {
   AudioDevice,
+  AudioDeviceActionResponse,
   AudioDeviceDiscoveryResponse,
   AudioStreamListResponse,
   AudioStreamSnapshot,
@@ -16,9 +30,50 @@ interface ResearchLabDialogProps {
   onClose: () => void;
 }
 
-type ApiFailure = { message?: string; stream?: AudioStreamSnapshot };
+type ApiFailure = {
+  message?: string;
+  code?: string;
+  diagnostic?: unknown;
+  stream?: AudioStreamSnapshot;
+};
 
 const terminalLifecycles = new Set(['stopped', 'error']);
+
+function sanitizedErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/(authorization|password|secret|token)\s*[:=]\s*\S+/gi, '$1=[redacted]')
+    .replace(/[A-Za-z]:\\[^\s]+/g, '[redacted-path]')
+    .slice(0, 240);
+}
+
+interface ResearchLabErrorBoundaryProps {
+  children: ReactNode;
+  fallback: (message: string, retry: () => void) => ReactNode;
+}
+
+class ResearchLabErrorBoundary extends Component<
+  ResearchLabErrorBoundaryProps,
+  { message: string | null }
+> {
+  state = { message: null as string | null };
+
+  static getDerivedStateFromError(error: unknown) {
+    return { message: sanitizedErrorMessage(error) };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error('Research Lab render error:', sanitizedErrorMessage(error));
+  }
+
+  render() {
+    if (this.state.message) {
+      return this.props.fallback(this.state.message, () => this.setState({ message: null }));
+    }
+    return this.props.children;
+  }
+}
 
 function titleCase(value: string): string {
   return value
@@ -93,6 +148,90 @@ function TransportRow({
         </button>
       )}
     </div>
+  );
+}
+
+function ResearchDeviceCard({
+  device,
+  startingKey,
+  identifying,
+  actionMessage,
+  onStart,
+  onIdentify,
+}: {
+  device: AudioDevice;
+  startingKey: string | null;
+  identifying: boolean;
+  actionMessage?: DeviceActionMessage;
+  onStart: (device: AudioDevice, transport: AudioTransportOption) => void;
+  onIdentify: (device: AudioDevice) => void;
+}) {
+  return (
+    <article className="research-device-card">
+      <header>
+        <div>
+          <h4>{device.model ?? device.name}</h4>
+          {device.model && <div>{device.name}</div>}
+          <div>{titleCase(device.provider)} · Physical Device</div>
+        </div>
+        {device.diagnosticActions.map((action) => action.id === 'identify-speaker' && (
+          <button
+            key={action.id}
+            disabled={action.availability !== 'available' || identifying}
+            title={action.limitation ?? ''}
+            onClick={() => onIdentify(device)}
+          >
+            {identifying ? 'Identifying…' : action.name}
+          </button>
+        ))}
+      </header>
+      {actionMessage && (
+        <div className={actionMessage.error
+          ? 'research-error-message'
+          : 'research-device-action-message'}>
+          {actionMessage.summary}
+          {actionMessage.diagnostic && (
+            <details className="research-action-diagnostic">
+              <summary>Diagnostic details</summary>
+              <pre>{actionMessage.diagnostic}</pre>
+            </details>
+          )}
+        </div>
+      )}
+      <div className="research-transport-list">
+        {device.transports.map((transport) => (
+          <TransportRow
+            key={transport.id}
+            device={device}
+            transport={transport}
+            busy={startingKey === `${device.id}:${transport.id}`}
+            onStart={onStart}
+          />
+        ))}
+      </div>
+      <details className="research-identity-details">
+        <summary>Topology and identity</summary>
+        <div>Device ID: <code>{device.id}</code></div>
+        {device.identity.providerIdentifierSuffix && (
+          <div>
+            Provider ID suffix: <code>…{device.identity.providerIdentifierSuffix}</code>
+          </div>
+        )}
+        <div>Logical player: {device.identity.logicalPlayerName}</div>
+        {device.identity.componentRole && (
+          <div>Component role: {device.identity.componentRole}</div>
+        )}
+        <div className="research-topology-list">
+          {device.topology.map((node) => (
+            <div key={node.id} className={node.selected ? 'selected' : ''}>
+              <span>{formatTopologyKind(node.kind)}</span>
+              <strong>{node.name}</strong>
+              {node.selected && <em>Selected device</em>}
+            </div>
+          ))}
+        </div>
+      </details>
+    </article>
   );
 }
 
@@ -235,25 +374,37 @@ function StreamExperiment({
   );
 }
 
-export default function ResearchLabDialog({ onClose }: ResearchLabDialogProps) {
+function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [streams, setStreams] = useState<AudioStreamSnapshot[]>([]);
   const [discovering, setDiscovering] = useState(true);
+  const [discoveryVersion, setDiscoveryVersion] = useState(0);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [discoveryWarning, setDiscoveryWarning] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [startingKey, setStartingKey] = useState<string | null>(null);
+  const [identifyingDeviceId, setIdentifyingDeviceId] = useState<string | null>(null);
+  const [deviceActionMessages, setDeviceActionMessages] = useState<
+    Record<string, DeviceActionMessage>
+  >({});
   const [busyActions, setBusyActions] = useState<Record<string, 'tone' | 'stop'>>({});
 
   const refreshDevices = useCallback(async () => {
     setDiscovering(true);
     setDiscoveryError(null);
+    setDiscoveryWarning(null);
     try {
       const response = await fetch(apiUrl('/api/research-lab/devices'));
       if (!response.ok) {
         throw new Error(await readFailure(response, 'Unable to discover audio devices.'));
       }
       const data = await response.json() as AudioDeviceDiscoveryResponse;
-      setDevices(data.devices);
+      const normalized = normalizeDiscoveredAudioDevices(data);
+      setDevices(normalized.devices);
+      setDiscoveryVersion((current) => current + 1);
+      setDiscoveryWarning(normalized.warnings.length > 0
+        ? normalized.warnings.join(' ')
+        : null);
     } catch (error) {
       setDiscoveryError(error instanceof Error ? error.message : 'Unable to discover audio devices.');
     } finally {
@@ -317,6 +468,49 @@ export default function ResearchLabDialog({ onClose }: ResearchLabDialogProps) {
     }
   }
 
+  async function identifySpeaker(device: AudioDevice) {
+    setIdentifyingDeviceId(device.id);
+    setDeviceActionMessages((current) => {
+      const next = { ...current };
+      delete next[device.id];
+      return next;
+    });
+    try {
+      const response = await fetch(apiUrl(
+        `/api/research-lab/devices/${encodeURIComponent(device.id)}/identify`
+      ), { method: 'POST' });
+      if (!response.ok) {
+        const failure = await readResearchLabIdentifyFailure(response);
+        setDeviceActionMessages((current) => ({ ...current, [device.id]: failure }));
+        return;
+      }
+      await response.json() as AudioDeviceActionResponse;
+      setDeviceActionMessages((current) => ({
+        ...current,
+        [device.id]: {
+          summary: 'Identification chime accepted.',
+          error: false,
+        },
+      }));
+    } catch (error) {
+      setDeviceActionMessages((current) => ({
+        ...current,
+        [device.id]: {
+          summary: error instanceof Error
+            ? sanitizedErrorMessage(error)
+            : 'Unable to identify this speaker.',
+          diagnostic: sanitizeDiagnosticForDisplay({
+            timestamp: new Date().toISOString(),
+            code: 'NETWORK_OR_CLIENT_ERROR',
+          }),
+          error: true,
+        },
+      }));
+    } finally {
+      setIdentifyingDeviceId(null);
+    }
+  }
+
   async function runStreamAction(streamId: string, action: 'tone' | 'stop') {
     setBusyActions((current) => ({ ...current, [streamId]: action }));
     setActionError(null);
@@ -369,45 +563,33 @@ export default function ResearchLabDialog({ onClose }: ResearchLabDialogProps) {
               </button>
             </div>
             {discoveryError && <div className="research-error-message">{discoveryError}</div>}
+            {discoveryWarning && (
+              <div className="research-warning-message">{discoveryWarning}</div>
+            )}
             {!discovering && !discoveryError && devices.length === 0 && (
               <div className="research-empty">No physical audio devices were discovered.</div>
             )}
             <div className="research-device-list">
               {devices.map((device) => (
-                <article className="research-device-card" key={device.id}>
-                  <header>
-                    <div>
-                      <h4>{device.name}</h4>
-                      <div>{titleCase(device.provider)}{device.model ? ` · ${device.model}` : ''}</div>
-                    </div>
-                    <span className="research-badge neutral">Physical Device</span>
-                  </header>
-                  <div className="research-transport-list">
-                    {device.transports.map((transport) => (
-                      <TransportRow
-                        key={transport.id}
-                        device={device}
-                        transport={transport}
-                        busy={startingKey === `${device.id}:${transport.id}`}
-                        onStart={(targetDevice, targetTransport) =>
-                          void startStream(targetDevice, targetTransport)}
-                      />
-                    ))}
-                  </div>
-                  <details className="research-identity-details">
-                    <summary>Topology and identity</summary>
-                    <div>Device ID: <code>{device.id}</code></div>
-                    <div className="research-topology-list">
-                      {device.topology.map((node) => (
-                        <div key={node.id} className={node.selected ? 'selected' : ''}>
-                          <span>{formatTopologyKind(node.kind)}</span>
-                          <strong>{node.name}</strong>
-                          {node.selected && <em>Selected device</em>}
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                </article>
+                <ResearchLabErrorBoundary
+                  key={`${discoveryVersion}:${device.id}`}
+                  fallback={(message) => (
+                    <article className="research-device-card error">
+                      <h4>Unable to render audio device</h4>
+                      <div className="research-error-message">{message}</div>
+                    </article>
+                  )}
+                >
+                  <ResearchDeviceCard
+                    device={device}
+                    startingKey={startingKey}
+                    identifying={identifyingDeviceId === device.id}
+                    actionMessage={deviceActionMessages[device.id]}
+                    onStart={(targetDevice, targetTransport) =>
+                      void startStream(targetDevice, targetTransport)}
+                    onIdentify={(targetDevice) => void identifySpeaker(targetDevice)}
+                  />
+                </ResearchLabErrorBoundary>
               ))}
             </div>
           </section>
@@ -440,5 +622,26 @@ export default function ResearchLabDialog({ onClose }: ResearchLabDialogProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function ResearchLabDialog(props: ResearchLabDialogProps) {
+  return (
+    <ResearchLabErrorBoundary
+      fallback={(message, retry) => (
+        <div className="dialog-backdrop research-lab-backdrop">
+          <div className="research-lab-dialog research-lab-failure">
+            <h2>Research Lab could not render</h2>
+            <div className="research-error-message">{message}</div>
+            <div className="research-stream-actions">
+              <button onClick={retry}>Try Again</button>
+              <button onClick={props.onClose}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+    >
+      <ResearchLabDialogContent {...props} />
+    </ResearchLabErrorBoundary>
   );
 }
