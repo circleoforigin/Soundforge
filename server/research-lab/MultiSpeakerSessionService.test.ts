@@ -4,7 +4,12 @@ import test from 'node:test';
 
 import type { AudioDevice } from '../../src/models/ResearchLab.ts';
 import { ContinuousAudioStreamManager } from '../audio/ContinuousAudioStreamManager.ts';
-import { MultiSpeakerSessionService, multiSpeakerAlternatingIntervalMs } from './MultiSpeakerSessionService.ts';
+import {
+  MultiSpeakerSessionService,
+  multiSpeakerAlternatingIntervalMs,
+  multiSpeakerMigrationDurationMs,
+  multiSpeakerMigrationFrequencyHz,
+} from './MultiSpeakerSessionService.ts';
 import type { ResearchLabStreamService } from './ResearchLabStreamService.ts';
 
 function device(id: string, eligible = true): AudioDevice {
@@ -42,7 +47,9 @@ function harness(devices: AudioDevice[]) {
     async stop(streamId: string) {
       clients.get(streamId)?.destroy(); clients.delete(streamId);
       manager.stop(streamId, 'test Stop All');
-      return { snapshot: manager.getSnapshot(streamId)! };
+      return { snapshot: manager.getSnapshot(streamId)!, cleanup: {
+        runtimeStopped: true, encoderStopped: true, transportStopped: true, listenerClosed: true,
+      } };
     },
   };
   return { manager, clients,
@@ -90,6 +97,90 @@ test('session owns two runtimes and schedules simultaneous and alternating event
   assert.equal(manager.getActive(ready.participants[0].streamId), undefined);
   assert.equal(manager.getActive(ready.participants[1].streamId), undefined);
   assert.equal(clients.size, 0);
+  assert.equal(stopped.teardown?.pendingEventsCancelled, 4);
+  assert.deepEqual(stopped.teardown?.participantA, {
+    stopped: true, transportStopped: true, listenerClosed: true, encoderStopped: true,
+  });
+
+  const stoppedAgain = await service.stop(ready.id);
+  assert.deepEqual(stoppedAgain.teardown, stopped.teardown);
+});
+
+test('Stop All remains successful when one participant is already stopped', async () => {
+  const a = device('speaker-a'); const b = device('speaker-b');
+  const { service, manager, clients } = harness([a, b]);
+  const session = service.get((await service.create(a.id, b.id, () => 'unused')).id);
+  const first = session.participants[0];
+  clients.get(first.streamId)?.destroy(); clients.delete(first.streamId);
+  manager.stop(first.streamId, 'participant disconnected before Stop All');
+
+  const stopped = await service.stop(session.id);
+
+  assert.equal(stopped.state, 'stopped');
+  assert.equal(stopped.teardown?.participantA.stopped, true);
+  assert.equal(stopped.teardown?.participantB.stopped, true);
+  assert.equal(manager.getActive(session.participants[1].streamId), undefined);
+});
+
+test('migration schedules one shared equal-power A-to-B source and Stop All cancels it', async () => {
+  const a = device('speaker-a'); const b = device('speaker-b');
+  const { service, manager } = harness([a, b]);
+  const ready = service.get((await service.create(a.id, b.id, () => 'unused')).id);
+  const migration = service.runMigration(ready.id);
+  const result = migration.lastMigrationResult;
+  assert.ok(result);
+  assert.equal(result.direction, 'A-to-B');
+  assert.equal(result.frequencyHz, multiSpeakerMigrationFrequencyHz);
+  assert.equal(result.durationMs, multiSpeakerMigrationDurationMs);
+
+  const events = ready.participants.map((participant) =>
+    manager.getSnapshot(participant.streamId)?.scheduledEvents.find((event) => event.eventId === result.eventId)
+  );
+  assert.ok(events[0] && events[1]);
+  assert.equal(events[0].eventId, events[1].eventId);
+  assert.equal(events[0].targetMonotonicTime, events[1].targetMonotonicTime);
+  assert.equal(events[0].frequencyHz, events[1].frequencyHz);
+  assert.equal(events[0].durationMs, events[1].durationMs);
+  assert.deepEqual(events[0].gainEnvelope, { startGain: 1, endGain: 0, curve: 'equal-power' });
+  assert.deepEqual(events[1].gainEnvelope, { startGain: 0, endGain: 1, curve: 'equal-power' });
+  assert.ok(migration.recentEvents.some((event) => event.message === 'Audio migration A → B scheduled.'));
+
+  const stopped = await service.stop(ready.id);
+  assert.equal(stopped.lastMigrationResult?.status, 'cancelled');
+  assert.equal(stopped.teardown?.pendingEventsCancelled, 2);
+});
+
+test('migration requires both participants to be ready', async () => {
+  const a = device('speaker-a'); const b = device('speaker-b');
+  const manager = new ContinuousAudioStreamManager();
+  const fake = {
+    manager,
+    async start(deviceId: string) {
+      return manager.create({ deviceId, transportId: 'sonos-local-continuous', encodingProfileId: 'aac-adts' }).getSnapshot();
+    },
+  };
+  const service = new MultiSpeakerSessionService(fake as unknown as ResearchLabStreamService, async () => [a, b]);
+  const session = await service.create(a.id, b.id, () => 'unused');
+  assert.throws(() => service.runMigration(session.id), /both participants must be actively streaming/i);
+  manager.stopAll('migration readiness test cleanup');
+});
+
+test('migration records participant starts, skew, completion, and returns both streams to silence', async () => {
+  const a = device('speaker-a'); const b = device('speaker-b');
+  const { service, manager } = harness([a, b]);
+  const ready = service.get((await service.create(a.id, b.id, () => 'unused')).id);
+  service.runMigration(ready.id);
+
+  await waitFor(() => service.get(ready.id).lastMigrationResult?.status === 'completed', 10_000);
+  const completed = service.get(ready.id);
+  assert.ok(completed.lastMigrationResult?.sourceGenerationSkewMs !== null);
+  assert.ok(completed.recentEvents.some((event) => event.message === 'Participant A migration source began.'));
+  assert.ok(completed.recentEvents.some((event) => event.message === 'Participant B migration source began.'));
+  assert.ok(completed.recentEvents.some((event) => event.message === 'Audio migration completed.'));
+  for (const participant of completed.participants) {
+    assert.equal(manager.getSnapshot(participant.streamId)?.source, 'silence');
+  }
+  await service.stop(ready.id);
 });
 
 test('session remains starting until both participants are genuinely active', async () => {
@@ -100,7 +191,7 @@ test('session remains starting until both participants are genuinely active', as
     async start(deviceId: string) {
       return manager.create({ deviceId, transportId: 'sonos-local-continuous', encodingProfileId: 'aac-adts' }).getSnapshot();
     },
-    async stop(streamId: string) { manager.stop(streamId, 'test stop'); return { snapshot: manager.getSnapshot(streamId)! }; },
+    async stop(streamId: string) { manager.stop(streamId, 'test stop'); return { snapshot: manager.getSnapshot(streamId)!, cleanup: { runtimeStopped: true, encoderStopped: true, transportStopped: true, listenerClosed: true } }; },
   };
   const service = new MultiSpeakerSessionService(fake as unknown as ResearchLabStreamService, async () => [a, b]);
   const session = await service.create(a.id, b.id, () => 'unused');
@@ -117,7 +208,7 @@ test('participant startup failure is attributed and leaves a stoppable degraded 
       if (deviceId === b.id) throw new Error('B transport failed');
       return manager.create({ deviceId, transportId: 'sonos-local-continuous', encodingProfileId: 'aac-adts' }).getSnapshot();
     },
-    async stop(streamId: string) { manager.stop(streamId, 'test stop'); return { snapshot: manager.getSnapshot(streamId)! }; },
+    async stop(streamId: string) { manager.stop(streamId, 'test stop'); return { snapshot: manager.getSnapshot(streamId)!, cleanup: { runtimeStopped: true, encoderStopped: true, transportStopped: true, listenerClosed: true } }; },
   };
   const service = new MultiSpeakerSessionService(fake as unknown as ResearchLabStreamService, async () => [a, b]);
   const session = await service.create(a.id, b.id, () => 'unused');

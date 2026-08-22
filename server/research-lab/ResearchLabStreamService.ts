@@ -24,6 +24,12 @@ interface ActiveTransportBinding {
 export interface StopResearchLabStreamResult {
   snapshot: AudioStreamSnapshot;
   transportError?: string;
+  cleanup: {
+    runtimeStopped: boolean;
+    encoderStopped: boolean;
+    transportStopped: boolean;
+    listenerClosed: boolean;
+  };
 }
 
 export class ResearchLabRequestError extends Error {
@@ -178,6 +184,13 @@ export class ResearchLabStreamService {
     const activeBinding = this.bindings.get(streamId);
     let transportError: string | undefined;
     stream.updateTransport({ state: 'stopping' }, 'Stopping continuous stream transport.');
+
+    // Retire the generic runtime before closing its provider listener. Destroying the
+    // listener's active client emits a disconnect event; it must not start a second
+    // teardown of the same binding while this explicit stop is still in progress.
+    this.bindings.delete(streamId);
+    this.manager.stop(streamId, 'Research Lab stream stopped');
+
     if (activeBinding) {
       try {
         await activeBinding.transport.stop(activeBinding.binding);
@@ -197,13 +210,20 @@ export class ResearchLabStreamService {
         }, 'Transport stop failed; local stream cleanup continued.');
       }
     }
-    this.bindings.delete(streamId);
-    this.manager.stop(streamId, 'Research Lab stream stopped');
     const snapshot = this.manager.getSnapshot(streamId);
     if (!snapshot) {
       throw new Error('Stopped stream snapshot was not retained.');
     }
-    return { snapshot, ...(transportError ? { transportError } : {}) };
+    return {
+      snapshot,
+      cleanup: {
+        runtimeStopped: snapshot.lifecycle === 'stopped',
+        encoderStopped: snapshot.encoder.state === 'stopped' && snapshot.encoder.pid === null,
+        transportStopped: !transportError,
+        listenerClosed: !snapshot.httpClient.connected,
+      },
+      ...(transportError ? { transportError } : {}),
+    };
   }
 
   private async terminateRuntime(streamId: string, reason: string): Promise<void> {

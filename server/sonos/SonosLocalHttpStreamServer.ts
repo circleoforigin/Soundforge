@@ -19,6 +19,7 @@ export class SonosLocalHttpStreamServer {
   private readonly server: net.Server;
   private client: Socket | null = null;
   private connectionOrdinal = 0;
+  private closePromise: Promise<void> | null = null;
 
   constructor(options: LocalStreamServerOptions) {
     this.options = options;
@@ -36,8 +37,23 @@ export class SonosLocalHttpStreamServer {
   }
 
   async close(): Promise<void> {
-    this.client?.destroy();
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    if (!this.closePromise) {
+      this.closePromise = new Promise<void>((resolve, reject) => {
+        this.client?.destroy();
+        if (!this.server.listening) {
+          resolve();
+          return;
+        }
+        this.server.close((error) => {
+          if (error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+    await this.closePromise;
   }
 
   private handle(socket: Socket): void {

@@ -489,6 +489,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
   const [multiSession, setMultiSession] = useState<MultiSpeakerSessionSnapshot | null>(null);
   const [multiBusy, setMultiBusy] = useState<string | null>(null);
   const [multiError, setMultiError] = useState<string | null>(null);
+  const [multiMessage, setMultiMessage] = useState<string | null>(null);
 
   const multiEligibleDevices = useMemo(() => devices.filter((device) =>
     device.transports.some((transport) => transport.id === 'sonos-local-continuous'
@@ -574,8 +575,8 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
     return () => window.clearInterval(timer);
   }, [multiSessionId, multiSessionState]);
 
-  async function multiAction(action: 'start' | 'alternating' | 'simultaneous' | 'stop') {
-    setMultiBusy(action); setMultiError(null);
+  async function multiAction(action: 'start' | 'alternating' | 'simultaneous' | 'migration' | 'stop') {
+    setMultiBusy(action); setMultiError(null); setMultiMessage(null);
     try {
       const path = action === 'start'
         ? '/api/research-lab/multi-speaker-sessions'
@@ -589,6 +590,17 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
       if (!response.ok) throw new Error(await readFailure(response, `Unable to ${action} multi-speaker session.`));
       const data = await response.json() as { ok: true; session: MultiSpeakerSessionSnapshot };
       setMultiSession(data.session);
+      if (action === 'stop') {
+        const cleanupErrors = data.session.teardown
+          ? [data.session.teardown.participantA.error, data.session.teardown.participantB.error]
+            .filter((message): message is string => Boolean(message))
+          : [];
+        if (cleanupErrors.length > 0) {
+          setMultiError(`Session stopped with cleanup errors: ${cleanupErrors.join(' ')}`);
+        } else {
+          setMultiMessage('Session stopped.');
+        }
+      }
       void refreshStreams();
     } catch (error) {
       setMultiError(error instanceof Error ? error.message : 'Multi-speaker operation failed.');
@@ -850,6 +862,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
               <button disabled={!multiSession || multiSession.state === 'stopped' || Boolean(multiBusy)} onClick={() => void multiAction('stop')}>Stop All</button>
             </div>
             {multiError && <div className="research-error-message">{multiError}</div>}
+            {multiMessage && <div className="research-device-action-message">{multiMessage}</div>}
             {multiSession && (
               <div className="research-multi-session">
                 <strong>Session: {titleCase(multiSession.state)}</strong>
@@ -860,6 +873,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
                 <div className="research-stream-actions">
                   <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('alternating')}>Run Alternating Test</button>
                   <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('simultaneous')}>Run Simultaneous Test</button>
+                  <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('migration')}>Migrate A → B</button>
                 </div>
                 {multiSession.lastSimultaneousResult && <div className="research-multi-result">
                   <strong>Last Simultaneous PCM Result</strong>
@@ -868,6 +882,15 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
                   <span>B schedule error: {multiSession.lastSimultaneousResult.bScheduleErrorMs?.toFixed(2) ?? 'pending'} ms</span>
                   <span>Source-generation skew: {multiSession.lastSimultaneousResult.sourceGenerationSkewMs?.toFixed(2) ?? 'pending'} ms</span>
                   <small>This measures backend PCM generation, not acoustic speaker synchronization.</small>
+                </div>}
+                {multiSession.lastMigrationResult && <div className="research-multi-result">
+                  <strong>Last Migration</strong>
+                  <span>A → B</span>
+                  <span>Duration: {(multiSession.lastMigrationResult.durationMs / 1_000).toFixed(1)} sec</span>
+                  <span>A start error: {multiSession.lastMigrationResult.aScheduleErrorMs?.toFixed(2) ?? 'pending'} ms</span>
+                  <span>B start error: {multiSession.lastMigrationResult.bScheduleErrorMs?.toFixed(2) ?? 'pending'} ms</span>
+                  <span>Source start skew: {multiSession.lastMigrationResult.sourceGenerationSkewMs?.toFixed(2) ?? 'pending'} ms</span>
+                  <span>{titleCase(multiSession.lastMigrationResult.status)}</span>
                 </div>}
                 <details className="research-event-console">
                   <summary>Session events ({multiSession.recentEvents.length})</summary>

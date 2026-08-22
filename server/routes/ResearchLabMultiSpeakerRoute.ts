@@ -17,7 +17,10 @@ function sendError(response: Response, error: unknown): void {
   });
 }
 
-export function registerResearchLabMultiSpeakerRoute(app: Express): void {
+export function registerResearchLabMultiSpeakerRoute(
+  app: Express,
+  service: MultiSpeakerSessionService = multiSpeakerSessionService
+): void {
   app.post('/api/research-lab/multi-speaker-sessions', json(), async (request, response) => {
     const { deviceAId, deviceBId } = request.body as { deviceAId?: unknown; deviceBId?: unknown };
     if (typeof deviceAId !== 'string' || typeof deviceBId !== 'string') {
@@ -25,25 +28,29 @@ export function registerResearchLabMultiSpeakerRoute(app: Express): void {
     }
     try {
       const base = publicBaseUrl(request);
-      const session = await multiSpeakerSessionService.create(deviceAId, deviceBId,
+      const session = await service.create(deviceAId, deviceBId,
         (streamId) => `${base}/api/research-lab/streams/${encodeURIComponent(streamId)}/live.mp3`);
       response.status(201).json({ ok: true, session });
     } catch (error) { sendError(response, error); }
   });
   app.get('/api/research-lab/multi-speaker-sessions/:sessionId', (request, response) => {
-    try { response.json({ ok: true, session: multiSpeakerSessionService.get(request.params.sessionId) }); }
+    try { response.json({ ok: true, session: service.get(request.params.sessionId) }); }
     catch (error) { sendError(response, error); }
   });
   app.post('/api/research-lab/multi-speaker-sessions/:sessionId/alternating', json(), (request, response) => {
-    try { response.json({ ok: true, session: multiSpeakerSessionService.runAlternating(request.params.sessionId) }); }
+    try { response.json({ ok: true, session: service.runAlternating(request.params.sessionId) }); }
     catch (error) { sendError(response, error); }
   });
   app.post('/api/research-lab/multi-speaker-sessions/:sessionId/simultaneous', json(), (request, response) => {
-    try { response.json({ ok: true, session: multiSpeakerSessionService.runSimultaneous(request.params.sessionId) }); }
+    try { response.json({ ok: true, session: service.runSimultaneous(request.params.sessionId) }); }
+    catch (error) { sendError(response, error); }
+  });
+  app.post('/api/research-lab/multi-speaker-sessions/:sessionId/migration', json(), (request, response) => {
+    try { response.json({ ok: true, session: service.runMigration(request.params.sessionId) }); }
     catch (error) { sendError(response, error); }
   });
   app.delete('/api/research-lab/multi-speaker-sessions/:sessionId', async (request, response) => {
-    try { response.json({ ok: true, session: await multiSpeakerSessionService.stop(request.params.sessionId) }); }
+    try { response.json({ ok: true, session: await service.stop(request.params.sessionId) }); }
     catch (error) { sendError(response, error); }
   });
 }

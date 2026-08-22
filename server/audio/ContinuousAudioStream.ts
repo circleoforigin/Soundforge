@@ -14,6 +14,7 @@ import type {
   AudioStreamTransportSnapshot,
   AudioStreamRateSummary,
   ScheduledResearchAudioEventResult,
+  ScheduledResearchAudioGainEnvelope,
   ContinuousHttpFramingMode,
 } from '../../src/models/ResearchLab.ts';
 import {
@@ -31,6 +32,28 @@ const startupReadyFrameCount = 8;
 const maximumStartupBufferBytes = 256 * 1_024;
 const ffmpegExecutable = ffmpegPath as unknown as string | null;
 const sensitiveKeyPattern = /authorization|cookie|credential|password|secret|token/i;
+
+export function scheduledResearchGain(
+  envelope: ScheduledResearchAudioGainEnvelope | null,
+  progress: number
+): number {
+  if (!envelope) return 1;
+  const normalized = Math.max(0, Math.min(1, progress));
+  const angle = normalized * Math.PI / 2;
+  return envelope.startGain * Math.cos(angle) + envelope.endGain * Math.sin(angle);
+}
+
+export function scheduledResearchToneSample(
+  event: Pick<ScheduledResearchAudioEventResult,
+    'targetMonotonicTime' | 'frequencyHz' | 'durationMs' | 'gainEnvelope'>,
+  sampleMonotonicTime: number
+): number {
+  const elapsedMs = sampleMonotonicTime - event.targetMonotonicTime;
+  if (elapsedMs < 0 || elapsedMs >= event.durationMs) return 0;
+  const phase = 2 * Math.PI * event.frequencyHz * elapsedMs / 1_000;
+  const gain = scheduledResearchGain(event.gainEnvelope, elapsedMs / event.durationMs);
+  return Math.sin(phase) * toneAmplitude * gain;
+}
 
 export const continuousAudioStartup = {
   readyFrameCount: startupReadyFrameCount,
@@ -534,6 +557,7 @@ export class ContinuousAudioStream {
     targetMonotonicTime: number;
     frequencyHz?: number;
     durationMs?: number;
+    gainEnvelope?: ScheduledResearchAudioGainEnvelope;
   }): ScheduledResearchAudioEventResult {
     if (!this.isReadyForTone()) {
       throw new Error('The continuous audio stream is not ready for scheduled tone generation.');
@@ -546,6 +570,7 @@ export class ContinuousAudioStream {
       targetMonotonicTime: event.targetMonotonicTime,
       frequencyHz: event.frequencyHz ?? toneFrequencyHz,
       durationMs: event.durationMs ?? toneDurationMs,
+      gainEnvelope: event.gainEnvelope ? { ...event.gainEnvelope } : null,
       status: 'scheduled',
       actualPcmStartMonotonicTime: null,
       scheduleErrorMs: null,
@@ -557,13 +582,19 @@ export class ContinuousAudioStream {
       targetMonotonicTime: scheduled.targetMonotonicTime,
       frequencyHz: scheduled.frequencyHz,
       durationMs: scheduled.durationMs,
+      gainEnvelope: scheduled.gainEnvelope,
     });
     return { ...scheduled };
   }
 
   cancelScheduledEvents(reason = 'scheduled events cancelled'): void {
     for (const event of this.scheduledEvents) {
-      if (event.status === 'scheduled') event.status = 'cancelled';
+      if (event.status === 'scheduled' || event.status === 'started') event.status = 'cancelled';
+    }
+    if (this.activeScheduledEvent) {
+      this.activeScheduledEvent = null;
+      this.activeTone = null;
+      this.toneSamplesRemaining = 0;
     }
     this.record('source', 'scheduled-events-cancelled', 'Pending scheduled audio events cancelled.', { reason });
   }
@@ -743,7 +774,10 @@ export class ContinuousAudioStream {
         ...event,
         ...(event.details ? { details: sanitizeDetails(event.details) } : {}),
       })),
-      scheduledEvents: this.scheduledEvents.map((event) => ({ ...event })),
+      scheduledEvents: this.scheduledEvents.map((event) => ({
+        ...event,
+        gainEnvelope: event.gainEnvelope ? { ...event.gainEnvelope } : null,
+      })),
     };
   }
 
@@ -951,8 +985,9 @@ export class ContinuousAudioStream {
       nextScheduled.actualPcmStartMonotonicTime = frameMonotonicTime;
       nextScheduled.scheduleErrorMs = frameMonotonicTime - nextScheduled.targetMonotonicTime;
       this.activeScheduledEvent = nextScheduled;
-      this.toneSamplesRemaining = Math.round(this.format.sampleRate * nextScheduled.durationMs / 1000);
-      this.tonePhase = 0;
+      this.toneSamplesRemaining = Math.max(0, Math.round(
+        this.format.sampleRate * (nextScheduled.durationMs - nextScheduled.scheduleErrorMs) / 1_000
+      ));
       this.toneOrdinal += 1;
       this.activeTone = {
         ordinal: this.toneOrdinal,
@@ -965,6 +1000,9 @@ export class ContinuousAudioStream {
         targetMonotonicTime: nextScheduled.targetMonotonicTime,
         actualPcmStartMonotonicTime: frameMonotonicTime,
         scheduleErrorMs: nextScheduled.scheduleErrorMs,
+        frequencyHz: nextScheduled.frequencyHz,
+        durationMs: nextScheduled.durationMs,
+        gainEnvelope: nextScheduled.gainEnvelope,
       });
     }
     const samplesPerFrame = this.format.sampleRate * this.format.frameDurationMs / 1000;
@@ -981,7 +1019,20 @@ export class ContinuousAudioStream {
     }
     for (let sampleIndex = 0; sampleIndex < samplesPerFrame; sampleIndex += 1) {
       let sample = 0;
-      if (this.toneSamplesRemaining > 0) {
+      if (this.activeScheduledEvent) {
+        const sampleMonotonicTime = frameMonotonicTime
+          + sampleIndex * 1_000 / this.format.sampleRate;
+        sample = Math.round(scheduledResearchToneSample(
+          this.activeScheduledEvent,
+          sampleMonotonicTime
+        ) * 32_767);
+        this.toneSamplesRemaining = Math.max(0, Math.round(
+          this.format.sampleRate
+          * (this.activeScheduledEvent.targetMonotonicTime
+            + this.activeScheduledEvent.durationMs - sampleMonotonicTime)
+          / 1_000
+        ));
+      } else if (this.toneSamplesRemaining > 0) {
         sample = Math.round(Math.sin(this.tonePhase) * toneAmplitude * 32_767);
         this.tonePhase += 2 * Math.PI * toneFrequencyHz / this.format.sampleRate;
         this.toneSamplesRemaining -= 1;
@@ -993,7 +1044,11 @@ export class ContinuousAudioStream {
 
     this.pcmFramesGenerated += 1;
     this.pcmBytesGenerated += frame.length;
-    if (this.activeTone && this.toneSamplesRemaining === 0) {
+    const scheduledCompleted = this.activeScheduledEvent
+      ? frameMonotonicTime + samplesPerFrame * 1_000 / this.format.sampleRate
+        >= this.activeScheduledEvent.targetMonotonicTime + this.activeScheduledEvent.durationMs
+      : false;
+    if (this.activeTone && (this.toneSamplesRemaining === 0 || scheduledCompleted)) {
       const completedAt = new Date();
       this.lastToneCompletedAt = completedAt;
       this.record('source', 'tone-completed', 'Diagnostic test tone PCM generation completed.', {

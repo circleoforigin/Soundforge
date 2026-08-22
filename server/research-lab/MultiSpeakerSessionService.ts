@@ -6,12 +6,15 @@ import type {
   AudioStreamDiagnosticEvent,
   MultiSpeakerParticipantSlot,
   MultiSpeakerSessionSnapshot,
+  MultiSpeakerTeardownSummary,
 } from '../../src/models/ResearchLab.ts';
 import { ResearchLabRequestError, ResearchLabStreamService } from './ResearchLabStreamService.ts';
 import { discoverSonosAudioDevices } from './SonosAudioDeviceDiscovery.ts';
 
 export const multiSpeakerEventLeadMs = 400;
 export const multiSpeakerAlternatingIntervalMs = 3_000;
+export const multiSpeakerMigrationDurationMs = 8_000;
+export const multiSpeakerMigrationFrequencyHz = 880;
 
 interface Participant {
   slot: MultiSpeakerParticipantSlot;
@@ -26,6 +29,9 @@ interface Session {
   stopping: boolean;
   stopped: boolean;
   lastSimultaneousEventId: string | null;
+  lastMigrationEventId: string | null;
+  teardown: MultiSpeakerTeardownSummary | null;
+  stopPromise: Promise<MultiSpeakerSessionSnapshot> | null;
 }
 
 export class MultiSpeakerSessionService {
@@ -59,7 +65,11 @@ export class MultiSpeakerSessionService {
     }
 
     const id = crypto.randomUUID();
-    const session: Session = { id, participants: [], events: [], stopping: false, stopped: false, lastSimultaneousEventId: null };
+    const session: Session = {
+      id, participants: [], events: [], stopping: false, stopped: false,
+      lastSimultaneousEventId: null, lastMigrationEventId: null,
+      teardown: null, stopPromise: null,
+    };
     this.sessions.set(id, session);
     this.record(session, 'Multi-speaker session created.');
     const results = await Promise.allSettled((selected as AudioDevice[]).map((device) =>
@@ -116,22 +126,103 @@ export class MultiSpeakerSessionService {
     return this.snapshot(session);
   }
 
+  runMigration(id: string): MultiSpeakerSessionSnapshot {
+    const session = this.requireReady(id);
+    const eventId = crypto.randomUUID();
+    const targetMonotonicTime = performance.now() + multiSpeakerEventLeadMs;
+    session.lastMigrationEventId = eventId;
+    for (const participant of session.participants) {
+      const fromA = participant.slot === 'A';
+      this.streamService.manager.getActive(participant.streamId)!.scheduleTone({
+        eventId,
+        targetMonotonicTime,
+        frequencyHz: multiSpeakerMigrationFrequencyHz,
+        durationMs: multiSpeakerMigrationDurationMs,
+        gainEnvelope: {
+          startGain: fromA ? 1 : 0,
+          endGain: fromA ? 0 : 1,
+          curve: 'equal-power',
+        },
+      });
+    }
+    this.record(session, 'Audio migration A → B scheduled.', {
+      eventId,
+      targetMonotonicTime,
+      durationMs: multiSpeakerMigrationDurationMs,
+      frequencyHz: multiSpeakerMigrationFrequencyHz,
+      curve: 'equal-power',
+    }, 'source', `migration-scheduled:${eventId}`);
+    return this.snapshot(session);
+  }
+
   async stop(id: string): Promise<MultiSpeakerSessionSnapshot> {
     const session = this.requireSession(id);
+    if (session.stopped) return this.snapshot(session);
+    if (session.stopPromise) return session.stopPromise;
+    session.stopPromise = this.stopSession(session);
+    return session.stopPromise;
+  }
+
+  private async stopSession(session: Session): Promise<MultiSpeakerSessionSnapshot> {
     session.stopping = true;
     this.record(session, 'Stopping all multi-speaker participants.');
+    let pendingEventsCancelled = 0;
     for (const participant of session.participants) {
       const stream = this.streamService.manager.getActive(participant.streamId);
+      pendingEventsCancelled += stream?.getSnapshot().scheduledEvents
+        .filter((event) => event.status === 'scheduled').length ?? 0;
       stream?.cancelScheduledEvents('multi-speaker Stop All');
     }
-    await Promise.allSettled(session.participants.map((participant) =>
-      this.streamService.manager.getActive(participant.streamId)
-        ? this.streamService.stop(participant.streamId)
-        : Promise.resolve()
-    ));
+
+    const results = await Promise.all(session.participants.map(async (participant) => {
+      try {
+        const active = this.streamService.manager.getActive(participant.streamId);
+        const result = active ? await this.streamService.stop(participant.streamId) : null;
+        const snapshot = result?.snapshot ?? this.streamService.manager.getSnapshot(participant.streamId);
+        return {
+          slot: participant.slot,
+          stopped: !active || snapshot?.lifecycle === 'stopped',
+          transportStopped: result ? result.cleanup.transportStopped : true,
+          listenerClosed: result ? result.cleanup.listenerClosed : !(snapshot?.httpClient.connected ?? false),
+          encoderStopped: result ? result.cleanup.encoderStopped : snapshot?.encoder.pid == null,
+          ...(result?.transportError ? { error: result.transportError } : {}),
+        };
+      } catch (error) {
+        const snapshot = this.streamService.manager.getSnapshot(participant.streamId);
+        return {
+          slot: participant.slot,
+          stopped: snapshot?.lifecycle === 'stopped',
+          transportStopped: false,
+          listenerClosed: !(snapshot?.httpClient.connected ?? false),
+          encoderStopped: snapshot?.encoder.pid == null,
+          error: error instanceof Error ? error.message : 'Participant cleanup failed.',
+        };
+      }
+    }));
+
+    const forSlot = (slot: MultiSpeakerParticipantSlot) => {
+      const result = results.find((candidate) => candidate.slot === slot);
+      return result
+        ? {
+            stopped: result.stopped,
+            transportStopped: result.transportStopped,
+            listenerClosed: result.listenerClosed,
+            encoderStopped: result.encoderStopped,
+            ...(result.error ? { error: result.error } : {}),
+          }
+        : {
+            stopped: true, transportStopped: true, listenerClosed: true, encoderStopped: true,
+          };
+    };
+    session.teardown = {
+      sessionId: session.id,
+      participantA: forSlot('A'),
+      participantB: forSlot('B'),
+      pendingEventsCancelled,
+    };
     session.stopping = false;
     session.stopped = true;
-    this.record(session, 'Multi-speaker session stopped.');
+    this.record(session, 'Multi-speaker session stopped.', session.teardown);
     return this.snapshot(session);
   }
 
@@ -148,6 +239,7 @@ export class MultiSpeakerSessionService {
   }
 
   private snapshot(session: Session): MultiSpeakerSessionSnapshot {
+    this.captureMigrationDiagnostics(session);
     const participants = session.participants.map((participant) => {
       const stream = this.streamService.manager.getSnapshot(participant.streamId);
       return {
@@ -171,11 +263,43 @@ export class MultiSpeakerSessionService {
       this.streamService.manager.getSnapshot(participant.streamId)?.scheduledEvents.find((event) => event.eventId === eventId)
     ) : [];
     const a = results[0]; const b = results[1];
+    const migrationEventId = session.lastMigrationEventId;
+    const migrationEvents = migrationEventId ? session.participants.map((participant) =>
+      this.streamService.manager.getSnapshot(participant.streamId)?.scheduledEvents
+        .find((event) => event.eventId === migrationEventId)
+    ) : [];
+    const migrationA = migrationEvents[0];
+    const migrationB = migrationEvents[1];
+    const migrationStatuses = migrationEvents.map((event) => event?.status);
     return {
       id: session.id,
       state: session.stopped ? 'stopped' : session.stopping ? 'stopping' : degraded ? 'degraded' : ready ? 'ready' : 'starting',
       participants,
       recentEvents: [...session.events],
+      teardown: session.teardown,
+      lastMigrationResult: migrationEventId && migrationA && migrationB ? {
+        eventId: migrationEventId,
+        direction: 'A-to-B',
+        targetMonotonicTime: migrationA.targetMonotonicTime,
+        frequencyHz: migrationA.frequencyHz,
+        durationMs: migrationA.durationMs,
+        curve: 'equal-power',
+        aActualStart: migrationA.actualPcmStartMonotonicTime,
+        bActualStart: migrationB.actualPcmStartMonotonicTime,
+        aScheduleErrorMs: migrationA.scheduleErrorMs,
+        bScheduleErrorMs: migrationB.scheduleErrorMs,
+        sourceGenerationSkewMs: migrationA.actualPcmStartMonotonicTime !== null
+          && migrationB.actualPcmStartMonotonicTime !== null
+          ? Math.abs(migrationA.actualPcmStartMonotonicTime - migrationB.actualPcmStartMonotonicTime)
+          : null,
+        status: migrationStatuses.includes('cancelled')
+          ? 'cancelled'
+          : migrationStatuses.every((status) => status === 'completed')
+            ? 'completed'
+            : migrationStatuses.some((status) => status === 'started' || status === 'completed')
+              ? 'running'
+              : 'scheduled',
+      } : null,
       lastSimultaneousResult: eventId && a && b ? {
         eventId, scheduledMonotonicTime: a.targetMonotonicTime,
         aActualStart: a.actualPcmStartMonotonicTime,
@@ -213,6 +337,44 @@ export class MultiSpeakerSessionService {
       this.record(session, 'Source-generation skew measured.', {
         eventId, sourceGenerationSkewMs: Math.abs(starts[0] - starts[1]),
       }, 'source', `simultaneous-skew:${eventId}`);
+    }
+  }
+
+  private captureMigrationDiagnostics(session: Session): void {
+    const eventId = session.lastMigrationEventId;
+    if (!eventId) return;
+    const values = session.participants.map((participant) => ({
+      slot: participant.slot,
+      event: this.streamService.manager.getSnapshot(participant.streamId)?.scheduledEvents
+        .find((candidate) => candidate.eventId === eventId),
+    }));
+    for (const value of values) {
+      if (value.event?.actualPcmStartMonotonicTime !== null
+        && value.event?.actualPcmStartMonotonicTime !== undefined
+        && !session.events.some((event) => event.code === `migration-start:${eventId}:${value.slot}`)) {
+        this.record(session, `Participant ${value.slot} migration source began.`, {
+          eventId,
+          scheduleErrorMs: value.event.scheduleErrorMs,
+          actualPcmStartMonotonicTime: value.event.actualPcmStartMonotonicTime,
+          startGain: value.event.gainEnvelope?.startGain ?? 1,
+          endGain: value.event.gainEnvelope?.endGain ?? 1,
+        }, 'source', `migration-start:${eventId}:${value.slot}`);
+      }
+    }
+    const starts = values.map((value) => value.event?.actualPcmStartMonotonicTime);
+    if (starts.every((value): value is number => typeof value === 'number')
+      && !session.events.some((event) => event.code === `migration-skew:${eventId}`)) {
+      this.record(session, 'Migration source-start generation skew measured.', {
+        eventId,
+        sourceGenerationSkewMs: Math.abs(starts[0] - starts[1]),
+      }, 'source', `migration-skew:${eventId}`);
+    }
+    if (values.every((value) => value.event?.status === 'completed')
+      && !session.events.some((event) => event.code === `migration-completed:${eventId}`)) {
+      this.record(session, 'Audio migration completed.', {
+        eventId,
+        durationMs: multiSpeakerMigrationDurationMs,
+      }, 'source', `migration-completed:${eventId}`);
     }
   }
 

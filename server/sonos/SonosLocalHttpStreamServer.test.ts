@@ -29,6 +29,8 @@ test('local stream server emits non-chunked HTTP/1.0 AAC headers and binds one c
   assert.match(text, /Content-Type: audio\/aac/i);
   assert.doesNotMatch(text, /Transfer-Encoding|Content-Length/i);
   assert.equal(bound, 1);
+  await Promise.all([server.close(), server.close()]);
+  await server.close();
 });
 
 test('local stream listener remains available for a sequential startup reconnect', async () => {

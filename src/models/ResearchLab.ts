@@ -232,9 +232,16 @@ export interface ScheduledResearchAudioEventResult {
   targetMonotonicTime: number;
   frequencyHz: number;
   durationMs: number;
+  gainEnvelope: ScheduledResearchAudioGainEnvelope | null;
   status: 'scheduled' | 'started' | 'completed' | 'cancelled';
   actualPcmStartMonotonicTime: number | null;
   scheduleErrorMs: number | null;
+}
+
+export interface ScheduledResearchAudioGainEnvelope {
+  startGain: number;
+  endGain: number;
+  curve: 'equal-power';
 }
 
 export type MultiSpeakerParticipantSlot = 'A' | 'B';
@@ -259,12 +266,44 @@ export interface MultiSpeakerSimultaneousResult {
   sourceGenerationSkewMs: number | null;
 }
 
+export interface MultiSpeakerMigrationResult {
+  eventId: string;
+  direction: 'A-to-B';
+  targetMonotonicTime: number;
+  frequencyHz: number;
+  durationMs: number;
+  curve: 'equal-power';
+  aActualStart: number | null;
+  bActualStart: number | null;
+  aScheduleErrorMs: number | null;
+  bScheduleErrorMs: number | null;
+  sourceGenerationSkewMs: number | null;
+  status: 'scheduled' | 'running' | 'completed' | 'cancelled';
+}
+
 export interface MultiSpeakerSessionSnapshot {
   id: string;
   state: 'starting' | 'ready' | 'degraded' | 'stopping' | 'stopped';
   participants: MultiSpeakerParticipantSnapshot[];
   recentEvents: AudioStreamDiagnosticEvent[];
   lastSimultaneousResult: MultiSpeakerSimultaneousResult | null;
+  lastMigrationResult: MultiSpeakerMigrationResult | null;
+  teardown: MultiSpeakerTeardownSummary | null;
+}
+
+export interface MultiSpeakerParticipantTeardown {
+  stopped: boolean;
+  transportStopped: boolean;
+  listenerClosed: boolean;
+  encoderStopped: boolean;
+  error?: string;
+}
+
+export interface MultiSpeakerTeardownSummary {
+  sessionId: string;
+  participantA: MultiSpeakerParticipantTeardown;
+  participantB: MultiSpeakerParticipantTeardown;
+  pendingEventsCancelled: number;
 }
 
 export interface AudioStreamSnapshotResponse {

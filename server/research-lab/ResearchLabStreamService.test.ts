@@ -50,9 +50,12 @@ class MockTransport implements ContinuousStreamTransport {
   readonly started: string[] = [];
   readonly stopped: string[] = [];
   failStop = false;
+  terminateOnStop = false;
+  private readonly contexts = new Map<string, ContinuousStreamTransportContext>();
 
   async start(context: ContinuousStreamTransportContext): Promise<ContinuousStreamTransportBinding> {
     this.started.push(context.streamId);
+    this.contexts.set(context.streamId, context);
     context.updateTransport({
       state: 'bound',
       targetScope: 'group',
@@ -72,7 +75,9 @@ class MockTransport implements ContinuousStreamTransport {
   }
 
   async stop(binding: ContinuousStreamTransportBinding): Promise<void> {
-    this.stopped.push((binding.providerBinding as { mock: string }).mock);
+    const streamId = (binding.providerBinding as { mock: string }).mock;
+    this.stopped.push(streamId);
+    if (this.terminateOnStop) this.contexts.get(streamId)?.terminate('Provider listener closed.');
     if (this.failStop) {
       throw new Error('Mock provider stop failed.');
     }
@@ -224,7 +229,7 @@ test('disconnecting one HTTP consumer tears down only its own stream', async () 
   }
 });
 
-test('stop tears down provider first and retains local final state', async () => {
+test('stop retires the runtime before provider listener cleanup and retains final state', async () => {
   const target = device('stop-device', true);
   const { manager, transport, service } = createService([target]);
   const snapshot = await service.start(target.id, transport.id, () => 'https://stream');
@@ -236,6 +241,22 @@ test('stop tears down provider first and retains local final state', async () =>
   assert.equal(result.snapshot.transport?.state, 'stopped');
   assert.equal(manager.getActive(snapshot.id), undefined);
   assert.equal(manager.getSnapshot(snapshot.id)?.lifecycle, 'stopped');
+});
+
+test('provider disconnect callback during explicit stop cannot start duplicate teardown', async () => {
+  const target = device('disconnect-during-stop', true);
+  const { transport, service } = createService([target]);
+  transport.terminateOnStop = true;
+  const snapshot = await service.start(target.id, transport.id, () => 'https://stream');
+
+  const result = await service.stop(snapshot.id);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(transport.stopped, [snapshot.id]);
+  assert.equal(result.cleanup.runtimeStopped, true);
+  assert.equal(result.cleanup.encoderStopped, true);
+  assert.equal(result.cleanup.transportStopped, true);
+  assert.equal(result.cleanup.listenerClosed, true);
 });
 
 test('provider stop failure still stops and retains local runtime', async () => {

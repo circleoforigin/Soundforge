@@ -5,6 +5,8 @@ import { performance } from 'node:perf_hooks';
 
 import {
   continuousAudioStartup,
+  scheduledResearchGain,
+  scheduledResearchToneSample,
 } from './ContinuousAudioStream.ts';
 import { ContinuousAudioStreamManager } from './ContinuousAudioStreamManager.ts';
 
@@ -31,6 +33,65 @@ function bindClient(stream: { bindHttpClient(client: PassThrough): void }): Pass
   stream.bindHttpClient(client);
   return client;
 }
+
+test('equal-power scheduled tones use smooth gain and one shared logical phase timeline', () => {
+  const fadeOut = { startGain: 1, endGain: 0, curve: 'equal-power' as const };
+  const fadeIn = { startGain: 0, endGain: 1, curve: 'equal-power' as const };
+  assert.ok(Math.abs(scheduledResearchGain(fadeOut, 0) - 1) < 1e-12);
+  assert.ok(Math.abs(scheduledResearchGain(fadeIn, 0)) < 1e-12);
+  assert.ok(Math.abs(scheduledResearchGain(fadeOut, 0.5) - Math.SQRT1_2) < 1e-12);
+  assert.ok(Math.abs(scheduledResearchGain(fadeIn, 0.5) - Math.SQRT1_2) < 1e-12);
+  assert.ok(Math.abs(scheduledResearchGain(fadeOut, 1)) < 1e-12);
+  assert.ok(Math.abs(scheduledResearchGain(fadeIn, 1) - 1) < 1e-12);
+
+  const gains = Array.from({ length: 401 }, (_, index) =>
+    scheduledResearchGain(fadeOut, index / 400)
+  );
+  assert.ok(gains.every((gain, index) => index === 0 || Math.abs(gain - gains[index - 1]) < 0.005));
+
+  const event = {
+    targetMonotonicTime: 10_000,
+    frequencyHz: 125,
+    durationMs: 8_000,
+    gainEnvelope: null,
+  };
+  const delayedSampleTime = event.targetMonotonicTime + 2;
+  const expected = 0.4;
+  assert.ok(Math.abs(scheduledResearchToneSample(event, delayedSampleTime) - expected) < 1e-10);
+  assert.equal(
+    scheduledResearchToneSample(event, delayedSampleTime),
+    scheduledResearchToneSample({ ...event }, delayedSampleTime),
+    'separate streams must derive identical phase from the shared target timeline'
+  );
+  assert.notEqual(scheduledResearchToneSample(event, delayedSampleTime), 0,
+    'a delayed local start must not restart the waveform at phase zero');
+});
+
+test('scheduled tone parameters drive PCM source and return to silence after completion', async () => {
+  const manager = new ContinuousAudioStreamManager();
+  const stream = manager.create();
+  const client = bindClient(stream);
+  try {
+    await waitFor(() => stream.isReadyForTone());
+    stream.scheduleTone({
+      eventId: 'short-envelope',
+      targetMonotonicTime: performance.now() + 100,
+      frequencyHz: 997,
+      durationMs: 200,
+      gainEnvelope: { startGain: 1, endGain: 0, curve: 'equal-power' },
+    });
+    await waitFor(() => stream.getSnapshot().scheduledEvents[0]?.status === 'completed');
+    const snapshot = stream.getSnapshot();
+    assert.equal(snapshot.scheduledEvents[0].frequencyHz, 997);
+    assert.equal(snapshot.scheduledEvents[0].durationMs, 200);
+    assert.deepEqual(snapshot.scheduledEvents[0].gainEnvelope,
+      { startGain: 1, endGain: 0, curve: 'equal-power' });
+    assert.equal(snapshot.source, 'silence');
+  } finally {
+    client.destroy();
+    manager.stop(stream.id, 'scheduled source test complete');
+  }
+});
 
 test('encoder prewarms a bounded valid MP3 prefix before its HTTP client connects', async () => {
   const manager = new ContinuousAudioStreamManager();
