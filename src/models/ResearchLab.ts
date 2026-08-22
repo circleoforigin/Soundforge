@@ -224,6 +224,47 @@ export interface AudioStreamSnapshot {
   stoppedAt: string | null;
   lastError: string | null;
   recentEvents: AudioStreamDiagnosticEvent[];
+  scheduledEvents: ScheduledResearchAudioEventResult[];
+}
+
+export interface ScheduledResearchAudioEventResult {
+  eventId: string;
+  targetMonotonicTime: number;
+  frequencyHz: number;
+  durationMs: number;
+  status: 'scheduled' | 'started' | 'completed' | 'cancelled';
+  actualPcmStartMonotonicTime: number | null;
+  scheduleErrorMs: number | null;
+}
+
+export type MultiSpeakerParticipantSlot = 'A' | 'B';
+
+export interface MultiSpeakerParticipantSnapshot {
+  slot: MultiSpeakerParticipantSlot;
+  deviceId: string;
+  deviceName: string;
+  streamId: string;
+  state: string;
+  encoderPid: number | null;
+  consumerConnected: boolean;
+}
+
+export interface MultiSpeakerSimultaneousResult {
+  eventId: string;
+  scheduledMonotonicTime: number;
+  aActualStart: number | null;
+  bActualStart: number | null;
+  aScheduleErrorMs: number | null;
+  bScheduleErrorMs: number | null;
+  sourceGenerationSkewMs: number | null;
+}
+
+export interface MultiSpeakerSessionSnapshot {
+  id: string;
+  state: 'starting' | 'ready' | 'degraded' | 'stopping' | 'stopped';
+  participants: MultiSpeakerParticipantSnapshot[];
+  recentEvents: AudioStreamDiagnosticEvent[];
+  lastSimultaneousResult: MultiSpeakerSimultaneousResult | null;
 }
 
 export interface AudioStreamSnapshotResponse {

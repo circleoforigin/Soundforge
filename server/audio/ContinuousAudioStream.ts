@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import type { Writable } from 'node:stream';
 import type { HttpStreamConnectionMetadata } from './transports/ContinuousStreamTransport.ts';
 
@@ -12,6 +13,7 @@ import type {
   AudioStreamSource,
   AudioStreamTransportSnapshot,
   AudioStreamRateSummary,
+  ScheduledResearchAudioEventResult,
   ContinuousHttpFramingMode,
 } from '../../src/models/ResearchLab.ts';
 import {
@@ -301,6 +303,8 @@ export class ContinuousAudioStream {
     encodedBytesBefore: number;
   } | null = null;
   private lastToneCompletedAt: Date | null = null;
+  private readonly scheduledEvents: ScheduledResearchAudioEventResult[] = [];
+  private activeScheduledEvent: ScheduledResearchAudioEventResult | null = null;
 
   constructor(id: string, options: ContinuousAudioStreamOptions = {}) {
     this.id = id;
@@ -525,6 +529,45 @@ export class ContinuousAudioStream {
     return { frequencyHz: toneFrequencyHz, durationMs: toneDurationMs };
   }
 
+  scheduleTone(event: {
+    eventId: string;
+    targetMonotonicTime: number;
+    frequencyHz?: number;
+    durationMs?: number;
+  }): ScheduledResearchAudioEventResult {
+    if (!this.isReadyForTone()) {
+      throw new Error('The continuous audio stream is not ready for scheduled tone generation.');
+    }
+    if (this.scheduledEvents.some((candidate) => candidate.eventId === event.eventId)) {
+      throw new Error(`Scheduled audio event ${event.eventId} already exists on this stream.`);
+    }
+    const scheduled: ScheduledResearchAudioEventResult = {
+      eventId: event.eventId,
+      targetMonotonicTime: event.targetMonotonicTime,
+      frequencyHz: event.frequencyHz ?? toneFrequencyHz,
+      durationMs: event.durationMs ?? toneDurationMs,
+      status: 'scheduled',
+      actualPcmStartMonotonicTime: null,
+      scheduleErrorMs: null,
+    };
+    this.scheduledEvents.push(scheduled);
+    this.scheduledEvents.sort((a, b) => a.targetMonotonicTime - b.targetMonotonicTime);
+    this.record('source', 'scheduled-tone-created', 'Diagnostic tone scheduled on the shared monotonic clock.', {
+      eventId: scheduled.eventId,
+      targetMonotonicTime: scheduled.targetMonotonicTime,
+      frequencyHz: scheduled.frequencyHz,
+      durationMs: scheduled.durationMs,
+    });
+    return { ...scheduled };
+  }
+
+  cancelScheduledEvents(reason = 'scheduled events cancelled'): void {
+    for (const event of this.scheduledEvents) {
+      if (event.status === 'scheduled') event.status = 'cancelled';
+    }
+    this.record('source', 'scheduled-events-cancelled', 'Pending scheduled audio events cancelled.', { reason });
+  }
+
   isReadyForTone(): boolean {
     return this.state === 'running' && this.hasActiveClient() && this.firstLiveBytesDelivered
       && this.connections.length >= (this.options.minimumConnectionsForTone ?? 1);
@@ -539,6 +582,7 @@ export class ContinuousAudioStream {
       reason,
     });
     this.toneSamplesRemaining = 0;
+    this.cancelScheduledEvents(reason);
     if (!this.startupBufferReady) {
       this.rejectReady?.(new Error(`Continuous audio stream stopped before startup was ready: ${reason}`));
     }
@@ -699,6 +743,7 @@ export class ContinuousAudioStream {
         ...event,
         ...(event.details ? { details: sanitizeDetails(event.details) } : {}),
       })),
+      scheduledEvents: this.scheduledEvents.map((event) => ({ ...event })),
     };
   }
 
@@ -899,6 +944,29 @@ export class ContinuousAudioStream {
       return;
     }
 
+    const frameMonotonicTime = performance.now();
+    const nextScheduled = this.scheduledEvents.find((event) => event.status === 'scheduled');
+    if (!this.activeTone && nextScheduled && frameMonotonicTime >= nextScheduled.targetMonotonicTime) {
+      nextScheduled.status = 'started';
+      nextScheduled.actualPcmStartMonotonicTime = frameMonotonicTime;
+      nextScheduled.scheduleErrorMs = frameMonotonicTime - nextScheduled.targetMonotonicTime;
+      this.activeScheduledEvent = nextScheduled;
+      this.toneSamplesRemaining = Math.round(this.format.sampleRate * nextScheduled.durationMs / 1000);
+      this.tonePhase = 0;
+      this.toneOrdinal += 1;
+      this.activeTone = {
+        ordinal: this.toneOrdinal,
+        requestedAt: new Date(),
+        pcmStartedAt: new Date(),
+        encodedBytesBefore: this.encodedBytesProduced,
+      };
+      this.record('source', 'scheduled-tone-started', 'Scheduled diagnostic tone PCM generation began.', {
+        eventId: nextScheduled.eventId,
+        targetMonotonicTime: nextScheduled.targetMonotonicTime,
+        actualPcmStartMonotonicTime: frameMonotonicTime,
+        scheduleErrorMs: nextScheduled.scheduleErrorMs,
+      });
+    }
     const samplesPerFrame = this.format.sampleRate * this.format.frameDurationMs / 1000;
     const frame = Buffer.alloc(samplesPerFrame * this.format.channelCount * 2);
     if (this.activeTone && !this.activeTone.pcmStartedAt && this.toneSamplesRemaining > 0) {
@@ -939,6 +1007,10 @@ export class ContinuousAudioStream {
         encodedBitsPerSecond: this.encodedRate.current,
       });
       this.activeTone = null;
+      if (this.activeScheduledEvent) {
+        this.activeScheduledEvent.status = 'completed';
+        this.activeScheduledEvent = null;
+      }
     }
     const accepted = encoder.stdin.write(frame);
     if (!accepted && !this.stdinBackpressured) {

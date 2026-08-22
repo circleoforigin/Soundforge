@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
+import { performance } from 'node:perf_hooks';
 
 import {
   continuousAudioStartup,
@@ -274,6 +275,33 @@ test('Media Foundation AAC telemetry maintains encoded rate for silence and tone
     silence.client.destroy(); silence.manager.stop(silence.stream.id, 'test complete');
   }
 
+});
+
+test('two streams schedule one shared event against the same monotonic target', async () => {
+  const manager = new ContinuousAudioStreamManager();
+  const a = manager.create({ encodingProfileId: 'aac-adts' });
+  const b = manager.create({ encodingProfileId: 'aac-adts' });
+  const clientA = bindClient(a);
+  const clientB = bindClient(b);
+  try {
+    await waitFor(() => a.isReadyForTone() && b.isReadyForTone());
+    const eventId = 'shared-event';
+    const targetMonotonicTime = performance.now() + 300;
+    a.scheduleTone({ eventId, targetMonotonicTime });
+    b.scheduleTone({ eventId, targetMonotonicTime });
+    await waitFor(() => a.getSnapshot().scheduledEvents[0]?.status === 'started'
+      && b.getSnapshot().scheduledEvents[0]?.status === 'started');
+    const eventA = a.getSnapshot().scheduledEvents[0];
+    const eventB = b.getSnapshot().scheduledEvents[0];
+    assert.equal(eventA.eventId, eventB.eventId);
+    assert.equal(eventA.targetMonotonicTime, eventB.targetMonotonicTime);
+    assert.ok(eventA.actualPcmStartMonotonicTime !== null);
+    assert.ok(eventB.actualPcmStartMonotonicTime !== null);
+    assert.ok(Math.abs(eventA.actualPcmStartMonotonicTime - eventB.actualPcmStartMonotonicTime) <= 20);
+  } finally {
+    clientA.destroy(); clientB.destroy();
+    manager.stop(a.id, 'test complete'); manager.stop(b.id, 'test complete');
+  }
 });
 
 test('two continuous streams isolate encoder, source, counters, and cleanup', async () => {

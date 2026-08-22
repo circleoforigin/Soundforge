@@ -26,6 +26,7 @@ import type {
   AudioTransportOption,
   AudioTransportScope,
   ContinuousHttpFramingMode,
+  MultiSpeakerSessionSnapshot,
 } from '../models/ResearchLab';
 
 interface ResearchLabDialogProps {
@@ -483,6 +484,19 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
   >({});
   const [busyActions, setBusyActions] = useState<Record<string, 'tone' | 'stop'>>({});
   const [httpFramingMode, setHttpFramingMode] = useState<ContinuousHttpFramingMode>('chunked');
+  const [speakerAId, setSpeakerAId] = useState('');
+  const [speakerBId, setSpeakerBId] = useState('');
+  const [multiSession, setMultiSession] = useState<MultiSpeakerSessionSnapshot | null>(null);
+  const [multiBusy, setMultiBusy] = useState<string | null>(null);
+  const [multiError, setMultiError] = useState<string | null>(null);
+
+  const multiEligibleDevices = useMemo(() => devices.filter((device) =>
+    device.transports.some((transport) => transport.id === 'sonos-local-continuous'
+      && transport.operation === 'persistent-stream'
+      && transport.scope === 'physical-device'
+      && transport.independentlyTargetable
+      && transport.availability !== 'unavailable')
+  ), [devices]);
 
   const refreshDevices = useCallback(async () => {
     setDiscovering(true);
@@ -540,6 +554,46 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
     const timer = window.setInterval(() => void refreshStreams(), 1_000);
     return () => window.clearInterval(timer);
   }, [hasActiveStreams, refreshStreams]);
+
+  const multiSessionId = multiSession?.id;
+  const multiSessionState = multiSession?.state;
+
+  useEffect(() => {
+    if (!multiSessionId || multiSessionState === 'stopped') return;
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await fetch(apiUrl(`/api/research-lab/multi-speaker-sessions/${encodeURIComponent(multiSessionId)}`));
+        if (response.ok) {
+          const data = await response.json() as { ok: true; session: MultiSpeakerSessionSnapshot };
+          setMultiSession(data.session);
+        }
+      } catch {
+        // The next poll or an explicit action can recover transient diagnostics failures.
+      }
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [multiSessionId, multiSessionState]);
+
+  async function multiAction(action: 'start' | 'alternating' | 'simultaneous' | 'stop') {
+    setMultiBusy(action); setMultiError(null);
+    try {
+      const path = action === 'start'
+        ? '/api/research-lab/multi-speaker-sessions'
+        : `/api/research-lab/multi-speaker-sessions/${encodeURIComponent(multiSession!.id)}${
+          action === 'stop' ? '' : `/${action}`}`;
+      const response = await fetch(apiUrl(path), {
+        method: action === 'stop' ? 'DELETE' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        ...(action === 'start' ? { body: JSON.stringify({ deviceAId: speakerAId, deviceBId: speakerBId }) } : {}),
+      });
+      if (!response.ok) throw new Error(await readFailure(response, `Unable to ${action} multi-speaker session.`));
+      const data = await response.json() as { ok: true; session: MultiSpeakerSessionSnapshot };
+      setMultiSession(data.session);
+      void refreshStreams();
+    } catch (error) {
+      setMultiError(error instanceof Error ? error.message : 'Multi-speaker operation failed.');
+    } finally { setMultiBusy(null); }
+  }
 
   async function startStream(device: AudioDevice, transport: AudioTransportOption) {
     const key = `${device.id}:${transport.id}`;
@@ -775,6 +829,57 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
                 </ResearchLabErrorBoundary>
               ))}
             </div>
+          </section>
+
+          <section className="research-lab-panel">
+            <div className="research-section-heading">
+              <div><h3>Multi-Speaker Lab</h3><p>PCM/source-generation experiments for two independent physical streams.</p></div>
+            </div>
+            <div className="research-multi-selectors">
+              <label>Speaker A<select value={speakerAId} disabled={Boolean(multiSession && multiSession.state !== 'stopped')} onChange={(event) => setSpeakerAId(event.target.value)}>
+                <option value="">Select device…</option>
+                {multiEligibleDevices.map((device) => <option key={device.id} value={device.id} disabled={device.id === speakerBId}>{device.presentation?.alias ?? device.name}</option>)}
+              </select></label>
+              <label>Speaker B<select value={speakerBId} disabled={Boolean(multiSession && multiSession.state !== 'stopped')} onChange={(event) => setSpeakerBId(event.target.value)}>
+                <option value="">Select device…</option>
+                {multiEligibleDevices.map((device) => <option key={device.id} value={device.id} disabled={device.id === speakerAId}>{device.presentation?.alias ?? device.name}</option>)}
+              </select></label>
+            </div>
+            <div className="research-stream-actions">
+              <button disabled={!speakerAId || !speakerBId || speakerAId === speakerBId || Boolean(multiBusy) || Boolean(multiSession && multiSession.state !== 'stopped')} onClick={() => void multiAction('start')}>Start Both</button>
+              <button disabled={!multiSession || multiSession.state === 'stopped' || Boolean(multiBusy)} onClick={() => void multiAction('stop')}>Stop All</button>
+            </div>
+            {multiError && <div className="research-error-message">{multiError}</div>}
+            {multiSession && (
+              <div className="research-multi-session">
+                <strong>Session: {titleCase(multiSession.state)}</strong>
+                <div className="research-diagnostic-grid">
+                  {multiSession.participants.map((participant) => <DiagnosticValue key={participant.slot} label={`Speaker ${participant.slot}`} value={`${participant.deviceName} · ${titleCase(participant.state)} · PID ${participant.encoderPid ?? '—'} · ${participant.consumerConnected ? 'Connected' : 'Waiting'}`} />)}
+                </div>
+                <h4>Coordinated Tests</h4>
+                <div className="research-stream-actions">
+                  <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('alternating')}>Run Alternating Test</button>
+                  <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('simultaneous')}>Run Simultaneous Test</button>
+                </div>
+                {multiSession.lastSimultaneousResult && <div className="research-multi-result">
+                  <strong>Last Simultaneous PCM Result</strong>
+                  <span>Event: {multiSession.lastSimultaneousResult.eventId}</span>
+                  <span>A schedule error: {multiSession.lastSimultaneousResult.aScheduleErrorMs?.toFixed(2) ?? 'pending'} ms</span>
+                  <span>B schedule error: {multiSession.lastSimultaneousResult.bScheduleErrorMs?.toFixed(2) ?? 'pending'} ms</span>
+                  <span>Source-generation skew: {multiSession.lastSimultaneousResult.sourceGenerationSkewMs?.toFixed(2) ?? 'pending'} ms</span>
+                  <small>This measures backend PCM generation, not acoustic speaker synchronization.</small>
+                </div>}
+                <details className="research-event-console">
+                  <summary>Session events ({multiSession.recentEvents.length})</summary>
+                  <div className="research-events">{multiSession.recentEvents.map((event, index) =>
+                    <div key={`${event.timestamp}:${event.code}:${index}`} className={`research-event ${event.category}`}>
+                      <time>{new Date(event.timestamp).toLocaleTimeString()}</time>
+                      <span>{event.message}</span>
+                      {event.details && <pre>{JSON.stringify(event.details, null, 2)}</pre>}
+                    </div>)}</div>
+                </details>
+              </div>
+            )}
           </section>
 
           <section className="research-lab-panel research-streams-panel">
