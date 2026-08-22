@@ -55,6 +55,29 @@ export function scheduledResearchToneSample(
   return Math.sin(phase) * toneAmplitude * gain;
 }
 
+export interface PcmSchedulerAdvanceResult {
+  nextFrameMonotonicTime: number;
+  framesProduced: number;
+}
+
+export function advancePcmScheduler(
+  nextFrameMonotonicTime: number,
+  callbackMonotonicTime: number,
+  frameDurationMs: number,
+  emitFrame: (logicalFrameStartMonotonicTime: number) => boolean,
+  maximumCatchUpFrames = 4
+): PcmSchedulerAdvanceResult {
+  let next = nextFrameMonotonicTime;
+  let framesProduced = 0;
+  while (callbackMonotonicTime >= next && framesProduced < maximumCatchUpFrames) {
+    const continueProducing = emitFrame(next);
+    next += frameDurationMs;
+    framesProduced += 1;
+    if (!continueProducing) break;
+  }
+  return { nextFrameMonotonicTime: next, framesProduced };
+}
+
 export const continuousAudioStartup = {
   readyFrameCount: startupReadyFrameCount,
   maximumBufferBytes: maximumStartupBufferBytes,
@@ -255,7 +278,7 @@ export class ContinuousAudioStream {
   private readonly format: ContinuousAudioEncodingProfile;
   private encoder: ChildProcessWithoutNullStreams | null = null;
   private frameTimer: NodeJS.Timeout | null = null;
-  private nextFrameAt = 0;
+  private nextFrameMonotonicTime = 0;
   private client: HttpStreamClient | null = null;
   private clientRemovalHandled = false;
   private clientLocalCloseReason: string | null = null;
@@ -973,17 +996,21 @@ export class ContinuousAudioStream {
     this.writeLiveChunk(encoder, aligned);
   }
 
-  private writePcmFrame(encoder: ChildProcessWithoutNullStreams): void {
+  private writePcmFrame(
+    encoder: ChildProcessWithoutNullStreams,
+    logicalFrameStartMonotonicTime: number
+  ): void {
     if (encoder !== this.encoder || !encoder.stdin.writable) {
       return;
     }
 
-    const frameMonotonicTime = performance.now();
+    const callbackMonotonicTime = performance.now();
     const nextScheduled = this.scheduledEvents.find((event) => event.status === 'scheduled');
-    if (!this.activeTone && nextScheduled && frameMonotonicTime >= nextScheduled.targetMonotonicTime) {
+    if (!this.activeTone && nextScheduled
+      && logicalFrameStartMonotonicTime >= nextScheduled.targetMonotonicTime) {
       nextScheduled.status = 'started';
-      nextScheduled.actualPcmStartMonotonicTime = frameMonotonicTime;
-      nextScheduled.scheduleErrorMs = frameMonotonicTime - nextScheduled.targetMonotonicTime;
+      nextScheduled.actualPcmStartMonotonicTime = logicalFrameStartMonotonicTime;
+      nextScheduled.scheduleErrorMs = logicalFrameStartMonotonicTime - nextScheduled.targetMonotonicTime;
       this.activeScheduledEvent = nextScheduled;
       this.toneSamplesRemaining = Math.max(0, Math.round(
         this.format.sampleRate * (nextScheduled.durationMs - nextScheduled.scheduleErrorMs) / 1_000
@@ -998,7 +1025,9 @@ export class ContinuousAudioStream {
       this.record('source', 'scheduled-tone-started', 'Scheduled diagnostic tone PCM generation began.', {
         eventId: nextScheduled.eventId,
         targetMonotonicTime: nextScheduled.targetMonotonicTime,
-        actualPcmStartMonotonicTime: frameMonotonicTime,
+        actualPcmStartMonotonicTime: logicalFrameStartMonotonicTime,
+        actualCallbackMonotonicTime: callbackMonotonicTime,
+        callbackLateByMs: callbackMonotonicTime - logicalFrameStartMonotonicTime,
         scheduleErrorMs: nextScheduled.scheduleErrorMs,
         frequencyHz: nextScheduled.frequencyHz,
         durationMs: nextScheduled.durationMs,
@@ -1020,7 +1049,7 @@ export class ContinuousAudioStream {
     for (let sampleIndex = 0; sampleIndex < samplesPerFrame; sampleIndex += 1) {
       let sample = 0;
       if (this.activeScheduledEvent) {
-        const sampleMonotonicTime = frameMonotonicTime
+        const sampleMonotonicTime = logicalFrameStartMonotonicTime
           + sampleIndex * 1_000 / this.format.sampleRate;
         sample = Math.round(scheduledResearchToneSample(
           this.activeScheduledEvent,
@@ -1045,7 +1074,7 @@ export class ContinuousAudioStream {
     this.pcmFramesGenerated += 1;
     this.pcmBytesGenerated += frame.length;
     const scheduledCompleted = this.activeScheduledEvent
-      ? frameMonotonicTime + samplesPerFrame * 1_000 / this.format.sampleRate
+      ? logicalFrameStartMonotonicTime + samplesPerFrame * 1_000 / this.format.sampleRate
         >= this.activeScheduledEvent.targetMonotonicTime + this.activeScheduledEvent.durationMs
       : false;
     if (this.activeTone && (this.toneSamplesRemaining === 0 || scheduledCompleted)) {
@@ -1096,16 +1125,22 @@ export class ContinuousAudioStream {
     if (this.frameTimer || encoder !== this.encoder || this.pcmPausedForReady) {
       return;
     }
-    this.nextFrameAt = Date.now();
+    // Intentional starts/resumes begin a fresh realtime PCM timeline. Time spent
+    // paused for readiness, reconnect, or backpressure is never synthesized.
+    this.nextFrameMonotonicTime = performance.now();
     const pollIntervalMs = Math.max(1, Math.min(5, Math.floor(this.format.frameDurationMs / 4)));
     this.frameTimer = setInterval(() => {
-      const now = Date.now();
-      let framesThisTick = 0;
-      while (now >= this.nextFrameAt && framesThisTick < 4 && this.frameTimer) {
-        this.writePcmFrame(encoder);
-        this.nextFrameAt += this.format.frameDurationMs;
-        framesThisTick += 1;
-      }
+      const callbackMonotonicTime = performance.now();
+      const result = advancePcmScheduler(
+        this.nextFrameMonotonicTime,
+        callbackMonotonicTime,
+        this.format.frameDurationMs,
+        (logicalFrameStartMonotonicTime) => {
+          this.writePcmFrame(encoder, logicalFrameStartMonotonicTime);
+          return Boolean(this.frameTimer);
+        }
+      );
+      this.nextFrameMonotonicTime = result.nextFrameMonotonicTime;
     }, pollIntervalMs);
   }
 

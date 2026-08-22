@@ -4,6 +4,7 @@ import test from 'node:test';
 import { performance } from 'node:perf_hooks';
 
 import {
+  advancePcmScheduler,
   continuousAudioStartup,
   scheduledResearchGain,
   scheduledResearchToneSample,
@@ -65,6 +66,63 @@ test('equal-power scheduled tones use smooth gain and one shared logical phase t
   );
   assert.notEqual(scheduledResearchToneSample(event, delayedSampleTime), 0,
     'a delayed local start must not restart the waveform at phase zero');
+});
+
+test('PCM scheduler preserves consecutive logical frame times through catch-up and jitter', () => {
+  const catchUpStarts: number[] = [];
+  const caughtUp = advancePcmScheduler(
+    1_000,
+    1_060,
+    20,
+    (logicalStart) => { catchUpStarts.push(logicalStart); return true; }
+  );
+  assert.deepEqual(catchUpStarts, [1_000, 1_020, 1_040, 1_060]);
+  assert.equal(caughtUp.nextFrameMonotonicTime, 1_080);
+
+  const jitterStarts: number[] = [];
+  let next = 2_000;
+  for (const callbackTime of [2_020, 2_043, 2_061, 2_082]) {
+    const result = advancePcmScheduler(next, callbackTime, 20, (logicalStart) => {
+      jitterStarts.push(logicalStart);
+      return true;
+    });
+    next = result.nextFrameMonotonicTime;
+  }
+  assert.deepEqual(jitterStarts, [2_000, 2_020, 2_040, 2_060, 2_080]);
+});
+
+test('scheduled waveform remains sample-continuous across logical PCM frame boundaries', () => {
+  const targetMonotonicTime = 5_000;
+  const event = {
+    targetMonotonicTime,
+    frequencyHz: 880,
+    durationMs: 1_000,
+    gainEnvelope: null,
+  };
+  const sampleRate = 48_000;
+  const samplesPerFrame = 960;
+  const logicalFrameStarts = [5_000, 5_020, 5_040, 5_060];
+  const samples = logicalFrameStarts.flatMap((frameStart) =>
+    Array.from({ length: samplesPerFrame }, (_, sampleIndex) =>
+      scheduledResearchToneSample(event, frameStart + sampleIndex * 1_000 / sampleRate)
+    )
+  );
+  for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += 1) {
+    const expected = scheduledResearchToneSample(
+      event,
+      targetMonotonicTime + sampleIndex * 1_000 / sampleRate
+    );
+    assert.ok(Math.abs(samples[sampleIndex] - expected) < 1e-10);
+  }
+
+  const delayedStart = targetMonotonicTime + 20;
+  assert.equal(
+    scheduledResearchToneSample(event, delayedStart),
+    scheduledResearchToneSample({ ...event }, delayedStart),
+    'callback timing and stream identity must not affect the shared logical source phase'
+  );
+  assert.ok(Math.abs(scheduledResearchToneSample(event, delayedStart)) > 0.1,
+    'a participant starting one frame late must use target + 20 ms phase, not phase zero');
 });
 
 test('scheduled tone parameters drive PCM source and return to silence after completion', async () => {
