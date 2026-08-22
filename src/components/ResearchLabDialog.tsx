@@ -351,6 +351,26 @@ function StreamExperiment({
           <div className="research-diagnostic-grid">
             <DiagnosticValue label="Lifecycle" value={titleCase(stream.lifecycle)} />
             <DiagnosticValue label="Source" value={titleCase(stream.source)} />
+            <DiagnosticValue
+              label="Encoded"
+              value={`${((stream.telemetry?.encodedBitsPerSecond ?? 0) / 1_000).toFixed(1)} kbps`}
+            />
+            <DiagnosticValue
+              label="Delivered"
+              value={`${((stream.telemetry?.deliveredBitsPerSecond ?? 0) / 1_000).toFixed(1)} kbps`}
+            />
+            <DiagnosticValue
+              label="Encoded min / avg / max"
+              value={stream.telemetry
+                ? `${(stream.telemetry.encodedRate.minimum / 1_000).toFixed(1)} / ${(stream.telemetry.encodedRate.average / 1_000).toFixed(1)} / ${(stream.telemetry.encodedRate.maximum / 1_000).toFixed(1)} kbps`
+                : '—'}
+            />
+            <DiagnosticValue
+              label="Delivered min / avg / max"
+              value={stream.telemetry
+                ? `${(stream.telemetry.deliveredRate.minimum / 1_000).toFixed(1)} / ${(stream.telemetry.deliveredRate.average / 1_000).toFixed(1)} / ${(stream.telemetry.deliveredRate.maximum / 1_000).toFixed(1)} kbps`
+                : '—'}
+            />
           </div>
         </section>
         <section>

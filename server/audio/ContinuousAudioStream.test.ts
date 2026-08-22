@@ -241,7 +241,39 @@ test('disconnect after the startup reconnect fails fast instead of opening anoth
   await waitFor(() => disconnects.length === 1);
   assert.match(disconnects[0], /remote client disconnected/i);
   assert.equal(stream.getSnapshot().httpClient.awaitingReconnect, false);
+  assert.ok(stream.getSnapshot().recentEvents.some((event) => event.code === 'terminal-consumer-summary'));
   manager.stop(stream.id, 'test complete');
+});
+
+test('Media Foundation AAC telemetry maintains encoded rate for silence and tone', async () => {
+  async function measuredRate() {
+    const manager = new ContinuousAudioStreamManager();
+    const stream = manager.create({ encodingProfileId: 'aac-adts' });
+    const client = bindClient(stream);
+    try {
+      await waitFor(() => stream.getSnapshot().lifecycle === 'running');
+      await waitFor(() => stream.getSnapshot().telemetry.encodedRate.samples >= 2, 4_000);
+      assert.ok(stream.getSnapshot().telemetry.pcmFramesGeneratedLastSecond >= 45);
+      assert.ok(stream.getSnapshot().telemetry.pcmFramesGeneratedLastSecond <= 55);
+      return { manager, stream, client, rate: stream.getSnapshot().telemetry.encodedBitsPerSecond };
+    } catch (error) {
+      client.destroy(); manager.stop(stream.id, 'measurement failed'); throw error;
+    }
+  }
+
+  const silence = await measuredRate();
+  try {
+    assert.ok(silence.rate > 100_000, `expected transport-safe silence above 100 kbps, got ${silence.rate}`);
+    const pid = silence.stream.getSnapshot().encoder.pid;
+    silence.stream.injectTestTone();
+    assert.equal(silence.stream.getSnapshot().telemetry.sourceMode, 'test-tone');
+    await waitFor(() => silence.stream.getSnapshot().recentEvents.some((event) => event.code === 'tone-completed'));
+    await waitFor(() => silence.stream.getSnapshot().telemetry.encodedBitsPerSecond > 100_000, 3_000);
+    assert.equal(silence.stream.getSnapshot().encoder.pid, pid);
+  } finally {
+    silence.client.destroy(); silence.manager.stop(silence.stream.id, 'test complete');
+  }
+
 });
 
 test('two continuous streams isolate encoder, source, counters, and cleanup', async () => {

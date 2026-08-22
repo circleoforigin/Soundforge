@@ -21,6 +21,8 @@ test('local AVTransport sends escaped SetAVTransportURI followed by Play', async
     await client.play(url);
     assert.match(requests[0].action ?? '', /SetAVTransportURI/);
     assert.match(requests[0].body, /a&amp;b\.aac/);
+    assert.match(requests[0].body, /<CurrentURIMetaData><\/CurrentURIMetaData>/);
+    assert.doesNotMatch(requests[0].body, /duration|protocolInfo|upnp:class/i);
     assert.match(requests[1].action ?? '', /#Play/);
   } finally { server.close(); }
 });

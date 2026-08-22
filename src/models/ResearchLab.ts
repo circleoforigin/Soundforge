@@ -136,6 +136,29 @@ export interface AudioStreamEncoderSnapshot {
   stdinBackpressured: boolean;
 }
 
+export interface AudioStreamRateSummary {
+  current: number;
+  minimum: number;
+  maximum: number;
+  average: number;
+  samples: number;
+}
+
+export interface AudioStreamTelemetrySnapshot {
+  measuredAt: string | null;
+  sourceMode: AudioStreamSource;
+  pcmFramesGeneratedLastSecond: number;
+  pcmBytesGeneratedLastSecond: number;
+  encodedFramesProducedLastSecond: number;
+  encodedBytesProducedLastSecond: number;
+  encodedBitsPerSecond: number;
+  bytesDeliveredLastSecond: number;
+  deliveredBitsPerSecond: number;
+  consumerConnected: boolean;
+  encodedRate: AudioStreamRateSummary;
+  deliveredRate: AudioStreamRateSummary;
+}
+
 export interface AudioStreamHttpClientSnapshot {
   framingMode: ContinuousHttpFramingMode;
   connected: boolean;
@@ -193,6 +216,7 @@ export interface AudioStreamSnapshot {
   lifecycle: AudioStreamLifecycleState;
   source: AudioStreamSource;
   toneReady: boolean;
+  telemetry: AudioStreamTelemetrySnapshot;
   encoder: AudioStreamEncoderSnapshot;
   httpClient: AudioStreamHttpClientSnapshot;
   transport: AudioStreamTransportSnapshot | null;

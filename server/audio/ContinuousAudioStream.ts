@@ -11,6 +11,7 @@ import type {
   AudioStreamSnapshot,
   AudioStreamSource,
   AudioStreamTransportSnapshot,
+  AudioStreamRateSummary,
   ContinuousHttpFramingMode,
 } from '../../src/models/ResearchLab.ts';
 import {
@@ -229,6 +230,7 @@ export class ContinuousAudioStream {
   private readonly format: ContinuousAudioEncodingProfile;
   private encoder: ChildProcessWithoutNullStreams | null = null;
   private frameTimer: NodeJS.Timeout | null = null;
+  private nextFrameAt = 0;
   private client: HttpStreamClient | null = null;
   private clientRemovalHandled = false;
   private clientLocalCloseReason: string | null = null;
@@ -274,6 +276,31 @@ export class ContinuousAudioStream {
   private awaitingReconnect = false;
   private reconnectAlignmentBuffer = Buffer.alloc(0);
   private aligningReconnect = false;
+  private telemetryTimer: NodeJS.Timeout | null = null;
+  private telemetryMeasuredAt: Date | null = null;
+  private telemetryPreviousAt: Date | null = null;
+  private telemetryPreviousPcmFrames = 0;
+  private telemetryPreviousPcmBytes = 0;
+  private telemetryPreviousEncodedFrames = 0;
+  private telemetryPreviousEncodedBytes = 0;
+  private telemetryPreviousDeliveredBytes = 0;
+  private encodedFramesProduced = 0;
+  private encodedFrameTelemetryBuffer = Buffer.alloc(0);
+  private encodedRate = this.emptyRateSummary();
+  private deliveredRate = this.emptyRateSummary();
+  private lastPcmFramesPerSecond = 0;
+  private lastPcmBytesPerSecond = 0;
+  private lastEncodedFramesPerSecond = 0;
+  private lastEncodedBytesPerSecond = 0;
+  private lastDeliveredBytesPerSecond = 0;
+  private toneOrdinal = 0;
+  private activeTone: {
+    ordinal: number;
+    requestedAt: Date;
+    pcmStartedAt: Date | null;
+    encodedBytesBefore: number;
+  } | null = null;
+  private lastToneCompletedAt: Date | null = null;
 
   constructor(id: string, options: ContinuousAudioStreamOptions = {}) {
     this.id = id;
@@ -345,6 +372,7 @@ export class ContinuousAudioStream {
     encoder.on('exit', (code, signal) => this.handleEncoderExit(encoder, code, signal));
 
     this.startFrameTimer(encoder);
+    this.startTelemetryTimer();
     this.record('lifecycle', 'pcm-clock-started', 'PCM generation clock started.', {
       frameDurationMs: this.format.frameDurationMs,
     });
@@ -479,9 +507,20 @@ export class ContinuousAudioStream {
       this.format.sampleRate * toneDurationMs / 1000
     );
     this.tonePhase = 0;
+    this.toneOrdinal += 1;
+    this.activeTone = {
+      ordinal: this.toneOrdinal,
+      requestedAt: new Date(),
+      pcmStartedAt: null,
+      encodedBytesBefore: this.encodedBytesProduced,
+    };
     this.record('source', 'tone-injected', 'Diagnostic test tone injected.', {
       frequencyHz: toneFrequencyHz,
       durationMs: toneDurationMs,
+      toneOrdinal: this.toneOrdinal,
+      requestedAt: this.activeTone.requestedAt.toISOString(),
+      encodedBytesBefore: this.activeTone.encodedBytesBefore,
+      consumerConnected: this.hasActiveClient(),
     });
     return { frequencyHz: toneFrequencyHz, durationMs: toneDurationMs };
   }
@@ -508,6 +547,10 @@ export class ContinuousAudioStream {
     if (this.frameTimer) {
       clearInterval(this.frameTimer);
       this.frameTimer = null;
+    }
+    if (this.telemetryTimer) {
+      clearInterval(this.telemetryTimer);
+      this.telemetryTimer = null;
     }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -576,6 +619,20 @@ export class ContinuousAudioStream {
       lifecycle,
       source,
       toneReady: this.isReadyForTone(),
+      telemetry: {
+        measuredAt: this.telemetryMeasuredAt?.toISOString() ?? null,
+        sourceMode: this.currentSourceMode(),
+        pcmFramesGeneratedLastSecond: this.lastPcmFramesPerSecond,
+        pcmBytesGeneratedLastSecond: this.lastPcmBytesPerSecond,
+        encodedFramesProducedLastSecond: this.lastEncodedFramesPerSecond,
+        encodedBytesProducedLastSecond: this.lastEncodedBytesPerSecond,
+        encodedBitsPerSecond: this.encodedRate.current,
+        bytesDeliveredLastSecond: this.lastDeliveredBytesPerSecond,
+        deliveredBitsPerSecond: this.deliveredRate.current,
+        consumerConnected: this.hasActiveClient(),
+        encodedRate: { ...this.encodedRate },
+        deliveredRate: { ...this.deliveredRate },
+      },
       encoder: {
         state: this.getEncoderState(),
         pid: this.encoder?.pid ?? null,
@@ -650,6 +707,7 @@ export class ContinuousAudioStream {
       return;
     }
     this.encodedBytesProduced += chunk.length;
+    this.countEncodedFrames(chunk);
     if (this.encodedBytesProduced === chunk.length) {
       this.record('encoder', 'first-encoded-output', 'FFmpeg produced its first encoded bytes.', {
         chunkBytes: chunk.length,
@@ -843,6 +901,16 @@ export class ContinuousAudioStream {
 
     const samplesPerFrame = this.format.sampleRate * this.format.frameDurationMs / 1000;
     const frame = Buffer.alloc(samplesPerFrame * this.format.channelCount * 2);
+    if (this.activeTone && !this.activeTone.pcmStartedAt && this.toneSamplesRemaining > 0) {
+      this.activeTone.pcmStartedAt = new Date();
+      this.record('source', 'tone-pcm-started', 'Diagnostic test tone PCM generation started.', {
+        toneOrdinal: this.activeTone.ordinal,
+        requestedAt: this.activeTone.requestedAt.toISOString(),
+        pcmStartedAt: this.activeTone.pcmStartedAt.toISOString(),
+        encodedBytesBefore: this.activeTone.encodedBytesBefore,
+        consumerConnected: this.hasActiveClient(),
+      });
+    }
     for (let sampleIndex = 0; sampleIndex < samplesPerFrame; sampleIndex += 1) {
       let sample = 0;
       if (this.toneSamplesRemaining > 0) {
@@ -857,6 +925,21 @@ export class ContinuousAudioStream {
 
     this.pcmFramesGenerated += 1;
     this.pcmBytesGenerated += frame.length;
+    if (this.activeTone && this.toneSamplesRemaining === 0) {
+      const completedAt = new Date();
+      this.lastToneCompletedAt = completedAt;
+      this.record('source', 'tone-completed', 'Diagnostic test tone PCM generation completed.', {
+        toneOrdinal: this.activeTone.ordinal,
+        requestedAt: this.activeTone.requestedAt.toISOString(),
+        pcmStartedAt: this.activeTone.pcmStartedAt?.toISOString() ?? null,
+        pcmCompletedAt: completedAt.toISOString(),
+        encodedBytesBefore: this.activeTone.encodedBytesBefore,
+        encodedBytesAfter: this.encodedBytesProduced,
+        consumerConnected: this.hasActiveClient(),
+        encodedBitsPerSecond: this.encodedRate.current,
+      });
+      this.activeTone = null;
+    }
     const accepted = encoder.stdin.write(frame);
     if (!accepted && !this.stdinBackpressured) {
       this.stdinBackpressured = true;
@@ -886,10 +969,17 @@ export class ContinuousAudioStream {
     if (this.frameTimer || encoder !== this.encoder || this.pcmPausedForReady) {
       return;
     }
-    this.frameTimer = setInterval(
-      () => this.writePcmFrame(encoder),
-      this.format.frameDurationMs
-    );
+    this.nextFrameAt = Date.now();
+    const pollIntervalMs = Math.max(1, Math.min(5, Math.floor(this.format.frameDurationMs / 4)));
+    this.frameTimer = setInterval(() => {
+      const now = Date.now();
+      let framesThisTick = 0;
+      while (now >= this.nextFrameAt && framesThisTick < 4 && this.frameTimer) {
+        this.writePcmFrame(encoder);
+        this.nextFrameAt += this.format.frameDurationMs;
+        framesThisTick += 1;
+      }
+    }, pollIntervalMs);
   }
 
   private pausePcmForReady(): void {
@@ -1000,6 +1090,27 @@ export class ContinuousAudioStream {
         : null,
       bytesDelivered: connection?.bytesDelivered ?? 0,
     });
+    if (this.reconnectUsed) {
+      const durationMs = connection
+        ? this.lastClientDisconnectedAt.getTime() - connection.connectedAt.getTime()
+        : 0;
+      this.record('http', 'terminal-consumer-summary', 'Stable HTTP consumer disconnected.', {
+        consumerOrdinal: connection?.ordinal ?? null,
+        consumerDurationMs: durationMs,
+        totalBytesDelivered: connection?.bytesDelivered ?? 0,
+        averageDeliveredBitrate: durationMs > 0
+          ? Math.round((connection?.bytesDelivered ?? 0) * 8_000 / durationMs)
+          : 0,
+        deliveredBitrateLastSecond: this.deliveredRate.current,
+        encodedBitrateLastSecond: this.encodedRate.current,
+        millisecondsSinceLastTone: this.lastToneCompletedAt
+          ? Date.now() - this.lastToneCompletedAt.getTime()
+          : null,
+        encoderPid: this.encoder?.pid ?? null,
+        pcmClockRunning: Boolean(this.frameTimer),
+        sourceMode: this.currentSourceMode(),
+      });
+    }
     const graceMs = this.options.clientReconnectGraceMs ?? 0;
     if (graceMs > 0 && !this.reconnectUsed && this.state !== 'stopping' && this.state !== 'stopped') {
       this.reconnectUsed = true;
@@ -1062,6 +1173,85 @@ export class ContinuousAudioStream {
     const message = error instanceof Error ? error.message : String(error);
     this.lastError = message;
     this.record('error', type, 'Continuous audio stream error.', { message });
+  }
+
+  private currentSourceMode(): AudioStreamSource {
+    return this.toneSamplesRemaining > 0 ? 'test-tone' : 'silence';
+  }
+
+  private emptyRateSummary(): AudioStreamRateSummary {
+    return { current: 0, minimum: 0, maximum: 0, average: 0, samples: 0 };
+  }
+
+  private updateRate(summary: AudioStreamRateSummary, value: number): AudioStreamRateSummary {
+    const samples = summary.samples + 1;
+    return {
+      current: value,
+      minimum: summary.samples === 0 ? value : Math.min(summary.minimum, value),
+      maximum: summary.samples === 0 ? value : Math.max(summary.maximum, value),
+      average: Math.round((summary.average * summary.samples + value) / samples),
+      samples,
+    };
+  }
+
+  private startTelemetryTimer(): void {
+    if (this.telemetryTimer) return;
+    this.telemetryPreviousAt = new Date();
+    this.telemetryTimer = setInterval(() => this.recordTelemetry(), 1_000);
+  }
+
+  private recordTelemetry(): void {
+    const now = new Date();
+    const elapsedMs = Math.max(1, now.getTime() - (this.telemetryPreviousAt?.getTime() ?? now.getTime() - 1_000));
+    this.lastPcmFramesPerSecond = Math.round((this.pcmFramesGenerated - this.telemetryPreviousPcmFrames) * 1_000 / elapsedMs);
+    this.lastPcmBytesPerSecond = Math.round((this.pcmBytesGenerated - this.telemetryPreviousPcmBytes) * 1_000 / elapsedMs);
+    this.lastEncodedFramesPerSecond = Math.round((this.encodedFramesProduced - this.telemetryPreviousEncodedFrames) * 1_000 / elapsedMs);
+    this.lastEncodedBytesPerSecond = Math.round((this.encodedBytesProduced - this.telemetryPreviousEncodedBytes) * 1_000 / elapsedMs);
+    this.lastDeliveredBytesPerSecond = Math.round((this.clientBytesWritten - this.telemetryPreviousDeliveredBytes) * 1_000 / elapsedMs);
+    if (this.hasActiveClient() && this.firstLiveBytesDelivered && !this.pcmPausedForReady) {
+      this.encodedRate = this.updateRate(this.encodedRate, this.lastEncodedBytesPerSecond * 8);
+      this.deliveredRate = this.updateRate(this.deliveredRate, this.lastDeliveredBytesPerSecond * 8);
+    } else {
+      this.encodedRate = { ...this.encodedRate, current: this.lastEncodedBytesPerSecond * 8 };
+      this.deliveredRate = { ...this.deliveredRate, current: this.lastDeliveredBytesPerSecond * 8 };
+    }
+    this.telemetryMeasuredAt = now;
+    this.telemetryPreviousAt = now;
+    this.telemetryPreviousPcmFrames = this.pcmFramesGenerated;
+    this.telemetryPreviousPcmBytes = this.pcmBytesGenerated;
+    this.telemetryPreviousEncodedFrames = this.encodedFramesProduced;
+    this.telemetryPreviousEncodedBytes = this.encodedBytesProduced;
+    this.telemetryPreviousDeliveredBytes = this.clientBytesWritten;
+    this.record('encoder', 'stream-rate-sample', 'Continuous stream one-second rate sample.', {
+      pcmFramesGeneratedLastSecond: this.lastPcmFramesPerSecond,
+      pcmBytesGeneratedLastSecond: this.lastPcmBytesPerSecond,
+      encodedFramesProducedLastSecond: this.lastEncodedFramesPerSecond,
+      encodedBytesProducedLastSecond: this.lastEncodedBytesPerSecond,
+      encodedBitsPerSecond: this.encodedRate.current,
+      bytesDeliveredLastSecond: this.lastDeliveredBytesPerSecond,
+      deliveredBitsPerSecond: this.deliveredRate.current,
+      consumerConnected: this.hasActiveClient(),
+      sourceMode: this.currentSourceMode(),
+    });
+  }
+
+  private countEncodedFrames(chunk: Buffer): void {
+    this.encodedFrameTelemetryBuffer = Buffer.concat([this.encodedFrameTelemetryBuffer, chunk]);
+    let cursor = 0;
+    const minimumHeader = this.format.container === 'adts' ? 7 : 4;
+    while (cursor + minimumHeader <= this.encodedFrameTelemetryBuffer.length) {
+      const length = this.format.container === 'adts'
+        ? adtsFrameLength(this.encodedFrameTelemetryBuffer, cursor)
+        : mp3FrameLength(this.encodedFrameTelemetryBuffer, cursor);
+      if (!length) { cursor += 1; continue; }
+      if (cursor + length > this.encodedFrameTelemetryBuffer.length) break;
+      this.encodedFramesProduced += 1;
+      cursor += length;
+    }
+    if (cursor > 0) this.encodedFrameTelemetryBuffer = this.encodedFrameTelemetryBuffer.subarray(cursor);
+    if (this.encodedFrameTelemetryBuffer.length > maximumStartupBufferBytes) {
+      this.encodedFrameTelemetryBuffer = this.encodedFrameTelemetryBuffer.subarray(-minimumHeader);
+    }
   }
 
   private getLifecycleState(): AudioStreamLifecycleState {

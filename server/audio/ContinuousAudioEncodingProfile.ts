@@ -27,7 +27,7 @@ export const continuousAudioEncodingProfiles: Record<
     id: 'aac-adts', sampleRate: 48_000, channelCount: 2, bitsPerSample: 16,
     frameDurationMs: 20, outputMimeType: 'audio/aac', outputBitrate: 256_000,
     container: 'adts', codec: 'aac-lc',
-    ffmpegOutputArguments: ['-codec:a', 'aac', '-profile:a', 'aac_low', '-b:a', '256k', '-flush_packets', '1', '-f', 'adts'],
+    ffmpegOutputArguments: ['-codec:a', 'aac_mf', '-b:a', '256k', '-flush_packets', '1', '-f', 'adts'],
   },
 };
 
