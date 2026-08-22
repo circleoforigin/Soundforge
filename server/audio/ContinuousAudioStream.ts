@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { Writable } from 'node:stream';
+import type { HttpStreamConnectionMetadata } from './transports/ContinuousStreamTransport.ts';
 
 import ffmpegPath from 'ffmpeg-static';
 
@@ -193,6 +194,8 @@ export interface ContinuousAudioStreamOptions {
   transportId?: string;
   httpFramingMode?: ContinuousHttpFramingMode;
   encodingProfileId?: ContinuousAudioEncodingProfileId;
+  clientReconnectGraceMs?: number;
+  minimumConnectionsForTone?: number;
   onEvent?: (event: AudioStreamDiagnosticEvent) => void;
   onClientDisconnected?: (reason: string) => void;
   onEncoderExit?: (details: { code: number | null; signal: NodeJS.Signals | null }) => void;
@@ -202,6 +205,21 @@ interface HttpStreamClient extends Writable {
   destroyed: boolean;
   writableEnded: boolean;
   writableLength: number;
+}
+
+interface HttpConnectionRecord {
+  ordinal: number;
+  connectedAt: Date;
+  disconnectedAt: Date | null;
+  remoteAddress: string | null;
+  httpVersion: string | null;
+  userAgent: string | null;
+  range: string | null;
+  role: 'startup-consumer' | 'startup-reconnect' | 'playback-consumer';
+  phaseAtConnection: string;
+  bytesAtConnection: number;
+  bytesDelivered: number;
+  disconnectReason: string | null;
 }
 
 export class ContinuousAudioStream {
@@ -249,6 +267,13 @@ export class ContinuousAudioStream {
   private lastError: string | null = null;
   private transportSnapshot: AudioStreamTransportSnapshot | null;
   private readonly events: AudioStreamDiagnosticEvent[] = [];
+  private readonly connections: HttpConnectionRecord[] = [];
+  private currentConnection: HttpConnectionRecord | null = null;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private reconnectUsed = false;
+  private awaitingReconnect = false;
+  private reconnectAlignmentBuffer = Buffer.alloc(0);
+  private aligningReconnect = false;
 
   constructor(id: string, options: ContinuousAudioStreamOptions = {}) {
     this.id = id;
@@ -344,7 +369,7 @@ export class ContinuousAudioStream {
     }
   }
 
-  bindHttpClient(client: HttpStreamClient): void {
+  bindHttpClient(client: HttpStreamClient, metadata: HttpStreamConnectionMetadata = {}): void {
     if (this.hasActiveClient()) {
       throw new Error('This continuous audio stream already has an active HTTP client.');
     }
@@ -355,11 +380,36 @@ export class ContinuousAudioStream {
     this.clientConnectedAt = new Date();
     this.clientBytesAtConnection = this.clientBytesWritten;
     this.maximumClientWritableLength = 0;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const ordinal = this.connections.length + 1;
+    const reconnecting = this.awaitingReconnect;
+    this.awaitingReconnect = false;
+    this.currentConnection = {
+      ordinal,
+      connectedAt: this.clientConnectedAt,
+      disconnectedAt: null,
+      remoteAddress: metadata.remoteAddress ?? null,
+      httpVersion: metadata.httpVersion ?? null,
+      userAgent: metadata.userAgent ?? null,
+      range: metadata.range ?? null,
+      role: metadata.role ?? (reconnecting ? 'startup-reconnect' : 'startup-consumer'),
+      phaseAtConnection: metadata.phase ?? this.getLifecycleState(),
+      bytesAtConnection: this.clientBytesWritten,
+      bytesDelivered: 0,
+      disconnectReason: null,
+    };
+    this.connections.push(this.currentConnection);
     this.record('http', 'client-connected', 'HTTP stream client connected.', {
       encodedBytesBeforeConnection: this.encodedBytesProduced,
       pcmFramesBeforeConnection: this.pcmFramesGenerated,
       encoderAlreadyStarted: Boolean(this.encoder),
       startupBufferReady: this.startupBufferReady,
+      connectionOrdinal: ordinal,
+      radioStyleUserAgent: /Nullsoft Winamp3/i.test(metadata.userAgent ?? ''),
+      reconnecting,
     });
     this.scheduleDeliveryDiagnostic(100);
     this.scheduleDeliveryDiagnostic(1_000);
@@ -393,7 +443,17 @@ export class ContinuousAudioStream {
       if (this.state === 'created') {
         this.start();
       }
-      if (this.startupBufferReady) {
+      if (reconnecting) {
+        this.aligningReconnect = true;
+        this.reconnectAlignmentBuffer = Buffer.alloc(0);
+        this.firstLiveBytesDelivered = false;
+        this.state = 'preparing';
+        this.encoder?.stdout.resume();
+        this.resumePcmForReconnect();
+        this.record('http', 'startup-client-reconnected', 'Startup reconnect consumer attached; waiting for a complete encoded frame.', {
+          connectionOrdinal: ordinal,
+        });
+      } else if (this.startupBufferReady) {
         this.flushStartupBuffer();
       }
     } catch (error) {
@@ -427,7 +487,8 @@ export class ContinuousAudioStream {
   }
 
   isReadyForTone(): boolean {
-    return this.state === 'running' && this.hasActiveClient() && this.firstLiveBytesDelivered;
+    return this.state === 'running' && this.hasActiveClient() && this.firstLiveBytesDelivered
+      && this.connections.length >= (this.options.minimumConnectionsForTone ?? 1);
   }
 
   stop(reason = 'stream stopped'): void {
@@ -447,6 +508,10 @@ export class ContinuousAudioStream {
     if (this.frameTimer) {
       clearInterval(this.frameTimer);
       this.frameTimer = null;
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
     if (this.client) {
       this.clientLocalCloseReason = reason;
@@ -510,6 +575,7 @@ export class ContinuousAudioStream {
       ...(this.options.transportId ? { transportId: this.options.transportId } : {}),
       lifecycle,
       source,
+      toneReady: this.isReadyForTone(),
       encoder: {
         state: this.getEncoderState(),
         pid: this.encoder?.pid ?? null,
@@ -536,6 +602,26 @@ export class ContinuousAudioStream {
         deliveredBytes: this.clientBytesWritten,
         writableLength: this.client?.writableLength ?? this.lastClientWritableLength,
         backpressured: this.httpBackpressured,
+        connectionCount: this.connections.length,
+        currentConnectionOrdinal: this.currentConnection?.ordinal ?? null,
+        awaitingReconnect: this.awaitingReconnect,
+        connections: this.connections.map((connection) => ({
+          ordinal: connection.ordinal,
+          connectedAt: connection.connectedAt.toISOString(),
+          disconnectedAt: connection.disconnectedAt?.toISOString() ?? null,
+          durationMs: connection.disconnectedAt
+            ? connection.disconnectedAt.getTime() - connection.connectedAt.getTime()
+            : null,
+          remoteAddress: connection.remoteAddress,
+          httpVersion: connection.httpVersion,
+          userAgent: connection.userAgent,
+          range: connection.range,
+          radioStyleUserAgent: /Nullsoft Winamp3/i.test(connection.userAgent ?? ''),
+          bytesDelivered: connection.bytesDelivered,
+          disconnectReason: connection.disconnectReason,
+          phaseAtConnection: connection.phaseAtConnection,
+          role: connection.role,
+        })),
       },
       transport: this.transportSnapshot ? {
         ...this.transportSnapshot,
@@ -578,6 +664,11 @@ export class ContinuousAudioStream {
 
     if (!this.startupBufferFlushed) {
       this.retainStartupChunk(encoder, chunk);
+      return;
+    }
+
+    if (this.aligningReconnect) {
+      this.writeReconnectAlignedChunk(encoder, chunk);
       return;
     }
 
@@ -648,6 +739,7 @@ export class ContinuousAudioStream {
     const startupBytes = this.startupBuffer;
     const accepted = client.write(startupBytes);
     this.clientBytesWritten += startupBytes.length;
+    if (this.currentConnection) this.currentConnection.bytesDelivered += startupBytes.length;
     this.lastClientWritableLength = client.writableLength;
     this.maximumClientWritableLength = Math.max(
       this.maximumClientWritableLength,
@@ -691,6 +783,7 @@ export class ContinuousAudioStream {
     }
     const accepted = client.write(chunk);
     this.clientBytesWritten += chunk.length;
+    if (this.currentConnection) this.currentConnection.bytesDelivered += chunk.length;
     this.lastClientWritableLength = client.writableLength;
     this.maximumClientWritableLength = Math.max(
       this.maximumClientWritableLength,
@@ -717,6 +810,30 @@ export class ContinuousAudioStream {
         writableLength: client.writableLength,
       });
     }
+  }
+
+  private writeReconnectAlignedChunk(encoder: ChildProcessWithoutNullStreams, chunk: Buffer): void {
+    this.reconnectAlignmentBuffer = Buffer.concat([this.reconnectAlignmentBuffer, chunk]);
+    const scan = this.format.container === 'adts'
+      ? inspectAdtsFrames(this.reconnectAlignmentBuffer)
+      : inspectMp3Frames(this.reconnectAlignmentBuffer);
+    if (scan.firstFrameOffset === null || scan.completeFrameCount < 1) {
+      if (this.reconnectAlignmentBuffer.length > maximumStartupBufferBytes) {
+        this.recordError('reconnect-alignment-overflow', new Error('Reconnect frame alignment buffer exceeded its bound.'));
+        this.options.onClientDisconnected?.('Reconnect frame alignment failed.');
+      }
+      return;
+    }
+    const aligned = this.reconnectAlignmentBuffer.subarray(scan.firstFrameOffset);
+    this.reconnectAlignmentBuffer = Buffer.alloc(0);
+    this.aligningReconnect = false;
+    this.record('encoder', 'reconnect-frame-aligned', 'Reconnect consumer begins at a complete encoded frame boundary.', {
+      connectionOrdinal: this.currentConnection?.ordinal ?? null,
+      discardedPrefixBytes: scan.firstFrameOffset,
+      alignedBytes: aligned.length,
+      container: this.format.container,
+    });
+    this.writeLiveChunk(encoder, aligned);
   }
 
   private writePcmFrame(encoder: ChildProcessWithoutNullStreams): void {
@@ -819,6 +936,17 @@ export class ContinuousAudioStream {
     }
   }
 
+  private resumePcmForReconnect(): void {
+    if (!this.pcmPausedForReady || !this.hasActiveClient()) return;
+    this.pcmPausedForReady = false;
+    this.pcmPausedAt = null;
+    this.record('lifecycle', 'pcm-resumed-reconnect', 'PCM production resumed for startup reconnect consumer.', {
+      connectionOrdinal: this.currentConnection?.ordinal ?? null,
+      encoderPid: this.encoder?.pid ?? null,
+    });
+    if (this.encoder && !this.stdinBackpressured) this.startFrameTimer(this.encoder);
+  }
+
   private scheduleDeliveryDiagnostic(windowMilliseconds: 100 | 1_000): void {
     setTimeout(() => {
       const alreadyRecorded = windowMilliseconds === 100
@@ -856,10 +984,42 @@ export class ContinuousAudioStream {
     this.lastClientDisconnectedAt = new Date();
     this.lastClientWritableLength = client.writableLength;
     const reason = this.clientLocalCloseReason ?? 'remote client disconnected';
+    const connection = this.currentConnection;
+    if (connection) {
+      connection.disconnectedAt = this.lastClientDisconnectedAt;
+      connection.disconnectReason = reason;
+      connection.bytesDelivered = this.clientBytesWritten - connection.bytesAtConnection;
+    }
+    this.currentConnection = null;
     this.record('http', 'client-disconnected', 'HTTP stream client disconnected.', {
       closedBy: this.clientLocalCloseReason ? 'local' : 'remote',
       reason,
+      connectionOrdinal: connection?.ordinal ?? null,
+      durationMs: connection
+        ? this.lastClientDisconnectedAt.getTime() - connection.connectedAt.getTime()
+        : null,
+      bytesDelivered: connection?.bytesDelivered ?? 0,
     });
+    const graceMs = this.options.clientReconnectGraceMs ?? 0;
+    if (graceMs > 0 && !this.reconnectUsed && this.state !== 'stopping' && this.state !== 'stopped') {
+      this.reconnectUsed = true;
+      this.awaitingReconnect = true;
+      this.firstLiveBytesDelivered = false;
+      this.pausePcmForReady();
+      this.encoder?.stdout.pause();
+      this.record('http', 'awaiting-startup-reconnect', 'Early HTTP consumer disconnected; awaiting one bounded startup reconnect.', {
+        graceMs,
+        encoderPid: this.encoder?.pid ?? null,
+      });
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        if (!this.awaitingReconnect) return;
+        this.awaitingReconnect = false;
+        this.record('error', 'startup-reconnect-timeout', 'Startup reconnect grace period expired.', { graceMs });
+        this.options.onClientDisconnected?.('Sonos local startup reconnect timed out.');
+      }, graceMs);
+      return;
+    }
     this.options.onClientDisconnected?.(reason);
   }
 

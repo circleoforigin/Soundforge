@@ -3,15 +3,22 @@ import net, { type Socket } from 'node:net';
 interface LocalStreamServerOptions {
   streamId: string;
   bindAddress: string;
-  onClient(client: Socket): void;
+  onClient(client: Socket, metadata: {
+    remoteAddress?: string;
+    httpVersion?: string;
+    userAgent?: string;
+    range?: string;
+    role: 'startup-consumer' | 'startup-reconnect';
+    phase: string;
+  }): void;
   onDiagnostic(message: string, details?: Record<string, unknown>): void;
 }
 
 export class SonosLocalHttpStreamServer {
   private readonly options: LocalStreamServerOptions;
   private readonly server: net.Server;
-  private clientAccepted = false;
   private client: Socket | null = null;
+  private connectionOrdinal = 0;
 
   constructor(options: LocalStreamServerOptions) {
     this.options = options;
@@ -40,25 +47,38 @@ export class SonosLocalHttpStreamServer {
       const text = request.toString('latin1');
       const [line = '', ...headers] = text.split('\r\n');
       const [method, path, version] = line.split(' ');
+      const userAgent = headers.find((header) => /^user-agent:/i.test(header))?.slice(11).trim();
+      const range = headers.find((header) => /^range:/i.test(header))?.slice(6).trim();
+      const ordinal = this.connectionOrdinal + 1;
       this.options.onDiagnostic('Sonos local stream HTTP request received.', {
         method, path, version, remoteAddress: socket.remoteAddress,
-        userAgent: headers.find((header) => /^user-agent:/i.test(header))?.slice(11).trim() ?? null,
-        range: headers.find((header) => /^range:/i.test(header))?.slice(6).trim() ?? null,
+        userAgent: userAgent ?? null,
+        range: range ?? null,
+        connectionOrdinal: ordinal,
+        radioStyleUserAgent: /Nullsoft Winamp3/i.test(userAgent ?? ''),
       });
-      if (method !== 'GET' || this.clientAccepted) {
-        socket.end(`HTTP/1.0 ${this.clientAccepted ? '409 Conflict' : '405 Method Not Allowed'}\r\nConnection: close\r\n\r\n`);
+      if (method !== 'GET' || (this.client && !this.client.destroyed)) {
+        socket.end(`HTTP/1.0 ${this.client && !this.client.destroyed ? '409 Conflict' : '405 Method Not Allowed'}\r\nConnection: close\r\n\r\n`);
         return;
       }
-      this.clientAccepted = true;
+      this.connectionOrdinal = ordinal;
       this.client = socket;
+      socket.once('close', () => { if (this.client === socket) this.client = null; });
       socket.write('HTTP/1.0 200 OK\r\nContent-Type: audio/aac\r\nCache-Control: no-store, no-cache, must-revalidate, no-transform\r\nConnection: close\r\n\r\n');
       this.options.onDiagnostic('Sonos local non-chunked HTTP/1.0 response started.', {
         contentType: 'audio/aac', transferEncoding: null, contentLength: null,
       });
-      this.options.onClient(socket);
+      this.options.onClient(socket, {
+        ...(socket.remoteAddress ? { remoteAddress: socket.remoteAddress } : {}),
+        ...(version ? { httpVersion: version } : {}),
+        ...(userAgent ? { userAgent } : {}),
+        ...(range ? { range } : {}),
+        role: ordinal === 1 ? 'startup-consumer' : 'startup-reconnect',
+        phase: ordinal === 1 ? 'startup-consumer' : 'awaiting-startup-reconnect',
+      });
     });
     socket.setTimeout(5_000, () => {
-      if (!this.clientAccepted) socket.destroy(new Error('Local stream request timed out.'));
+      if (this.client !== socket) socket.destroy(new Error('Local stream request timed out.'));
     });
   }
 }

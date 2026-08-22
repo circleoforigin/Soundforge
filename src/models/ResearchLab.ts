@@ -144,6 +144,26 @@ export interface AudioStreamHttpClientSnapshot {
   deliveredBytes: number;
   writableLength: number;
   backpressured: boolean;
+  connectionCount: number;
+  currentConnectionOrdinal: number | null;
+  awaitingReconnect: boolean;
+  connections: AudioStreamHttpConnectionSnapshot[];
+}
+
+export interface AudioStreamHttpConnectionSnapshot {
+  ordinal: number;
+  connectedAt: string;
+  disconnectedAt: string | null;
+  durationMs: number | null;
+  remoteAddress: string | null;
+  httpVersion: string | null;
+  userAgent: string | null;
+  range: string | null;
+  radioStyleUserAgent: boolean;
+  bytesDelivered: number;
+  disconnectReason: string | null;
+  phaseAtConnection: string;
+  role: 'startup-consumer' | 'startup-reconnect' | 'playback-consumer';
 }
 
 export type AudioStreamTransportState =
@@ -172,6 +192,7 @@ export interface AudioStreamSnapshot {
   transportId?: string;
   lifecycle: AudioStreamLifecycleState;
   source: AudioStreamSource;
+  toneReady: boolean;
   encoder: AudioStreamEncoderSnapshot;
   httpClient: AudioStreamHttpClientSnapshot;
   transport: AudioStreamTransportSnapshot | null;

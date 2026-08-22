@@ -139,6 +139,111 @@ test('AAC/ADTS profile prewarms independently and delivers a valid ADTS prefix',
   }
 });
 
+test('local startup reconnect preserves encoder, pauses PCM, and resumes on an ADTS boundary', async () => {
+  const manager = new ContinuousAudioStreamManager();
+  const disconnects: string[] = [];
+  const stream = manager.create({
+    encodingProfileId: 'aac-adts',
+    clientReconnectGraceMs: 500,
+    minimumConnectionsForTone: 2,
+    onClientDisconnected: (reason) => disconnects.push(reason),
+  });
+  const first = new PassThrough();
+  const second = new PassThrough();
+  first.resume();
+  try {
+    stream.start();
+    await stream.waitUntilReadyForClient();
+    stream.bindHttpClient(first, {
+      remoteAddress: '192.168.12.207', httpVersion: 'HTTP/1.0', userAgent: 'Sonos probe',
+      role: 'startup-consumer', phase: 'startup-consumer',
+    });
+    await waitFor(() => stream.getSnapshot().lifecycle === 'running');
+    const encoderPid = stream.getSnapshot().encoder.pid;
+    first.destroy();
+    await waitFor(() => stream.getSnapshot().httpClient.awaitingReconnect);
+    const paused = stream.getSnapshot();
+    assert.equal(paused.encoder.pcmPausedForReady, true);
+    await delay(80);
+    assert.equal(stream.getSnapshot().encoder.framesGenerated, paused.encoder.framesGenerated);
+    assert.equal(stream.getSnapshot().encoder.pid, encoderPid);
+    assert.deepEqual(disconnects, []);
+
+    const firstReconnectChunk = new Promise<Buffer>((resolve) =>
+      second.once('data', (chunk: Buffer) => resolve(Buffer.from(chunk)))
+    );
+    second.resume();
+    stream.bindHttpClient(second, {
+      remoteAddress: '192.168.12.207', httpVersion: 'HTTP/1.0',
+      userAgent: 'Sonos Nullsoft Winamp3 version 3.0 (compatible)',
+      role: 'startup-reconnect', phase: 'awaiting-startup-reconnect',
+    });
+    const chunk = await firstReconnectChunk;
+    assert.equal(chunk[0], 0xff);
+    assert.equal(chunk[1] & 0xf6, 0xf0);
+    await waitFor(() => stream.isReadyForTone());
+    const running = stream.getSnapshot();
+    assert.equal(running.encoder.pid, encoderPid);
+    assert.equal(running.httpClient.connectionCount, 2);
+    assert.equal(running.httpClient.currentConnectionOrdinal, 2);
+    assert.equal(running.httpClient.connections[0].radioStyleUserAgent, false);
+    assert.equal(running.httpClient.connections[1].radioStyleUserAgent, true);
+    stream.injectTestTone();
+  } finally {
+    second.destroy();
+    manager.stop(stream.id, 'test complete');
+  }
+});
+
+test('local startup reconnect timeout reports terminal disconnect without restarting FFmpeg', async () => {
+  const manager = new ContinuousAudioStreamManager();
+  const disconnects: string[] = [];
+  const stream = manager.create({
+    encodingProfileId: 'aac-adts', clientReconnectGraceMs: 80,
+    onClientDisconnected: (reason) => disconnects.push(reason),
+  });
+  const client = bindClient(stream);
+  try {
+    await waitFor(() => stream.getSnapshot().lifecycle === 'running');
+    const pid = stream.getSnapshot().encoder.pid;
+    client.destroy();
+    await waitFor(() => disconnects.length === 1);
+    assert.match(disconnects[0], /reconnect timed out/i);
+    assert.equal(stream.getSnapshot().encoder.pid, pid);
+  } finally { manager.stop(stream.id, 'test complete'); }
+});
+
+test('explicit stop while awaiting reconnect tears down immediately', async () => {
+  const manager = new ContinuousAudioStreamManager();
+  const stream = manager.create({ encodingProfileId: 'aac-adts', clientReconnectGraceMs: 500 });
+  const client = bindClient(stream);
+  await waitFor(() => stream.getSnapshot().lifecycle === 'running');
+  client.destroy();
+  await waitFor(() => stream.getSnapshot().httpClient.awaitingReconnect);
+  manager.stop(stream.id, 'user stopped');
+  assert.equal(manager.getSnapshot(stream.id)?.lifecycle, 'stopped');
+});
+
+test('disconnect after the startup reconnect fails fast instead of opening another grace window', async () => {
+  const disconnects: string[] = [];
+  const manager = new ContinuousAudioStreamManager();
+  const stream = manager.create({
+    encodingProfileId: 'aac-adts', clientReconnectGraceMs: 500,
+    onClientDisconnected: (reason) => disconnects.push(reason),
+  });
+  const first = bindClient(stream);
+  await waitFor(() => stream.getSnapshot().lifecycle === 'running');
+  first.destroy();
+  await waitFor(() => stream.getSnapshot().httpClient.awaitingReconnect);
+  const second = bindClient(stream);
+  await waitFor(() => stream.getSnapshot().lifecycle === 'running');
+  second.destroy();
+  await waitFor(() => disconnects.length === 1);
+  assert.match(disconnects[0], /remote client disconnected/i);
+  assert.equal(stream.getSnapshot().httpClient.awaitingReconnect, false);
+  manager.stop(stream.id, 'test complete');
+});
+
 test('two continuous streams isolate encoder, source, counters, and cleanup', async () => {
   const manager = new ContinuousAudioStreamManager();
   const streamA = manager.create();

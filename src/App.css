@@ -803,6 +803,15 @@ body,
   gap: 6px;
 }
 
+.research-connection-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  margin-top: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
 .research-diagnostic-value {
   min-width: 0;
 }

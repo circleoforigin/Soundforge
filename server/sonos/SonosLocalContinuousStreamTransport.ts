@@ -1,6 +1,10 @@
 import dgram from 'node:dgram';
 
 import type {
+  AudioStreamDiagnosticEvent,
+  AudioStreamSnapshot,
+} from '../../src/models/ResearchLab.ts';
+import type {
   ContinuousStreamTransport,
   ContinuousStreamTransportBinding,
   ContinuousStreamTransportContext,
@@ -11,6 +15,7 @@ import { discoverLocalSonosDevice, type SonosLocalDevice } from './SonosLocalDis
 import { SonosLocalHttpStreamServer } from './SonosLocalHttpStreamServer.ts';
 
 interface LocalBindingData {
+  streamId: string;
   controlUrl: string;
   server: SonosLocalHttpStreamServer;
 }
@@ -33,10 +38,13 @@ async function routeAddress(targetAddress: string): Promise<string> {
 export class SonosLocalContinuousStreamTransport implements ContinuousStreamTransport {
   readonly id = 'sonos-local-continuous';
   readonly encodingProfileId = 'aac-adts' as const;
+  readonly clientReconnectGraceMs = 3_000;
+  readonly minimumConnectionsForTone = 2;
 
   private readonly resolveDevice: (id: string) => Promise<ResolvedSonosAudioDevice | undefined>;
   private readonly discoverLocal: (id: string) => Promise<SonosLocalDevice | undefined>;
   private readonly avTransport: SonosLocalAvTransportClient;
+  private readonly contexts = new Map<string, ContinuousStreamTransportContext>();
 
   constructor(
     resolveDevice = resolveSonosAudioDevice,
@@ -49,6 +57,7 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
   }
 
   async start(context: ContinuousStreamTransportContext): Promise<ContinuousStreamTransportBinding> {
+    this.contexts.set(context.streamId, context);
     context.updateTransport({ state: 'binding' }, 'Resolving selected physical Sonos device on the local network.');
     const resolved = await this.resolveDevice(context.device.id);
     if (!resolved) throw new Error('The selected Sonos physical device is no longer present in cloud topology.');
@@ -76,15 +85,25 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
       });
       await this.avTransport.setStreamUri(local.avTransportControlUrl, sonosUri);
       await this.avTransport.play(local.avTransportControlUrl);
-      context.updateTransport({ state: 'bound', providerPlaybackState: 'PLAY_REQUESTED' }, 'Sonos local AVTransport accepted the stream URI and Play command.');
+      context.updateTransport({
+        state: 'bound',
+        targetScope: 'physical-device',
+        targetDescription: resolved.device.presentation?.alias ?? resolved.device.name,
+        independentlyTargetable: true,
+        bound: true,
+        hasBinding: true,
+        providerPlaybackState: 'PLAY_REQUESTED',
+        lastError: null,
+      }, 'Sonos local AVTransport accepted the stream URI and Play command.');
       return {
         transportId: this.id,
         targetScope: 'physical-device',
         targetDescription: resolved.device.presentation?.alias ?? resolved.device.name,
         independentlyTargetable: true,
-        providerBinding: { controlUrl: local.avTransportControlUrl, server, httpUrl } satisfies LocalBindingData & { httpUrl: string },
+        providerBinding: { streamId: context.streamId, controlUrl: local.avTransportControlUrl, server, httpUrl } satisfies LocalBindingData & { httpUrl: string },
       };
     } catch (error) {
+      this.contexts.delete(context.streamId);
       await server?.close().catch(() => undefined);
       throw error;
     }
@@ -95,7 +114,26 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
     let stopError: unknown;
     try { await this.avTransport.stop(data.controlUrl); } catch (error) { stopError = error; }
     await data.server.close();
+    this.contexts.delete(data.streamId);
     if (stopError) throw stopError;
+  }
+
+  handleRuntimeEvent(
+    streamId: string,
+    event: AudioStreamDiagnosticEvent,
+    snapshot: AudioStreamSnapshot | undefined
+  ): void {
+    const context = this.contexts.get(streamId);
+    if (!context) return;
+    if (event.code === 'awaiting-startup-reconnect') {
+      context.updateTransport({ state: 'bound', providerPlaybackState: 'AWAITING_STARTUP_RECONNECT' }, 'First local HTTP consumer closed; awaiting bounded startup reconnect.');
+    }
+    if (event.code === 'startup-client-reconnected') {
+      context.updateTransport({ state: 'bound', providerPlaybackState: 'STARTUP_RECONNECTED' }, 'Second local Sonos HTTP consumer connected.');
+    }
+    if (event.code === 'first-live-bytes' && (snapshot?.httpClient.connectionCount ?? 0) >= 2) {
+      context.updateTransport({ state: 'active', providerPlaybackState: 'STREAMING' }, 'Local Sonos reconnect consumer is receiving aligned AAC audio.');
+    }
   }
 }
 

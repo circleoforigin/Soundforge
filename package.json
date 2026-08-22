@@ -9,7 +9,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "test:server-native": "node scripts/native-backend-startup-smoke.mjs",
-    "test:research-lab": "tsx --test server/audio/ContinuousAudioStream.test.ts server/research-lab/AudioDevicePresentationStore.test.ts server/research-lab/ResearchLabDialogData.test.ts server/research-lab/SonosAudioDeviceDiscovery.test.ts server/research-lab/ResearchLabStreamService.test.ts server/sonos/SonosCloudContinuousStreamTransport.test.ts server/sonos/SonosLocalDiscovery.test.ts server/sonos/SonosLocalAvTransportClient.test.ts server/sonos/SonosLocalHttpStreamServer.test.ts server/routes/ResearchLabDeviceRoute.test.ts server/routes/ResearchLabStreamRoute.test.ts server/routes/SonosGroupStreamRoute.test.ts",
+    "test:research-lab": "tsx --test server/audio/ContinuousAudioStream.test.ts server/research-lab/AudioDevicePresentationStore.test.ts server/research-lab/ResearchLabDialogData.test.ts server/research-lab/SonosAudioDeviceDiscovery.test.ts server/research-lab/ResearchLabStreamService.test.ts server/sonos/SonosCloudContinuousStreamTransport.test.ts server/sonos/SonosLocalContinuousStreamTransport.test.ts server/sonos/SonosLocalDiscovery.test.ts server/sonos/SonosLocalAvTransportClient.test.ts server/sonos/SonosLocalHttpStreamServer.test.ts server/routes/ResearchLabDeviceRoute.test.ts server/routes/ResearchLabStreamRoute.test.ts server/routes/SonosGroupStreamRoute.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

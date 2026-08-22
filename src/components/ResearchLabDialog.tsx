@@ -311,7 +311,7 @@ function StreamExperiment({
   onStop: (streamId: string) => void;
 }) {
   const terminal = terminalLifecycles.has(stream.lifecycle);
-  const canTone = !terminal && stream.transport?.bound && stream.httpClient.connected;
+  const canTone = !terminal && stream.transport?.bound && stream.toneReady;
   return (
     <article className={`research-stream-card ${stream.lifecycle === 'error' ? 'error' : ''}`}>
       <header className="research-stream-header">
@@ -396,7 +396,20 @@ function StreamExperiment({
             <DiagnosticValue label="Delivered" value={formatBytes(stream.httpClient.deliveredBytes)} />
             <DiagnosticValue label="Writable queue" value={formatBytes(stream.httpClient.writableLength)} />
             <DiagnosticValue label="Backpressure" value={stream.httpClient.backpressured ? 'Yes' : 'No'} />
+            <DiagnosticValue label="HTTP consumers" value={stream.httpClient.connectionCount ?? 0} />
+            <DiagnosticValue label="Current consumer" value={stream.httpClient.currentConnectionOrdinal ? `#${stream.httpClient.currentConnectionOrdinal}` : '—'} />
+            <DiagnosticValue label="Awaiting reconnect" value={stream.httpClient.awaitingReconnect ? 'Yes' : 'No'} />
           </div>
+          {(stream.httpClient.connections ?? []).slice(-2).map((connection) => (
+            <div className="research-connection-summary" key={connection.ordinal}>
+              <strong>Consumer #{connection.ordinal}</strong>
+              <span>{connection.role === 'startup-reconnect' ? 'Startup reconnect' : 'Startup consumer'}</span>
+              <span>{connection.radioStyleUserAgent ? 'Radio-style User-Agent: Yes' : 'Radio-style User-Agent: No'}</span>
+              <span>{connection.disconnectedAt
+                ? `${connection.durationMs ?? 0} ms · ${formatBytes(connection.bytesDelivered)} · ${connection.disconnectReason ?? 'Disconnected'}`
+                : `Connected · ${formatBytes(connection.bytesDelivered)}`}</span>
+            </div>
+          ))}
         </section>
       </div>
 

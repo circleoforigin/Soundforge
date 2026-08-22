@@ -14,10 +14,22 @@ export interface ContinuousStreamTransportContext {
   transport: AudioTransportOption;
   streamId: string;
   streamUrl: string;
-  bindHttpClient(client: Writable & { destroyed: boolean; writableEnded: boolean; writableLength: number }): void;
+  bindHttpClient(
+    client: Writable & { destroyed: boolean; writableEnded: boolean; writableLength: number },
+    metadata?: HttpStreamConnectionMetadata
+  ): void;
   updateTransport(update: Partial<AudioStreamTransportSnapshot>, message?: string): void;
   addDiagnostic(message: string, details?: Record<string, unknown>): void;
   terminate(reason: string): void;
+}
+
+export interface HttpStreamConnectionMetadata {
+  remoteAddress?: string;
+  httpVersion?: string;
+  userAgent?: string;
+  range?: string;
+  phase?: string;
+  role?: 'startup-consumer' | 'startup-reconnect' | 'playback-consumer';
 }
 
 export interface ContinuousStreamTransportBinding {
@@ -31,6 +43,8 @@ export interface ContinuousStreamTransportBinding {
 export interface ContinuousStreamTransport {
   readonly id: string;
   readonly encodingProfileId?: ContinuousAudioEncodingProfileId;
+  readonly clientReconnectGraceMs?: number;
+  readonly minimumConnectionsForTone?: number;
   start(context: ContinuousStreamTransportContext): Promise<ContinuousStreamTransportBinding>;
   stop(binding: ContinuousStreamTransportBinding): Promise<void>;
   handleRuntimeEvent?(

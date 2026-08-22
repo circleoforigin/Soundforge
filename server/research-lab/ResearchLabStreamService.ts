@@ -84,6 +84,8 @@ export class ResearchLabStreamService {
       transportId,
       httpFramingMode,
       encodingProfileId: transport.encodingProfileId,
+      clientReconnectGraceMs: transport.clientReconnectGraceMs,
+      minimumConnectionsForTone: transport.minimumConnectionsForTone,
       onEvent: (event) => transport.handleRuntimeEvent?.(
         streamId,
         event,
