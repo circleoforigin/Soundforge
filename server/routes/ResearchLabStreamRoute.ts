@@ -5,7 +5,6 @@ import type {
   ContinuousHttpFramingMode,
 } from '../../src/models/ResearchLab.ts';
 
-import { continuousAudioFormat } from '../audio/ContinuousAudioStream.ts';
 import {
   ContinuousAudioStreamManager,
   continuousAudioStreamManager,
@@ -146,7 +145,7 @@ export function registerResearchLabStreamRoute(
     const responseHeaders: Record<string, string> = {
       'Cache-Control': 'no-store, no-cache, must-revalidate, no-transform',
       Connection: 'keep-alive',
-      'Content-Type': continuousAudioFormat.outputMimeType,
+      'Content-Type': stream.getOutputFormat().outputMimeType,
     };
     if (httpFramingMode === 'chunked') {
       responseHeaders['Transfer-Encoding'] = 'chunked';

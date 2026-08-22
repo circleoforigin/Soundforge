@@ -13,6 +13,7 @@ import {
   continuousAudioStreamManager,
 } from '../audio/ContinuousAudioStreamManager.ts';
 import { sonosCloudContinuousStreamTransport } from '../sonos/SonosCloudContinuousStreamTransport.ts';
+import { sonosLocalContinuousStreamTransport } from '../sonos/SonosLocalContinuousStreamTransport.ts';
 import { discoverSonosAudioDevices } from './SonosAudioDeviceDiscovery.ts';
 
 interface ActiveTransportBinding {
@@ -66,7 +67,7 @@ export class ResearchLabStreamService {
     if (!transportOption) {
       throw new ResearchLabRequestError(400, 'The requested transport is not available for this device.');
     }
-    if (transportOption.availability !== 'available') {
+    if (transportOption.availability === 'unavailable') {
       throw new ResearchLabRequestError(
         409,
         transportOption.limitation ?? `Transport is ${transportOption.availability}.`
@@ -82,6 +83,7 @@ export class ResearchLabStreamService {
       deviceId,
       transportId,
       httpFramingMode,
+      encodingProfileId: transport.encodingProfileId,
       onEvent: (event) => transport.handleRuntimeEvent?.(
         streamId,
         event,
@@ -110,6 +112,7 @@ export class ResearchLabStreamService {
         transport: transportOption,
         streamId: stream.id,
         streamUrl,
+        bindHttpClient: (client) => stream.bindHttpClient(client),
         updateTransport: (update, message) => stream.updateTransport(update, message),
         addDiagnostic: (message, details) =>
           stream.addDiagnosticEvent('lifecycle', message, details),
@@ -233,6 +236,7 @@ export class ResearchLabStreamService {
 
 export const researchLabTransportRegistry = new ContinuousStreamTransportRegistry();
 researchLabTransportRegistry.register(sonosCloudContinuousStreamTransport);
+researchLabTransportRegistry.register(sonosLocalContinuousStreamTransport);
 
 export const researchLabStreamService = new ResearchLabStreamService(
   continuousAudioStreamManager,

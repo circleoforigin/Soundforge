@@ -251,13 +251,13 @@ test('provider stop failure still stops and retains local runtime', async () => 
   assert.equal(manager.getActive(snapshot.id), undefined);
 });
 
-test('experimental local transport is rejected before creating a stream', async () => {
+test('experimental transport without a registered implementation is rejected before creating a stream', async () => {
   const target = device('experimental-device', true, 'experimental');
   const { manager, service } = createService([target]);
 
   await assert.rejects(
     service.start(target.id, 'sonos-local-continuous', () => 'https://unused'),
-    (error: unknown) => error instanceof ResearchLabRequestError && error.status === 409
+    (error: unknown) => error instanceof ResearchLabRequestError && error.status === 501
   );
   assert.equal(manager.listSnapshots().length, 0);
 });

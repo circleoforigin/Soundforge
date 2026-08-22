@@ -136,9 +136,11 @@ function createTransports(
       name: 'Sonos local continuous stream',
       operation: 'persistent-stream',
       scope: 'physical-device',
-      independentlyTargetable: true,
+      independentlyTargetable: physicalDeviceCount === 1 && logicalPlayerCount === 1,
       availability: 'experimental',
-      limitation: 'Local physical-device transport is not implemented yet.',
+      limitation: physicalDeviceCount === 1 && logicalPlayerCount === 1
+        ? 'Experimental direct-LAN AVTransport stream for a standalone physical Sonos player.'
+        : 'Experimental local streaming cannot independently target this bonded/group component; SACscape will not redirect it to a coordinator.',
     },
   ];
 }

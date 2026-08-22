@@ -126,7 +126,7 @@ function TransportRow({
   onStart: (device: AudioDevice, transport: AudioTransportOption) => void;
 }) {
   const canStart =
-    transport.operation === 'persistent-stream' && transport.availability === 'available';
+    transport.operation === 'persistent-stream' && transport.availability !== 'unavailable';
   return (
     <div className="research-transport-row">
       <div className="research-transport-main">

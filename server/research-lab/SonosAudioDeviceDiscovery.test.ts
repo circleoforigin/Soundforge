@@ -65,7 +65,8 @@ test('normalizes each Sonos physical device and keeps transport scope honest', a
       (transport) => transport.id === 'sonos-local-continuous'
     );
     assert.equal(local?.availability, 'experimental');
-    assert.match(local?.limitation ?? '', /not implemented/i);
+    assert.equal(local?.independentlyTargetable, false);
+    assert.match(local?.limitation ?? '', /cannot independently target/i);
   }
 });
 

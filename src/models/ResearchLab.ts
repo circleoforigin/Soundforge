@@ -124,6 +124,9 @@ export interface AudioStreamEncoderSnapshot {
   sampleRate: number;
   channels: number;
   bitrate: number;
+  codec: string;
+  container: string;
+  mimeType: string;
   framesGenerated: number;
   pcmBytesGenerated: number;
   encodedBytesProduced: number;

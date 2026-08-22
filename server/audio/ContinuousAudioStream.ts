@@ -12,18 +12,13 @@ import type {
   AudioStreamTransportSnapshot,
   ContinuousHttpFramingMode,
 } from '../../src/models/ResearchLab.ts';
+import {
+  getContinuousAudioEncodingProfile,
+  type ContinuousAudioEncodingProfile,
+  type ContinuousAudioEncodingProfileId,
+} from './ContinuousAudioEncodingProfile.ts';
 
-export const continuousAudioFormat = {
-  sampleRate: 44_100,
-  channelCount: 2,
-  bitsPerSample: 16,
-  frameDurationMs: 20,
-  outputMimeType: 'audio/mpeg',
-  outputBitrate: 192_000,
-} as const;
-
-const samplesPerFrame =
-  continuousAudioFormat.sampleRate * continuousAudioFormat.frameDurationMs / 1000;
+export const continuousAudioFormat = getContinuousAudioEncodingProfile('mp3');
 const toneFrequencyHz = 880;
 const toneDurationMs = 1_000;
 const toneAmplitude = 0.4;
@@ -42,6 +37,16 @@ interface Mp3FrameScan {
   firstFrameOffset: number | null;
   firstFrameBytes: number | null;
   completeFrameCount: number;
+}
+
+function adtsFrameLength(buffer: Buffer, offset: number): number | null {
+  if (offset + 7 > buffer.length || buffer[offset] !== 0xff || (buffer[offset + 1] & 0xf6) !== 0xf0) {
+    return null;
+  }
+  const length = ((buffer[offset + 3] & 0x03) << 11)
+    | (buffer[offset + 4] << 3)
+    | ((buffer[offset + 5] & 0xe0) >> 5);
+  return length >= 7 ? length : null;
 }
 
 function mp3FrameLength(buffer: Buffer, offset: number): number | null {
@@ -107,6 +112,25 @@ function inspectMp3Frames(buffer: Buffer): Mp3FrameScan {
   return best;
 }
 
+function inspectAdtsFrames(buffer: Buffer): Mp3FrameScan {
+  let best: Mp3FrameScan = { firstFrameOffset: null, firstFrameBytes: null, completeFrameCount: 0 };
+  for (let candidate = 0; candidate + 7 <= buffer.length; candidate += 1) {
+    const firstFrameBytes = adtsFrameLength(buffer, candidate);
+    if (!firstFrameBytes || candidate + firstFrameBytes > buffer.length) continue;
+    let cursor = candidate;
+    let completeFrameCount = 0;
+    while (cursor + 7 <= buffer.length) {
+      const frameBytes = adtsFrameLength(buffer, cursor);
+      if (!frameBytes || cursor + frameBytes > buffer.length) break;
+      completeFrameCount += 1;
+      cursor += frameBytes;
+    }
+    if (completeFrameCount > best.completeFrameCount) best = { firstFrameOffset: candidate, firstFrameBytes, completeFrameCount };
+    if (completeFrameCount >= startupReadyFrameCount) return best;
+  }
+  return best;
+}
+
 function sanitizeDiagnosticText(value: string): string {
   return value
     .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
@@ -168,6 +192,7 @@ export interface ContinuousAudioStreamOptions {
   deviceId?: string;
   transportId?: string;
   httpFramingMode?: ContinuousHttpFramingMode;
+  encodingProfileId?: ContinuousAudioEncodingProfileId;
   onEvent?: (event: AudioStreamDiagnosticEvent) => void;
   onClientDisconnected?: (reason: string) => void;
   onEncoderExit?: (details: { code: number | null; signal: NodeJS.Signals | null }) => void;
@@ -183,6 +208,7 @@ export class ContinuousAudioStream {
   readonly id: string;
 
   private readonly options: ContinuousAudioStreamOptions;
+  private readonly format: ContinuousAudioEncodingProfile;
   private encoder: ChildProcessWithoutNullStreams | null = null;
   private frameTimer: NodeJS.Timeout | null = null;
   private client: HttpStreamClient | null = null;
@@ -227,6 +253,7 @@ export class ContinuousAudioStream {
   constructor(id: string, options: ContinuousAudioStreamOptions = {}) {
     this.id = id;
     this.options = options;
+    this.format = getContinuousAudioEncodingProfile(options.encodingProfileId);
     this.readyPromise = new Promise<void>((resolve, reject) => {
       this.resolveReady = resolve;
       this.rejectReady = reject;
@@ -260,14 +287,10 @@ export class ContinuousAudioStream {
       '-hide_banner',
       '-loglevel', 'error',
       '-f', 's16le',
-      '-ar', continuousAudioFormat.sampleRate.toString(),
-      '-ac', continuousAudioFormat.channelCount.toString(),
+      '-ar', this.format.sampleRate.toString(),
+      '-ac', this.format.channelCount.toString(),
       '-i', 'pipe:0',
-      '-codec:a', 'libmp3lame',
-      '-b:a', '192k',
-      '-write_xing', '0',
-      '-flush_packets', '1',
-      '-f', 'mp3',
+      ...this.format.ffmpegOutputArguments,
       'pipe:1',
     ], { windowsHide: true });
 
@@ -279,7 +302,7 @@ export class ContinuousAudioStream {
       millisecondsAfterClientConnection: this.clientConnectedAt
         ? Date.now() - this.clientConnectedAt.getTime()
         : null,
-      ...continuousAudioFormat,
+      ...this.format,
     });
 
     encoder.stdout.on('data', (chunk: Buffer) => this.handleEncodedChunk(encoder, chunk));
@@ -298,7 +321,7 @@ export class ContinuousAudioStream {
 
     this.startFrameTimer(encoder);
     this.record('lifecycle', 'pcm-clock-started', 'PCM generation clock started.', {
-      frameDurationMs: continuousAudioFormat.frameDurationMs,
+      frameDurationMs: this.format.frameDurationMs,
     });
   }
 
@@ -384,12 +407,16 @@ export class ContinuousAudioStream {
     return Boolean(this.client && !this.client.destroyed && !this.client.writableEnded);
   }
 
+  getOutputFormat(): ContinuousAudioEncodingProfile {
+    return this.format;
+  }
+
   injectTestTone(): { frequencyHz: number; durationMs: number } {
     if (!this.isReadyForTone()) {
       throw new Error('The continuous audio stream is not ready for tone injection.');
     }
     this.toneSamplesRemaining = Math.round(
-      continuousAudioFormat.sampleRate * toneDurationMs / 1000
+      this.format.sampleRate * toneDurationMs / 1000
     );
     this.tonePhase = 0;
     this.record('source', 'tone-injected', 'Diagnostic test tone injected.', {
@@ -487,9 +514,12 @@ export class ContinuousAudioStream {
         state: this.getEncoderState(),
         pid: this.encoder?.pid ?? null,
         startedAt: this.encoderStartedAt?.toISOString() ?? null,
-        sampleRate: continuousAudioFormat.sampleRate,
-        channels: continuousAudioFormat.channelCount,
-        bitrate: continuousAudioFormat.outputBitrate,
+        sampleRate: this.format.sampleRate,
+        channels: this.format.channelCount,
+        bitrate: this.format.outputBitrate,
+        codec: this.format.codec,
+        container: this.format.container,
+        mimeType: this.format.outputMimeType,
         framesGenerated: this.pcmFramesGenerated,
         pcmBytesGenerated: this.pcmBytesGenerated,
         encodedBytesProduced: this.encodedBytesProduced,
@@ -557,7 +587,7 @@ export class ContinuousAudioStream {
   private retainStartupChunk(encoder: ChildProcessWithoutNullStreams, chunk: Buffer): void {
     if (this.startupBuffer.length + chunk.length > maximumStartupBufferBytes) {
       const error = new Error(
-        `MP3 startup buffer exceeded ${maximumStartupBufferBytes} bytes before becoming ready.`
+        `${this.format.container.toUpperCase()} startup buffer exceeded ${maximumStartupBufferBytes} bytes before becoming ready.`
       );
       this.rejectReady?.(error);
       this.rejectReady = null;
@@ -568,14 +598,16 @@ export class ContinuousAudioStream {
     }
 
     this.startupBuffer = Buffer.concat([this.startupBuffer, chunk]);
-    this.record('encoder', 'startup-buffer-progress', 'MP3 startup buffer retained.', {
+    this.record('encoder', 'startup-buffer-progress', 'Encoded startup buffer retained.', {
       startupBufferBytes: this.startupBuffer.length,
       maximumStartupBufferBytes,
     });
-    const frameScan = inspectMp3Frames(this.startupBuffer);
+    const frameScan = this.format.container === 'adts'
+      ? inspectAdtsFrames(this.startupBuffer)
+      : inspectMp3Frames(this.startupBuffer);
     if (frameScan.firstFrameOffset !== null && this.firstMpegFrameOffset === null) {
       this.firstMpegFrameOffset = frameScan.firstFrameOffset;
-      this.record('encoder', 'first-mpeg-frame', 'First complete MPEG audio frame found.', {
+      this.record('encoder', this.format.container === 'adts' ? 'first-adts-frame' : 'first-mpeg-frame', 'First complete encoded audio frame found.', {
         byteOffset: frameScan.firstFrameOffset,
         frameBytes: frameScan.firstFrameBytes,
       });
@@ -586,7 +618,7 @@ export class ContinuousAudioStream {
       this.startupPrefixBytes = this.startupBuffer.length;
       encoder.stdout.pause();
       this.pausePcmForReady();
-      this.record('encoder', 'startup-buffer-ready', 'MP3 startup buffer is ready for a client.', {
+      this.record('encoder', 'startup-buffer-ready', 'Encoded startup buffer is ready for a client.', {
         startupBufferBytes: this.startupBuffer.length,
         completeMpegFrames: frameScan.completeFrameCount,
         requiredMpegFrames: startupReadyFrameCount,
@@ -623,7 +655,7 @@ export class ContinuousAudioStream {
     );
     this.startupBufferFlushed = true;
     this.startupBuffer = Buffer.alloc(0);
-    this.record('http', 'startup-buffer-flushed', 'Complete MP3 startup buffer flushed to client.', {
+    this.record('http', 'startup-buffer-flushed', 'Complete encoded startup buffer flushed to client.', {
       chunkBytes: startupBytes.length,
       completeMpegFrames: this.completeStartupFrameCount,
       beganAtEncodedByte: 0,
@@ -667,7 +699,7 @@ export class ContinuousAudioStream {
     if (!this.firstLiveBytesDelivered) {
       this.firstLiveBytesDelivered = true;
       this.state = 'running';
-      this.record('http', 'first-live-bytes', 'First live bytes followed the MP3 startup prefix.', {
+      this.record('http', 'first-live-bytes', 'First live bytes followed the encoded startup prefix.', {
         chunkBytes: chunk.length,
         millisecondsAfterClientConnection: this.clientConnectedAt
           ? Date.now() - this.clientConnectedAt.getTime()
@@ -692,15 +724,16 @@ export class ContinuousAudioStream {
       return;
     }
 
-    const frame = Buffer.alloc(samplesPerFrame * continuousAudioFormat.channelCount * 2);
+    const samplesPerFrame = this.format.sampleRate * this.format.frameDurationMs / 1000;
+    const frame = Buffer.alloc(samplesPerFrame * this.format.channelCount * 2);
     for (let sampleIndex = 0; sampleIndex < samplesPerFrame; sampleIndex += 1) {
       let sample = 0;
       if (this.toneSamplesRemaining > 0) {
         sample = Math.round(Math.sin(this.tonePhase) * toneAmplitude * 32_767);
-        this.tonePhase += 2 * Math.PI * toneFrequencyHz / continuousAudioFormat.sampleRate;
+        this.tonePhase += 2 * Math.PI * toneFrequencyHz / this.format.sampleRate;
         this.toneSamplesRemaining -= 1;
       }
-      const offset = sampleIndex * continuousAudioFormat.channelCount * 2;
+      const offset = sampleIndex * this.format.channelCount * 2;
       frame.writeInt16LE(sample, offset);
       frame.writeInt16LE(sample, offset + 2);
     }
@@ -738,7 +771,7 @@ export class ContinuousAudioStream {
     }
     this.frameTimer = setInterval(
       () => this.writePcmFrame(encoder),
-      continuousAudioFormat.frameDurationMs
+      this.format.frameDurationMs
     );
   }
 

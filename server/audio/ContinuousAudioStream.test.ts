@@ -116,6 +116,29 @@ test('encoder prewarms a bounded valid MP3 prefix before its HTTP client connect
   }
 });
 
+test('AAC/ADTS profile prewarms independently and delivers a valid ADTS prefix', async () => {
+  const manager = new ContinuousAudioStreamManager();
+  const stream = manager.create({ encodingProfileId: 'aac-adts' });
+  const client = new PassThrough();
+  try {
+    stream.start();
+    await stream.waitUntilReadyForClient();
+    const ready = stream.getSnapshot();
+    assert.equal(ready.encoder.codec, 'aac-lc');
+    assert.equal(ready.encoder.container, 'adts');
+    assert.equal(ready.encoder.sampleRate, 48_000);
+    assert.ok(ready.recentEvents.some((event) => event.code === 'first-adts-frame'));
+    const first = new Promise<Buffer>((resolve) => client.once('data', (chunk: Buffer) => resolve(Buffer.from(chunk))));
+    stream.bindHttpClient(client);
+    const chunk = await first;
+    assert.equal(chunk[0], 0xff);
+    assert.equal(chunk[1] & 0xf6, 0xf0);
+  } finally {
+    client.destroy();
+    manager.stop(stream.id, 'test complete');
+  }
+});
+
 test('two continuous streams isolate encoder, source, counters, and cleanup', async () => {
   const manager = new ContinuousAudioStreamManager();
   const streamA = manager.create();

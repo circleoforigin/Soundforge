@@ -1,0 +1,26 @@
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import test from 'node:test';
+
+import { SonosLocalAvTransportClient } from './SonosLocalAvTransportClient.ts';
+
+test('local AVTransport sends escaped SetAVTransportURI followed by Play', async () => {
+  const requests: Array<{ action: string | undefined; body: string }> = [];
+  const server = http.createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8'); request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => { requests.push({ action: request.headers.soapaction, body }); response.end('<ok/>'); });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const client = new SonosLocalAvTransportClient();
+    const url = `http://127.0.0.1:${address.port}/control`;
+    await client.setStreamUri(url, 'x-rincon-mp3radio://127.0.0.1/a&b.aac');
+    await client.play(url);
+    assert.match(requests[0].action ?? '', /SetAVTransportURI/);
+    assert.match(requests[0].body, /a&amp;b\.aac/);
+    assert.match(requests[1].action ?? '', /#Play/);
+  } finally { server.close(); }
+});
