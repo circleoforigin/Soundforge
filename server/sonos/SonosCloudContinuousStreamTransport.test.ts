@@ -112,6 +112,7 @@ function runtimeSnapshot(deliveredBytes: number): AudioStreamSnapshot {
       stdinBackpressured: false,
     },
     httpClient: {
+      framingMode: 'chunked',
       connected: true,
       connectedAt: new Date().toISOString(),
       disconnectedAt: null,

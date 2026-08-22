@@ -121,7 +121,8 @@ test('generic creation binds device and group-scoped transport metadata', async 
     const standaloneSnapshot = await service.start(
       standalone.id,
       'sonos-cloud-continuous',
-      (id) => `https://example.test/api/research-lab/streams/${id}/live.mp3`
+      (id) => `https://example.test/api/research-lab/streams/${id}/live.mp3`,
+      'indefinite-content-length'
     );
 
     assert.equal(bondedSnapshot.deviceId, bonded.id);
@@ -129,6 +130,7 @@ test('generic creation binds device and group-scoped transport metadata', async 
     assert.equal(bondedSnapshot.transport?.targetScope, 'group');
     assert.equal(bondedSnapshot.transport?.independentlyTargetable, false);
     assert.equal(standaloneSnapshot.transport?.independentlyTargetable, true);
+    assert.equal(standaloneSnapshot.httpClient.framingMode, 'indefinite-content-length');
     assert.equal(transport.started.length, 2);
     assert.equal(bondedSnapshot.encoder.startupBufferReady, true);
     const readyIndex = bondedSnapshot.recentEvents.findIndex(
@@ -149,7 +151,12 @@ test('tone and transport diagnostics remain isolated per stream', async () => {
   const { manager, service } = createService([first, second]);
   const clients: PassThrough[] = [];
   try {
-    const snapshotA = await service.start(first.id, 'sonos-cloud-continuous', () => 'https://a');
+    const snapshotA = await service.start(
+      first.id,
+      'sonos-cloud-continuous',
+      () => 'https://a',
+      'indefinite-content-length'
+    );
     const snapshotB = await service.start(second.id, 'sonos-cloud-continuous', () => 'https://b');
     for (const streamId of [snapshotA.id, snapshotB.id]) {
       const client = new PassThrough();
@@ -184,7 +191,12 @@ test('disconnecting one HTTP consumer tears down only its own stream', async () 
   clientB.resume();
 
   try {
-    const snapshotA = await service.start(first.id, 'sonos-cloud-continuous', () => 'https://a');
+    const snapshotA = await service.start(
+      first.id,
+      'sonos-cloud-continuous',
+      () => 'https://a',
+      'indefinite-content-length'
+    );
     const snapshotB = await service.start(second.id, 'sonos-cloud-continuous', () => 'https://b');
     manager.getActive(snapshotA.id)?.bindHttpClient(clientA);
     manager.getActive(snapshotB.id)?.bindHttpClient(clientB);
@@ -198,6 +210,10 @@ test('disconnecting one HTTP consumer tears down only its own stream', async () 
     await waitFor(() => !manager.getActive(snapshotA.id));
 
     assert.equal(manager.getSnapshot(snapshotA.id)?.lifecycle, 'stopped');
+    assert.equal(
+      manager.getSnapshot(snapshotA.id)?.httpClient.framingMode,
+      'indefinite-content-length'
+    );
     assert.equal(manager.getSnapshot(snapshotB.id)?.lifecycle, 'running');
     assert.equal(manager.getSnapshot(snapshotB.id)?.encoder.pid, secondPid);
     assert.equal(manager.getActive(snapshotB.id)?.isReadyForTone(), true);

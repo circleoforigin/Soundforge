@@ -1,6 +1,7 @@
 import type {
   AudioDevice,
   AudioStreamSnapshot,
+  ContinuousHttpFramingMode,
 } from '../../src/models/ResearchLab.ts';
 import type {
   ContinuousStreamTransport,
@@ -54,7 +55,8 @@ export class ResearchLabStreamService {
   async start(
     deviceId: string,
     transportId: string,
-    createStreamUrl: (streamId: string) => string
+    createStreamUrl: (streamId: string) => string,
+    httpFramingMode: ContinuousHttpFramingMode = 'chunked'
   ): Promise<AudioStreamSnapshot> {
     const device = (await this.discoverDevices()).find((candidate) => candidate.id === deviceId);
     if (!device) {
@@ -79,6 +81,7 @@ export class ResearchLabStreamService {
     const stream = this.manager.create({
       deviceId,
       transportId,
+      httpFramingMode,
       onEvent: (event) => transport.handleRuntimeEvent?.(
         streamId,
         event,

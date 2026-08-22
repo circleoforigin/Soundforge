@@ -25,6 +25,7 @@ import type {
   AudioTopologyKind,
   AudioTransportOption,
   AudioTransportScope,
+  ContinuousHttpFramingMode,
 } from '../models/ResearchLab';
 
 interface ResearchLabDialogProps {
@@ -389,6 +390,7 @@ function StreamExperiment({
           <h4>Connection</h4>
           <div className="research-diagnostic-grid">
             <DiagnosticValue label="Connected" value={stream.httpClient.connected ? 'Yes' : 'No'} />
+            <DiagnosticValue label="Framing" value={titleCase(stream.httpClient.framingMode ?? 'chunked')} />
             <DiagnosticValue label="Connected at" value={formatTimestamp(stream.httpClient.connectedAt)} />
             <DiagnosticValue label="Disconnected at" value={formatTimestamp(stream.httpClient.disconnectedAt)} />
             <DiagnosticValue label="Delivered" value={formatBytes(stream.httpClient.deliveredBytes)} />
@@ -447,6 +449,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
     Record<string, DeviceActionMessage>
   >({});
   const [busyActions, setBusyActions] = useState<Record<string, 'tone' | 'stop'>>({});
+  const [httpFramingMode, setHttpFramingMode] = useState<ContinuousHttpFramingMode>('chunked');
 
   const refreshDevices = useCallback(async () => {
     setDiscovering(true);
@@ -513,7 +516,11 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
       const response = await fetch(apiUrl('/api/research-lab/streams'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deviceId: device.id, transportId: transport.id }),
+        body: JSON.stringify({
+          deviceId: device.id,
+          transportId: transport.id,
+          httpFramingMode,
+        }),
       });
       if (!response.ok) {
         throw new Error(await readFailure(response, 'Unable to start stream.'));
@@ -673,6 +680,26 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
               <button disabled={discovering} onClick={() => void refreshDevices()}>
                 {discovering ? 'Discovering…' : 'Refresh Devices'}
               </button>
+            </div>
+            <div className="research-framing-control">
+              <label>
+                <span>HTTP Stream Framing</span>
+                <select
+                  value={httpFramingMode}
+                  disabled={startingKey !== null}
+                  onChange={(event) => setHttpFramingMode(
+                    event.target.value as ContinuousHttpFramingMode
+                  )}
+                >
+                  <option value="chunked">Node Chunked</option>
+                  <option value="indefinite-content-length">Indefinite Content-Length</option>
+                </select>
+              </label>
+              <small>
+                {httpFramingMode === 'chunked'
+                  ? 'Current default HTTP streaming behavior.'
+                  : 'Experimental non-chunked framing for compatibility testing.'}
+              </small>
             </div>
             {discoveryError && <div className="research-error-message">{discoveryError}</div>}
             {discoveryWarning && (

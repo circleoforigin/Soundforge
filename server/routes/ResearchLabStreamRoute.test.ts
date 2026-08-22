@@ -12,7 +12,10 @@ import type {
 import { ContinuousAudioStreamManager } from '../audio/ContinuousAudioStreamManager.ts';
 import { ContinuousStreamTransportRegistry } from '../audio/transports/ContinuousStreamTransportRegistry.ts';
 import { ResearchLabStreamService } from '../research-lab/ResearchLabStreamService.ts';
-import { registerResearchLabStreamRoute } from './ResearchLabStreamRoute.ts';
+import {
+  indefiniteStreamContentLength,
+  registerResearchLabStreamRoute,
+} from './ResearchLabStreamRoute.ts';
 
 test('Research Lab stream diagnostics routes return list, snapshot, and not-found responses', async () => {
   const manager = new ContinuousAudioStreamManager();
@@ -53,6 +56,17 @@ test('Research Lab stream diagnostics routes return list, snapshot, and not-foun
     );
     assert.equal(missingResponse.status, 404);
 
+    const invalidFramingResponse = await fetch(`${baseUrl}/api/research-lab/streams`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: 'route-test-device',
+        transportId: 'test-transport',
+        httpFramingMode: 'invalid-mode',
+      }),
+    });
+    assert.equal(invalidFramingResponse.status, 400);
+
     stream.start();
     await stream.waitUntilReadyForClient();
     await new Promise<void>((resolve, reject) => {
@@ -67,6 +81,8 @@ test('Research Lab stream diagnostics routes return list, snapshot, and not-foun
           },
         },
         (response) => {
+          assert.equal(response.headers['transfer-encoding'], 'chunked');
+          assert.equal(response.headers['content-length'], undefined);
           response.once('data', () => {
             response.destroy();
             resolve();
@@ -91,6 +107,103 @@ test('Research Lab stream diagnostics routes return list, snapshot, and not-foun
     assert.equal(responseMetadata?.details?.transferEncoding, 'chunked');
   } finally {
     manager.stopAll('route test cleanup');
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
+test('indefinite framing sends Content-Length without chunked encoding and stops cleanly', async () => {
+  const manager = new ContinuousAudioStreamManager();
+  const stream = manager.create({
+    deviceId: 'indefinite-route-device',
+    httpFramingMode: 'indefinite-content-length',
+  });
+  const service = new ResearchLabStreamService(
+    manager,
+    new ContinuousStreamTransportRegistry(),
+    async () => []
+  );
+  const app = express();
+  registerResearchLabStreamRoute(app, { manager, service });
+  const server = app.listen(0, '127.0.0.1');
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('listening', resolve);
+      server.once('error', reject);
+    });
+    stream.start();
+    await stream.waitUntilReadyForClient();
+    const startupBytes = stream.getSnapshot().encoder.startupBufferBytes;
+    const address = server.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    let firstBodyChunk: Buffer | undefined;
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      };
+      const request = http.get(
+        `${baseUrl}/api/research-lab/streams/${encodeURIComponent(stream.id)}/live.mp3`,
+        (response) => {
+          assert.equal(response.statusCode, 200);
+          assert.equal(response.headers['content-type'], 'audio/mpeg');
+          assert.equal(response.headers['content-length'], String(indefiniteStreamContentLength));
+          assert.equal(response.headers['transfer-encoding'], undefined);
+          response.once('data', (chunk: Buffer) => {
+            firstBodyChunk = Buffer.from(chunk);
+            manager.stop(stream.id, 'indefinite framing route test');
+          });
+          response.once('aborted', () => finish());
+          response.once('close', () => finish());
+          response.once('error', (error) => {
+            if ((error as NodeJS.ErrnoException).code === 'ECONNRESET') {
+              finish();
+            } else {
+              finish(error);
+            }
+          });
+        }
+      );
+      request.once('error', finish);
+    });
+
+    assert.ok(firstBodyChunk);
+    assert.ok(firstBodyChunk.length >= startupBytes);
+    const beginsWithId3 = firstBodyChunk.subarray(0, 3).toString('ascii') === 'ID3';
+    const beginsWithMpegFrameSync =
+      firstBodyChunk[0] === 0xff && (firstBodyChunk[1] & 0xe0) === 0xe0;
+    assert.ok(beginsWithId3 || beginsWithMpegFrameSync);
+    const retained = manager.getSnapshot(stream.id);
+    assert.equal(retained?.lifecycle, 'stopped');
+    assert.equal(retained?.httpClient.framingMode, 'indefinite-content-length');
+    const responseDiagnostic = retained?.recentEvents.find(
+      (event) => event.code === 'http-response-metadata'
+    );
+    assert.equal(responseDiagnostic?.details?.httpFramingMode, 'indefinite-content-length');
+    assert.equal(responseDiagnostic?.details?.transferEncoding, null);
+    assert.equal(
+      responseDiagnostic?.details?.contentLength,
+      String(indefiniteStreamContentLength)
+    );
+    const startupFlush = retained?.recentEvents.find(
+      (event) => event.code === 'startup-buffer-flushed'
+    );
+    assert.equal(startupFlush?.details?.chunkBytes, startupBytes);
+    assert.equal(startupFlush?.details?.beganAtEncodedByte, 0);
+    assert.ok(retained?.recentEvents.some((event) => event.code === 'indefinite-response-started'));
+  } finally {
+    manager.stopAll('indefinite route test cleanup');
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     });

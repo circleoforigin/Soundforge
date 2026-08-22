@@ -97,6 +97,10 @@ export type AudioStreamLifecycleState =
 
 export type AudioStreamSource = 'silence' | 'test-tone';
 
+export type ContinuousHttpFramingMode =
+  | 'chunked'
+  | 'indefinite-content-length';
+
 export type AudioStreamDiagnosticCategory =
   | 'lifecycle'
   | 'encoder'
@@ -130,6 +134,7 @@ export interface AudioStreamEncoderSnapshot {
 }
 
 export interface AudioStreamHttpClientSnapshot {
+  framingMode: ContinuousHttpFramingMode;
   connected: boolean;
   connectedAt: string | null;
   disconnectedAt: string | null;

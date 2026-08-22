@@ -2,6 +2,7 @@ import { json, type Express, type Request } from 'express';
 import type {
   AudioStreamListResponse,
   AudioStreamSnapshotResponse,
+  ContinuousHttpFramingMode,
 } from '../../src/models/ResearchLab.ts';
 
 import { continuousAudioFormat } from '../audio/ContinuousAudioStream.ts';
@@ -21,6 +22,14 @@ function getPublicBaseUrl(request: Request): string {
   return (
     configuredBaseUrl || `${forwardedProtocol || request.protocol}://${request.get('host')}`
   ).replace(/\/+$/, '');
+}
+
+// Four-plus days of 192 kbps audio: deliberately much longer than a Lab experiment,
+// while remaining a conservative valid integer for Node and HTTP clients.
+export const indefiniteStreamContentLength = 8 * 1_024 * 1_024 * 1_024;
+
+function isHttpFramingMode(value: unknown): value is ContinuousHttpFramingMode {
+  return value === 'chunked' || value === 'indefinite-content-length';
 }
 
 interface ResearchLabStreamRouteDependencies {
@@ -58,9 +67,10 @@ export function registerResearchLabStreamRoute(
   });
 
   app.post('/api/research-lab/streams', json(), async (request, response) => {
-    const { deviceId, transportId } = request.body as {
+    const { deviceId, transportId, httpFramingMode } = request.body as {
       deviceId?: unknown;
       transportId?: unknown;
+      httpFramingMode?: unknown;
     };
     if (typeof deviceId !== 'string' || typeof transportId !== 'string') {
       response.status(400).json({
@@ -69,12 +79,20 @@ export function registerResearchLabStreamRoute(
       });
       return;
     }
+    if (httpFramingMode !== undefined && !isHttpFramingMode(httpFramingMode)) {
+      response.status(400).json({
+        ok: false,
+        message: 'Unknown HTTP stream framing mode.',
+      });
+      return;
+    }
     try {
       const baseUrl = getPublicBaseUrl(request);
       const stream = await service.start(
         deviceId,
         transportId,
-        (streamId) => `${baseUrl}/api/research-lab/streams/${encodeURIComponent(streamId)}/live.mp3`
+        (streamId) => `${baseUrl}/api/research-lab/streams/${encodeURIComponent(streamId)}/live.mp3`,
+        httpFramingMode ?? 'chunked'
       );
       response.status(201).json({ ok: true, stream });
     } catch (error) {
@@ -124,12 +142,18 @@ export function registerResearchLabStreamRoute(
       return;
     }
 
-    response.status(200).set({
+    const httpFramingMode = stream.getSnapshot().httpClient.framingMode;
+    const responseHeaders: Record<string, string> = {
       'Cache-Control': 'no-store, no-cache, must-revalidate, no-transform',
       Connection: 'keep-alive',
       'Content-Type': continuousAudioFormat.outputMimeType,
-      'Transfer-Encoding': 'chunked',
-    });
+    };
+    if (httpFramingMode === 'chunked') {
+      responseHeaders['Transfer-Encoding'] = 'chunked';
+    } else {
+      responseHeaders['Content-Length'] = String(indefiniteStreamContentLength);
+    }
+    response.status(200).set(responseHeaders);
     stream.addDiagnosticEvent('http', 'Research Lab stream HTTP request received.', {
       method: request.method,
       pathSegments: ['api', 'research-lab', 'streams', '[stream-id]', 'live.mp3'],
@@ -146,7 +170,19 @@ export function registerResearchLabStreamRoute(
       acceptRanges: response.getHeader('accept-ranges') ?? null,
       cacheControl: response.getHeader('cache-control') ?? null,
       connection: response.getHeader('connection') ?? null,
+      httpFramingMode,
     }, 'http-response-metadata');
+    if (httpFramingMode === 'indefinite-content-length') {
+      stream.addDiagnosticEvent(
+        'http',
+        'Experimental non-chunked HTTP stream response started.',
+        {
+          declaredContentLength: indefiniteStreamContentLength,
+          actualBytesWritten: 0,
+        },
+        'indefinite-response-started'
+      );
+    }
     response.flushHeaders();
 
     try {

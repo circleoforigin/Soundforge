@@ -10,6 +10,7 @@ import type {
   AudioStreamSnapshot,
   AudioStreamSource,
   AudioStreamTransportSnapshot,
+  ContinuousHttpFramingMode,
 } from '../../src/models/ResearchLab.ts';
 
 export const continuousAudioFormat = {
@@ -166,6 +167,7 @@ type ContinuousAudioStreamState =
 export interface ContinuousAudioStreamOptions {
   deviceId?: string;
   transportId?: string;
+  httpFramingMode?: ContinuousHttpFramingMode;
   onEvent?: (event: AudioStreamDiagnosticEvent) => void;
   onClientDisconnected?: (reason: string) => void;
   onEncoderExit?: (details: { code: number | null; signal: NodeJS.Signals | null }) => void;
@@ -497,6 +499,7 @@ export class ContinuousAudioStream {
         stdinBackpressured: this.stdinBackpressured,
       },
       httpClient: {
+        framingMode: this.options.httpFramingMode ?? 'chunked',
         connected: this.hasActiveClient(),
         connectedAt: this.clientConnectedAt?.toISOString() ?? null,
         disconnectedAt: this.lastClientDisconnectedAt?.toISOString() ?? null,

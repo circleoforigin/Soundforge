@@ -572,6 +572,34 @@ body,
   overflow-y: auto;
 }
 
+.research-framing-control {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 8px;
+  background: #222328;
+  border: 1px solid #3f4249;
+  border-radius: 4px;
+}
+
+.research-framing-control label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #dfe0e3;
+  font-size: 12px;
+}
+
+.research-framing-control select {
+  min-width: 190px;
+}
+
+.research-framing-control small {
+  color: #92959d;
+  font-size: 11px;
+}
+
 .research-device-card,
 .research-stream-card {
   padding: 11px;
