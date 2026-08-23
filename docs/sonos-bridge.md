@@ -35,6 +35,20 @@ The bridge deliberately excludes Room Audio, local assets, FFmpeg, encoders, Res
 npm run sonos-bridge
 ```
 
+## Independent Windows package
+
+Build on the development computer:
+
+```powershell
+npm ci
+npm run build:sonos-bridge
+npm run test:sonos-bridge-package
+```
+
+Transfer `dist\sonos-bridge` to the home computer. The generated directory contains one bundled CommonJS runtime, its dependency license notices, a minimal `package.json`, installation/control scripts, and deployment instructions. It has no `node_modules`, TypeScript, frontend, FFmpeg, or secrets.
+
+Before the one-time installation, manually place the existing server configuration at `C:\SACscapeBridge\.env.local`. Run `Install-SACscapeSonosBridge.ps1` from the transferred package in elevated PowerShell. Rerunning the installer is the manual update procedure and never copies or overwrites `.env.local`.
+
 The default listener remains port `3001`; `SONOS_BRIDGE_PORT` may override it. Tailscale/Funnel must continue forwarding the existing public HTTPS origin to that listener. The current Sonos redirect URI and `https://sacscape-server.tail7d5063.ts.net` frontend base do not need to change.
 
 Required server configuration is `SONOS_CLIENT_ID`, `SONOS_CLIENT_SECRET`, and `SONOS_REDIRECT_URI`. `CLIENT_ORIGIN`, `SONOS_BRIDGE_PORT`, and `SACSCAPE_DATA_DIR` remain optional. Existing `.env.local` may remain unchanged.
