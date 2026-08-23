@@ -24,6 +24,12 @@ export class SonosLocalHttpStreamServer {
   constructor(options: LocalStreamServerOptions) {
     this.options = options;
     this.server = net.createServer((socket) => this.handle(socket));
+    this.server.on('error', (error) => {
+      this.options.onDiagnostic('Sonos local stream listener error.', {
+        code: (error as NodeJS.ErrnoException).code ?? null,
+        message: error.message,
+      });
+    });
   }
 
   async listen(): Promise<number> {
@@ -58,6 +64,13 @@ export class SonosLocalHttpStreamServer {
 
   private handle(socket: Socket): void {
     let request = Buffer.alloc(0);
+    socket.on('error', (error) => {
+      this.options.onDiagnostic('Sonos local stream socket error.', {
+        code: (error as NodeJS.ErrnoException).code ?? null,
+        message: error.message,
+        remoteAddress: socket.remoteAddress,
+      });
+    });
     socket.once('data', (chunk) => {
       request = Buffer.concat([request, chunk]);
       const text = request.toString('latin1');
@@ -94,7 +107,13 @@ export class SonosLocalHttpStreamServer {
       });
     });
     socket.setTimeout(5_000, () => {
-      if (this.client !== socket) socket.destroy(new Error('Local stream request timed out.'));
+      if (this.client !== socket) {
+        this.options.onDiagnostic('Sonos local stream request timed out.', {
+          remoteAddress: socket.remoteAddress,
+          timeoutMs: 5_000,
+        });
+        socket.destroy();
+      }
     });
   }
 }

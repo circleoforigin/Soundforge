@@ -46,6 +46,42 @@ test('Research Lab identify route passes only the selected opaque device identit
   }
 });
 
+test('Research Lab explicit refresh forces discovery and returns structured 429 errors', async () => {
+  const forceValues: Array<boolean | undefined> = [];
+  const app = express();
+  registerResearchLabDeviceRoute(app, {
+    async discoverDevices(options) {
+      forceValues.push(options?.forceRefresh);
+      if (forceValues.length === 2) {
+        throw new SonosApiError(429, { reason: 'spike arrest' }, {
+          limit: '10', remaining: '0', reset: '42', retryAfter: '32',
+        });
+      }
+      return [];
+    },
+    async identifyDevice() { return undefined; },
+  });
+  const server = app.listen(0, '127.0.0.1');
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('listening', resolve); server.once('error', reject);
+    });
+    const address = server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}/api/research-lab/devices`;
+    assert.equal((await fetch(base)).status, 200);
+    const limited = await fetch(`${base}?refresh=true`);
+    const body = await limited.json() as { code: string; message: string; diagnostic: unknown };
+    assert.equal(limited.status, 429);
+    assert.equal(body.code, 'SONOS_RATE_LIMITED');
+    assert.match(body.message, /retry after 32 seconds/i);
+    assert.ok(body.diagnostic);
+    assert.deepEqual(forceValues, [false, true]);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test('Research Lab presentation route saves and clears an alias without changing device ID', async () => {
   const deviceId = 'opaque-device-presentation';
   const aliases = new Map<string, string>();

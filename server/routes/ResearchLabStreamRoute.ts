@@ -14,6 +14,22 @@ import {
   ResearchLabStreamService,
   researchLabStreamService,
 } from '../research-lab/ResearchLabStreamService.ts';
+import { SonosTopologyCooldownError } from '../research-lab/SonosAudioDeviceDiscovery.ts';
+import { SonosApiError, SonosTopologyTimeoutError } from '../sonos/SonosClient.ts';
+
+function researchLabStatus(error: unknown): number {
+  if (error instanceof ResearchLabRequestError || error instanceof SonosTopologyCooldownError) {
+    return error.status;
+  }
+  return error instanceof SonosApiError ? error.status : 500;
+}
+
+function researchLabErrorCode(error: unknown): string {
+  if (error instanceof SonosApiError && error.status === 429) return 'SONOS_RATE_LIMITED';
+  if (error instanceof SonosTopologyCooldownError) return 'SONOS_RATE_LIMIT_COOLDOWN';
+  if (error instanceof SonosTopologyTimeoutError) return 'SONOS_TOPOLOGY_TIMEOUT';
+  return 'RESEARCH_LAB_OPERATION_FAILED';
+}
 
 function getPublicBaseUrl(request: Request): string {
   const configuredBaseUrl = process.env.PUBLIC_API_BASE_URL?.trim();
@@ -95,8 +111,9 @@ export function registerResearchLabStreamRoute(
       );
       response.status(201).json({ ok: true, stream });
     } catch (error) {
-      response.status(error instanceof ResearchLabRequestError ? error.status : 500).json({
+      response.status(researchLabStatus(error)).json({
         ok: false,
+        code: researchLabErrorCode(error),
         message: error instanceof Error ? error.message : 'Unable to start continuous stream.',
       });
     }

@@ -65,3 +65,22 @@ test('local stream listener remains available for a sequential startup reconnect
     assert.deepEqual(ordinals, [1, 2]);
   } finally { await server.close(); }
 });
+
+test('local listener handles an expected idle request timeout without an unhandled socket error', async () => {
+  const diagnostics: string[] = [];
+  const server = new SonosLocalHttpStreamServer({
+    streamId: 'stream-timeout', bindAddress: '127.0.0.1',
+    onClient: () => undefined,
+    onDiagnostic: (message) => diagnostics.push(message),
+  });
+  const port = await server.listen();
+  const socket = net.connect(port, '127.0.0.1');
+  try {
+    await new Promise<void>((resolve) => socket.once('connect', resolve));
+    await new Promise<void>((resolve) => socket.once('close', () => resolve()));
+    assert.ok(diagnostics.includes('Sonos local stream request timed out.'));
+  } finally {
+    socket.destroy();
+    await server.close();
+  }
+});

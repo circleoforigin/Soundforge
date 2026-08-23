@@ -6,13 +6,14 @@ import type {
   AudioTransportOption,
 } from '../../src/models/ResearchLab.ts';
 import {
+  SonosApiError,
   SonosClient,
   type SonosGroup,
   type SonosPlayer,
 } from '../sonos/SonosClient.ts';
 import { logSonosError, logSonosInfo } from '../sonos/SonosDiagnosticLog.ts';
 
-interface SonosDiscoveryClient {
+export interface SonosDiscoveryClient {
   getHouseholds(): ReturnType<SonosClient['getHouseholds']>;
   getGroups(householdId: string): ReturnType<SonosClient['getGroups']>;
 }
@@ -39,6 +40,37 @@ export interface ResolvedSonosAudioDevice {
   player: SonosPlayer;
   group: SonosGroup | undefined;
   householdId: string;
+}
+
+export interface SonosTopologySnapshot {
+  fetchedAt: number;
+  devices: readonly AudioDevice[];
+  resolvedByDeviceId: ReadonlyMap<string, ResolvedSonosAudioDevice>;
+  households: readonly { id: string }[];
+  groupsByHousehold: ReadonlyMap<string, Awaited<ReturnType<SonosDiscoveryClient['getGroups']>>>;
+}
+
+export interface SonosTopologyDiagnostics {
+  cacheHits: number;
+  cacheMisses: number;
+  refreshesStarted: number;
+  joinedInflightRefreshes: number;
+  getHouseholdsRequests: number;
+  getGroupsRequests: number;
+  cooldownUntil: number | null;
+}
+
+export const SONOS_TOPOLOGY_CACHE_TTL_MS = 30_000;
+
+export class SonosTopologyCooldownError extends Error {
+  readonly status = 429;
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds: number) {
+    super(`Sonos Cloud temporarily rate limited. Retry available in ${retryAfterSeconds} seconds.`);
+    this.name = 'SonosTopologyCooldownError';
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
 }
 
 function opaqueId(kind: string, providerId: string): string {
@@ -187,62 +219,163 @@ function createAudioDevice(
   };
 }
 
-export async function discoverSonosAudioDevices(
-  client: SonosDiscoveryClient = new SonosClient()
-): Promise<AudioDevice[]> {
-  const households = await client.getHouseholds();
+async function buildTopologySnapshot(
+  client: SonosDiscoveryClient,
+  onHouseholdsRequest?: () => void,
+  onGroupsRequest?: () => void,
+  fetchedAt = Date.now()
+): Promise<SonosTopologySnapshot> {
+  onHouseholdsRequest?.();
+  const householdsResponse = await client.getHouseholds();
   const devices: AudioDevice[] = [];
+  const resolvedByDeviceId = new Map<string, ResolvedSonosAudioDevice>();
+  const groupsByHousehold = new Map<string, Awaited<ReturnType<SonosDiscoveryClient['getGroups']>>>();
 
-  for (const household of households.households) {
+  for (const household of householdsResponse.households) {
+    onGroupsRequest?.();
     const topology = await client.getGroups(household.id);
+    groupsByHousehold.set(household.id, topology);
     for (const player of topology.players) {
       const group = findOwningGroup(topology.groups, player.id);
-      for (const [index, deviceId] of player.deviceIds.entries()) {
-        devices.push(createAudioDevice(household.id, group, player, deviceId, index));
+      for (const [index, physicalDeviceId] of player.deviceIds.entries()) {
+        const device = createAudioDevice(household.id, group, player, physicalDeviceId, index);
+        devices.push(device);
+        resolvedByDeviceId.set(device.id, {
+          device, physicalDeviceId, player, group, householdId: household.id,
+        });
       }
     }
   }
+  return Object.freeze({
+    fetchedAt,
+    devices: Object.freeze(devices),
+    resolvedByDeviceId,
+    households: Object.freeze([...householdsResponse.households]),
+    groupsByHousehold,
+  });
+}
 
-  return devices;
+function cooldownDeadline(error: unknown, now: number): number | null {
+  if (!(error instanceof SonosApiError) || error.status !== 429) {
+    return null;
+  }
+  const retryAfter = error.rateLimit?.retryAfter?.trim();
+  if (retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter)) {
+    return now + Math.max(1, Number(retryAfter)) * 1_000;
+  }
+  if (retryAfter) {
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date) && date > now) return date;
+  }
+  const reset = Number(error.rateLimit?.reset);
+  if (Number.isFinite(reset) && reset > 0) {
+    return reset > now / 1_000 ? reset * 1_000 : now + reset * 1_000;
+  }
+  return now + 60_000;
+}
+
+export class SonosTopologyService {
+  private readonly client: SonosDiscoveryClient;
+  private readonly ttlMs: number;
+  private readonly now: () => number;
+  private snapshot: SonosTopologySnapshot | null = null;
+  private refreshPromise: Promise<SonosTopologySnapshot> | null = null;
+  private cooldownUntil: number | null = null;
+  private readonly counters: Omit<SonosTopologyDiagnostics, 'cooldownUntil'> = {
+    cacheHits: 0, cacheMisses: 0, refreshesStarted: 0,
+    joinedInflightRefreshes: 0, getHouseholdsRequests: 0, getGroupsRequests: 0,
+  };
+
+  constructor(
+    client: SonosDiscoveryClient = new SonosClient(),
+    ttlMs = SONOS_TOPOLOGY_CACHE_TTL_MS,
+    now: () => number = Date.now
+  ) {
+    this.client = client;
+    this.ttlMs = ttlMs;
+    this.now = now;
+  }
+
+  async getSnapshot(options: { forceRefresh?: boolean } = {}): Promise<SonosTopologySnapshot> {
+    const now = this.now();
+    if (this.cooldownUntil && now < this.cooldownUntil) {
+      const seconds = Math.max(1, Math.ceil((this.cooldownUntil - now) / 1_000));
+      logSonosInfo('TOPOLOGY', 'Sonos topology refresh blocked by provider cooldown.', {
+        retryAfterSeconds: seconds,
+      });
+      throw new SonosTopologyCooldownError(seconds);
+    }
+    if (!options.forceRefresh && this.snapshot && now - this.snapshot.fetchedAt < this.ttlMs) {
+      this.counters.cacheHits += 1;
+      logSonosInfo('TOPOLOGY', 'Sonos topology cache hit.', this.getDiagnostics());
+      return this.snapshot;
+    }
+    if (this.refreshPromise) {
+      this.counters.joinedInflightRefreshes += 1;
+      logSonosInfo('TOPOLOGY', 'Joined in-flight Sonos topology refresh.', this.getDiagnostics());
+      return this.refreshPromise;
+    }
+    this.counters.cacheMisses += 1;
+    this.counters.refreshesStarted += 1;
+    logSonosInfo('TOPOLOGY', 'Sonos topology refresh started.', {
+      forceRefresh: Boolean(options.forceRefresh),
+      diagnostics: this.getDiagnostics(),
+    });
+    const refresh = buildTopologySnapshot(
+      this.client,
+      () => { this.counters.getHouseholdsRequests += 1; },
+      () => { this.counters.getGroupsRequests += 1; },
+      now
+    ).then((snapshot) => {
+      this.snapshot = snapshot;
+      this.cooldownUntil = null;
+      return snapshot;
+    }).catch((error) => {
+      const deadline = cooldownDeadline(error, this.now());
+      if (deadline) this.cooldownUntil = deadline;
+      throw error;
+    }).finally(() => {
+      if (this.refreshPromise === refresh) this.refreshPromise = null;
+    });
+    this.refreshPromise = refresh;
+    return refresh;
+  }
+
+  getDiagnostics(): SonosTopologyDiagnostics {
+    return { ...this.counters, cooldownUntil: this.cooldownUntil };
+  }
+}
+
+export const sonosTopologyService = new SonosTopologyService();
+
+export async function discoverSonosAudioDevices(
+  client: SonosDiscoveryClient = new SonosClient()
+): Promise<AudioDevice[]> {
+  return [...(await buildTopologySnapshot(client)).devices];
+}
+
+export async function getSonosAudioDevices(
+  options: { forceRefresh?: boolean } = {}
+): Promise<AudioDevice[]> {
+  return [...(await sonosTopologyService.getSnapshot(options)).devices];
 }
 
 
 export async function resolveSonosAudioDevice(
   genericDeviceId: string,
-  client: SonosDiscoveryClient = new SonosClient()
+  client?: SonosDiscoveryClient
 ): Promise<ResolvedSonosAudioDevice | undefined> {
-  const households = await client.getHouseholds();
-  for (const household of households.households) {
-    const topology = await client.getGroups(household.id);
-    for (const player of topology.players) {
-      const group = findOwningGroup(topology.groups, player.id);
-      for (const [index, physicalDeviceId] of player.deviceIds.entries()) {
-        const device = createAudioDevice(
-          household.id,
-          group,
-          player,
-          physicalDeviceId,
-          index
-        );
-        if (device.id === genericDeviceId) {
-          return {
-            device,
-            physicalDeviceId,
-            player,
-            group,
-            householdId: household.id,
-          };
-        }
-      }
-    }
-  }
-  return undefined;
+  const snapshot = client
+    ? await buildTopologySnapshot(client)
+    : await sonosTopologyService.getSnapshot();
+  return snapshot.resolvedByDeviceId.get(genericDeviceId);
 }
 
 export async function identifySonosAudioDevice(
   genericDeviceId: string,
-  client: SonosIdentificationClient = new SonosClient()
+  client?: SonosIdentificationClient
 ): Promise<void> {
+  const actionClient = client ?? new SonosClient();
   const attempt = {
     timestamp: new Date().toISOString(),
     genericDeviceId,
@@ -277,7 +410,7 @@ export async function identifySonosAudioDevice(
       );
     }
 
-    await client.playTestTone(resolved.physicalDeviceId);
+    await actionClient.playTestTone(resolved.physicalDeviceId);
     logSonosInfo('AUDIO_CLIP', 'Research Lab Identify Speaker succeeded.', {
       ...attempt,
       succeededAt: new Date().toISOString(),

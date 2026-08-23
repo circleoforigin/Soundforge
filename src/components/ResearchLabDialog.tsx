@@ -115,6 +115,19 @@ async function readFailure(response: Response, fallback: string): Promise<string
   }
 }
 
+async function describeResearchLabFailure(error: unknown, operation: string): Promise<string> {
+  if (!(error instanceof TypeError)) return sanitizedErrorMessage(error);
+  try {
+    const health = await fetch(apiUrl('/api/health'));
+    if (health.ok) {
+      return `Backend reachable; ${operation} failed before receiving an API response.`;
+    }
+    return `Backend health check also failed (${health.status}).`;
+  } catch {
+    return 'Backend health check also failed.';
+  }
+}
+
 function TransportRow({
   device,
   transport,
@@ -499,12 +512,14 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
       && transport.availability !== 'unavailable')
   ), [devices]);
 
-  const refreshDevices = useCallback(async () => {
+  const refreshDevices = useCallback(async (forceRefresh = false) => {
     setDiscovering(true);
     setDiscoveryError(null);
     setDiscoveryWarning(null);
     try {
-      const response = await fetch(apiUrl('/api/research-lab/devices'));
+      const response = await fetch(apiUrl(
+        `/api/research-lab/devices${forceRefresh ? '?refresh=true' : ''}`
+      ));
       if (!response.ok) {
         throw new Error(await readFailure(response, 'Unable to discover audio devices.'));
       }
@@ -516,7 +531,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
         ? normalized.warnings.join(' ')
         : null);
     } catch (error) {
-      setDiscoveryError(error instanceof Error ? error.message : 'Unable to discover audio devices.');
+      setDiscoveryError(await describeResearchLabFailure(error, 'Research Lab device discovery'));
     } finally {
       setDiscovering(false);
     }
@@ -537,7 +552,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void refreshDevices();
+      void refreshDevices(false);
       void refreshStreams();
     }, 0);
     return () => window.clearTimeout(timer);
@@ -603,7 +618,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
       }
       void refreshStreams();
     } catch (error) {
-      setMultiError(error instanceof Error ? error.message : 'Multi-speaker operation failed.');
+      setMultiError(await describeResearchLabFailure(error, 'the multi-speaker operation'));
     } finally { setMultiBusy(null); }
   }
 
@@ -627,7 +642,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
       const data = await response.json() as AudioStreamSnapshotResponse;
       setStreams((current) => [data.stream, ...current.filter((item) => item.id !== data.stream.id)]);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Unable to start stream.');
+      setActionError(await describeResearchLabFailure(error, 'continuous-stream startup'));
     } finally {
       setStartingKey(null);
     }
@@ -776,7 +791,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
                 <h3>Audio Devices</h3>
                 <p>Choose a physical device and an available experimental transport.</p>
               </div>
-              <button disabled={discovering} onClick={() => void refreshDevices()}>
+              <button disabled={discovering} onClick={() => void refreshDevices(true)}>
                 {discovering ? 'Discovering…' : 'Refresh Devices'}
               </button>
             </div>

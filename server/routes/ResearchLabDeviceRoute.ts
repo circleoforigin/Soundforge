@@ -11,20 +11,26 @@ import {
 } from '../research-lab/AudioDevicePresentationStore.ts';
 import {
   discoverSonosAudioDevices,
+  getSonosAudioDevices,
   identifySonosAudioDevice,
   SonosDeviceIdentificationError,
+  SonosTopologyCooldownError,
 } from '../research-lab/SonosAudioDeviceDiscovery.ts';
-import { getSonosErrorCode, SonosApiError } from '../sonos/SonosClient.ts';
+import {
+  getSonosErrorCode,
+  SonosApiError,
+  SonosTopologyTimeoutError,
+} from '../sonos/SonosClient.ts';
 import { logSonosError } from '../sonos/SonosDiagnosticLog.ts';
 
 interface ResearchLabDeviceRouteDependencies {
-  discoverDevices: typeof discoverSonosAudioDevices;
+  discoverDevices: (options?: { forceRefresh?: boolean }) => Promise<Awaited<ReturnType<typeof discoverSonosAudioDevices>>>;
   identifyDevice: typeof identifySonosAudioDevice;
   presentationStore?: Pick<AudioDevicePresentationStore, 'apply' | 'setAlias'>;
 }
 
 const defaultDependencies: ResearchLabDeviceRouteDependencies = {
-  discoverDevices: discoverSonosAudioDevices,
+  discoverDevices: getSonosAudioDevices,
   identifyDevice: identifySonosAudioDevice,
   presentationStore: audioDevicePresentationStore,
 };
@@ -52,9 +58,11 @@ export function registerResearchLabDeviceRoute(
   const presentationStore =
     dependencies.presentationStore ?? audioDevicePresentationStore;
 
-  app.get('/api/research-lab/devices', async (_request, response) => {
+  app.get('/api/research-lab/devices', async (request, response) => {
     try {
-      const devices = await dependencies.discoverDevices();
+      const devices = await dependencies.discoverDevices({
+        forceRefresh: request.query.refresh === 'true',
+      });
       const result: AudioDeviceDiscoveryResponse = {
         ok: true,
         devices: await presentationStore.apply(devices),
@@ -62,11 +70,27 @@ export function registerResearchLabDeviceRoute(
       response.json(result);
     } catch (error) {
       logSonosError('Research Lab Sonos device discovery failed.', error);
-      response.status(500).json({
+      const status = error instanceof SonosApiError
+        ? error.status
+        : error instanceof SonosTopologyCooldownError
+          ? error.status
+          : 500;
+      response.status(status).json({
         ok: false,
+        code: error instanceof SonosApiError && error.status === 429
+          ? 'SONOS_RATE_LIMITED'
+          : error instanceof SonosTopologyCooldownError
+            ? 'SONOS_RATE_LIMIT_COOLDOWN'
+            : error instanceof SonosTopologyTimeoutError
+              ? 'SONOS_TOPOLOGY_TIMEOUT'
+              : 'DISCOVERY_FAILED',
         message: error instanceof Error
           ? error.message
           : 'Unable to discover audio devices.',
+        diagnostic: error instanceof SonosApiError ? {
+          httpStatus: error.status,
+          rateLimit: error.rateLimit,
+        } : undefined,
       });
     }
   });

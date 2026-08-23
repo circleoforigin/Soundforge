@@ -7,6 +7,14 @@ import { rememberAudioClip } from './SonosAudioClipDiagnostics.ts';
 
 const SONOS_API_BASE =
   'https://api.ws.sonos.com/control/api/v1';
+export const SONOS_TOPOLOGY_REQUEST_TIMEOUT_MS = 7_500;
+
+export interface SonosRateLimitMetadata {
+  limit: string | null;
+  remaining: string | null;
+  reset: string | null;
+  retryAfter: string | null;
+}
 
 export interface SonosHousehold {
   id: string;
@@ -53,15 +61,28 @@ export interface SonosGroupStreamTestResult {
 export class SonosApiError extends Error {
   status: number;
   details: unknown;
+  rateLimit: SonosRateLimitMetadata | null;
 
   constructor(
     status: number,
-    details: unknown
+    details: unknown,
+    rateLimit: SonosRateLimitMetadata | null = null
   ) {
-    super(`Sonos request failed: ${status}`);
+    const retrySeconds = rateLimit?.retryAfter;
+    super(status === 429
+      ? `Sonos Cloud rate limit reached.${retrySeconds ? ` Retry after ${retrySeconds} seconds.` : ''}`
+      : `Sonos request failed: ${status}`);
     this.name = 'SonosApiError';
     this.status = status;
     this.details = details;
+    this.rateLimit = rateLimit;
+  }
+}
+
+export class SonosTopologyTimeoutError extends Error {
+  constructor(operation: string, timeoutMs: number) {
+    super(`Sonos Cloud ${operation} request timed out after ${timeoutMs} ms.`);
+    this.name = 'SonosTopologyTimeoutError';
   }
 }
 
@@ -79,76 +100,90 @@ export function getSonosErrorCode(details: unknown): string | null {
 }
 
 export class SonosClient {
+  private readonly topologyFetch: typeof fetch;
+  private readonly topologyTimeoutMs: number;
+  private readonly accessTokenProvider: () => Promise<string>;
+
+  constructor(options: {
+    fetch?: typeof fetch;
+    topologyTimeoutMs?: number;
+    accessTokenProvider?: () => Promise<string>;
+  } = {}) {
+    this.topologyFetch = options.fetch ?? fetch;
+    this.topologyTimeoutMs = options.topologyTimeoutMs ?? SONOS_TOPOLOGY_REQUEST_TIMEOUT_MS;
+    this.accessTokenProvider = options.accessTokenProvider ?? getValidSonosAccessToken;
+  }
+
   private async getAccessToken(): Promise<string> {
-    return getValidSonosAccessToken();
+    return this.accessTokenProvider();
+  }
+
+  private async topologyRequest<T>(url: string, operation: string): Promise<T> {
+    const accessToken = await this.getAccessToken();
+    let response: Response;
+    try {
+      response = await this.topologyFetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        signal: AbortSignal.timeout(this.topologyTimeoutMs),
+      });
+    } catch (error) {
+      if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+        const timeout = new SonosTopologyTimeoutError(operation, this.topologyTimeoutMs);
+        logSonosError(`Sonos ${operation} timed out.`, { timeoutMs: this.topologyTimeoutMs });
+        throw timeout;
+      }
+      throw new Error(
+        `Sonos Cloud ${operation} request failed before receiving a response: ` +
+        `${error instanceof Error ? error.message : 'network error'}.`,
+        { cause: error }
+      );
+    }
+    const responseText = await response.text();
+    let data: unknown = null;
+    if (responseText) {
+      try { data = JSON.parse(responseText); } catch { data = responseText; }
+    }
+    const rateLimit: SonosRateLimitMetadata = {
+      limit: response.headers.get('RateLimit-Limit'),
+      remaining: response.headers.get('RateLimit-Remaining'),
+      reset: response.headers.get('RateLimit-Reset'),
+      retryAfter: response.headers.get('Retry-After'),
+    };
+    logSonosInfo('TOPOLOGY', `Sonos ${operation} response.`, {
+      httpStatus: response.status,
+      rateLimit,
+    });
+    if (!response.ok) {
+      logSonosError(`Sonos ${operation} failed.`, {
+        httpStatus: response.status,
+        rateLimit,
+        responseBody: data,
+      });
+      throw new SonosApiError(response.status, data, rateLimit);
+    }
+    return data as T;
   }
 
   async getHouseholds():
     Promise<SonosHouseholdsResponse> {
-    const accessToken =
-      await this.getAccessToken();
-
-    const response =
-      await fetch(
-        `${SONOS_API_BASE}/households`,
-        {
-          headers: {
-            Authorization:
-              `Bearer ${accessToken}`,
-
-            'Content-Type':
-              'application/json',
-          },
-        }
-      );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      logSonosError('Sonos getHouseholds failed.', data);
-
-      throw new Error(
-        `Sonos request failed: ${response.status}`
-      );
-    }
-
-    return data as SonosHouseholdsResponse;
+    return this.topologyRequest<SonosHouseholdsResponse>(
+      `${SONOS_API_BASE}/households`,
+      'getHouseholds'
+    );
   }
 
   async getGroups(
   householdId: string
 ): Promise<SonosGroupsResponse> {
-  const accessToken =
-    await this.getAccessToken();
-
-  const response =
-    await fetch(
+  return this.topologyRequest<SonosGroupsResponse>(
       `${SONOS_API_BASE}/households/${encodeURIComponent(
         householdId
       )}/groups`,
-      {
-        headers: {
-          Authorization:
-            `Bearer ${accessToken}`,
-
-          'Content-Type':
-            'application/json',
-        },
-      }
+      'getGroups'
     );
-
-  const data =
-    await response.json();
-
-  if (!response.ok) {
-    logSonosError('Sonos getGroups failed.', data);
-
-    throw new Error(
-      `Sonos request failed: ${response.status}`
-    );
-  }
-
-  return data as SonosGroupsResponse;
 }
 
   async resolveLogicalPlayerForDevices(

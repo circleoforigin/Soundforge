@@ -2,6 +2,8 @@ import { json, type Express, type Request, type Response } from 'express';
 
 import { MultiSpeakerSessionService } from '../research-lab/MultiSpeakerSessionService.ts';
 import { ResearchLabRequestError, researchLabStreamService } from '../research-lab/ResearchLabStreamService.ts';
+import { SonosTopologyCooldownError } from '../research-lab/SonosAudioDeviceDiscovery.ts';
+import { SonosApiError, SonosTopologyTimeoutError } from '../sonos/SonosClient.ts';
 
 const multiSpeakerSessionService = new MultiSpeakerSessionService(researchLabStreamService);
 
@@ -12,8 +14,21 @@ function publicBaseUrl(request: Request): string {
 }
 
 function sendError(response: Response, error: unknown): void {
-  response.status(error instanceof ResearchLabRequestError ? error.status : 500).json({
-    ok: false, message: error instanceof Error ? error.message : 'Multi-speaker operation failed.',
+  const status = error instanceof ResearchLabRequestError || error instanceof SonosTopologyCooldownError
+    ? error.status
+    : error instanceof SonosApiError
+      ? error.status
+      : 500;
+  response.status(status).json({
+    ok: false,
+    code: error instanceof SonosApiError && error.status === 429
+      ? 'SONOS_RATE_LIMITED'
+      : error instanceof SonosTopologyCooldownError
+        ? 'SONOS_RATE_LIMIT_COOLDOWN'
+        : error instanceof SonosTopologyTimeoutError
+          ? 'SONOS_TOPOLOGY_TIMEOUT'
+          : 'MULTI_SPEAKER_OPERATION_FAILED',
+    message: error instanceof Error ? error.message : 'Multi-speaker operation failed.',
   });
 }
 

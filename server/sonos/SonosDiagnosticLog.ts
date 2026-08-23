@@ -5,6 +5,7 @@ export type SonosLogCategory =
   | 'AUDIO_CLIP'
   | 'GROUP_PLAYBACK'
   | 'MEDIA'
+  | 'TOPOLOGY'
   | 'ERROR';
 
 let writeQueue = Promise.resolve();

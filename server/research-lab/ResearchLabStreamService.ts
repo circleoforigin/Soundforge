@@ -14,7 +14,7 @@ import {
 } from '../audio/ContinuousAudioStreamManager.ts';
 import { sonosCloudContinuousStreamTransport } from '../sonos/SonosCloudContinuousStreamTransport.ts';
 import { sonosLocalContinuousStreamTransport } from '../sonos/SonosLocalContinuousStreamTransport.ts';
-import { discoverSonosAudioDevices } from './SonosAudioDeviceDiscovery.ts';
+import { getSonosAudioDevices } from './SonosAudioDeviceDiscovery.ts';
 
 interface ActiveTransportBinding {
   transport: ContinuousStreamTransport;
@@ -52,7 +52,7 @@ export class ResearchLabStreamService {
   constructor(
     manager: ContinuousAudioStreamManager,
     registry: ContinuousStreamTransportRegistry,
-    discoverDevices: () => Promise<AudioDevice[]> = discoverSonosAudioDevices
+    discoverDevices: () => Promise<AudioDevice[]> = getSonosAudioDevices
   ) {
     this.manager = manager;
     this.registry = registry;

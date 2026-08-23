@@ -11,6 +11,7 @@ import {
   multiSpeakerMigrationFrequencyHz,
 } from './MultiSpeakerSessionService.ts';
 import type { ResearchLabStreamService } from './ResearchLabStreamService.ts';
+import { SonosTopologyService } from './SonosAudioDeviceDiscovery.ts';
 
 function device(id: string, eligible = true): AudioDevice {
   return { id, provider: 'sonos', name: id,
@@ -61,6 +62,50 @@ test('rejects duplicate and ineligible multi-speaker selections', async () => {
   const { service } = harness([a, bonded]);
   await assert.rejects(service.create(a.id, a.id, () => 'unused'), /must be different/i);
   await assert.rejects(service.create(a.id, bonded.id, () => 'unused'), /not independently targetable/i);
+});
+
+test('Start Both reuses one Sonos topology refresh across validation and participant startup', async () => {
+  let upstreamRequests = 0;
+  const topology = new SonosTopologyService({
+    async getHouseholds() {
+      upstreamRequests += 1;
+      return { households: [{ id: 'home' }] };
+    },
+    async getGroups() {
+      upstreamRequests += 1;
+      return {
+        groups: [
+          { id: 'group-a', name: 'A', playerIds: ['player-a'] },
+          { id: 'group-b', name: 'B', playerIds: ['player-b'] },
+        ],
+        players: [
+          { id: 'player-a', name: 'A', deviceIds: ['physical-a'], capabilities: ['PLAYBACK'] },
+          { id: 'player-b', name: 'B', deviceIds: ['physical-b'], capabilities: ['PLAYBACK'] },
+        ],
+      };
+    },
+  });
+  const getDevices = async () => [...(await topology.getSnapshot()).devices];
+  const manager = new ContinuousAudioStreamManager();
+  const fake = {
+    manager,
+    async start(deviceId: string) {
+      await getDevices();
+      await topology.getSnapshot();
+      return manager.create({ deviceId, transportId: 'sonos-local-continuous' }).getSnapshot();
+    },
+  };
+  const devices = await getDevices();
+  const service = new MultiSpeakerSessionService(
+    fake as unknown as ResearchLabStreamService,
+    getDevices
+  );
+  await service.create(devices[0].id, devices[1].id, () => 'unused');
+  assert.equal(upstreamRequests, 2,
+    'one household should require one getHouseholds and one getGroups request total');
+  assert.equal(topology.getDiagnostics().refreshesStarted, 1);
+  assert.ok(topology.getDiagnostics().cacheHits >= 5);
+  manager.stopAll('topology reuse test cleanup');
 });
 
 test('session owns two runtimes and schedules simultaneous and alternating events', async () => {

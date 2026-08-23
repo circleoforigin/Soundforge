@@ -9,7 +9,7 @@ import type {
   MultiSpeakerTeardownSummary,
 } from '../../src/models/ResearchLab.ts';
 import { ResearchLabRequestError, ResearchLabStreamService } from './ResearchLabStreamService.ts';
-import { discoverSonosAudioDevices } from './SonosAudioDeviceDiscovery.ts';
+import { getSonosAudioDevices } from './SonosAudioDeviceDiscovery.ts';
 
 export const multiSpeakerEventLeadMs = 400;
 export const multiSpeakerAlternatingIntervalMs = 3_000;
@@ -41,7 +41,7 @@ export class MultiSpeakerSessionService {
 
   constructor(
     streamService: ResearchLabStreamService,
-    discoverDevices: () => Promise<AudioDevice[]> = discoverSonosAudioDevices
+    discoverDevices: () => Promise<AudioDevice[]> = getSonosAudioDevices
   ) {
     this.streamService = streamService;
     this.discoverDevices = discoverDevices;
@@ -222,7 +222,7 @@ export class MultiSpeakerSessionService {
     };
     session.stopping = false;
     session.stopped = true;
-    this.record(session, 'Multi-speaker session stopped.', session.teardown);
+    this.record(session, 'Multi-speaker session stopped.', { ...session.teardown });
     return this.snapshot(session);
   }
 
