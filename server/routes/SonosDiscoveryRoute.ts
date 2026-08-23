@@ -6,9 +6,7 @@ import {
 } from '../sonos/SonosClient.ts';
 import { logSonosError } from '../sonos/SonosDiagnosticLog.ts';
 
-export function registerSonosDiscoveryRoute(
-  app: Express
-) {
+export function registerSonosTopologyRoutes(app: Express): void {
   app.get(
     '/api/sonos/households',
     async (_request, response) => {
@@ -69,6 +67,9 @@ export function registerSonosDiscoveryRoute(
     }
   );
 
+}
+
+export function registerSonosTestToneRoute(app: Express): void {
   app.post(
     '/api/sonos/test-tone/:playerId',
     async (request, response) => {
@@ -106,6 +107,9 @@ export function registerSonosDiscoveryRoute(
     }
   );
 
+}
+
+export function registerLegacySonosAudioClipRoutes(app: Express): void {
   app.post(
     '/api/sonos/resolve-logical-player',
     json(),
@@ -217,4 +221,10 @@ export function registerSonosDiscoveryRoute(
       }
     }
   );
+}
+
+export function registerSonosDiscoveryRoute(app: Express): void {
+  registerSonosTopologyRoutes(app);
+  registerSonosTestToneRoute(app);
+  registerLegacySonosAudioClipRoutes(app);
 }

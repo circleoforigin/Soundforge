@@ -26,7 +26,7 @@ import ResearchLabDialog from './components/ResearchLabDialog';
 import SettingsDialog from './components/SettingsDialog';
 import DiagnosticLogDialog from './components/DiagnosticLogDialog';
 import { DEFAULT_APP_SETTINGS, type AppSettings } from './models/AppSettings';
-import { apiUrl } from './config/api';
+import { runtimeUrl } from './config/runtime';
 import { speakerMapRepository } from './speakers/SpeakerMapRepository';
 import { projectRepository } from './projects/ProjectRepository';
 
@@ -114,7 +114,7 @@ useEffect(() => {
 }, []);
 
 useEffect(() => {
-  void fetch(apiUrl('/api/settings'))
+  void fetch(runtimeUrl('/api/settings'))
     .then((response) => response.ok ? response.json() as Promise<AppSettings> : Promise.reject())
     .then(setAppSettings)
     .catch(() => undefined);
@@ -125,7 +125,7 @@ async function handleSettingsChange(settings: AppSettings) {
   setAppSettings(settings);
   setSavingSettings(true);
   try {
-    const response = await fetch(apiUrl('/api/settings'), {
+    const response = await fetch(runtimeUrl('/api/settings'), {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings),
     });
     if (!response.ok) throw new Error();

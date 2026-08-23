@@ -7,7 +7,7 @@ import {
 
 import type { Room } from '../models/Room';
 import type {SpeakerMap} from '../models/SpeakerMap';
-import { apiUrl } from '../config/api';
+import { sonosBridgeUrl } from '../config/api';
 
 interface RoomManagerDialogProps {
   rooms: Room[];
@@ -176,7 +176,7 @@ function RoomManagerDialog({
 
     try {
       const householdsResponse = await fetch(
-        apiUrl('/api/sonos/households'),
+        sonosBridgeUrl('/api/sonos/households'),
         { signal: abortController.signal }
       );
       const householdsData = await householdsResponse.json() as {
@@ -207,7 +207,7 @@ function RoomManagerDialog({
       const discoveredHouseholds = await Promise.all(
         households.map(async (household) => {
           const groupsResponse = await fetch(
-            apiUrl(
+            sonosBridgeUrl(
               `/api/sonos/households/${encodeURIComponent(household.id)}/groups`
             ),
             { signal: abortController.signal }
@@ -244,9 +244,11 @@ function RoomManagerDialog({
 
       setSonosDiscovery({
         status: 'error',
-        message: error instanceof Error
+        message: error instanceof TypeError
+          ? 'Sonos Cloud services are unavailable. The local Room Audio runtime is unaffected.'
+          : error instanceof Error
           ? error.message
-          : 'Unable to discover Sonos devices.',
+          : 'Sonos Cloud services are unavailable.',
       });
     } finally {
       if (sonosDiscoveryAbortRef.current === abortController) {
@@ -577,7 +579,7 @@ function RoomManagerDialog({
 
   function handleConnectSonos() {
     const popup = window.open(
-        apiUrl('/api/sonos/login'),
+        sonosBridgeUrl('/api/sonos/login'),
         'sonos-auth',
         'width=600,height=750'
     );
@@ -690,7 +692,7 @@ function RoomManagerDialog({
 
     try {
       const response = await fetch(
-        apiUrl(`/api/sonos/test-tone/${encodeURIComponent(playerId)}`),
+        sonosBridgeUrl(`/api/sonos/test-tone/${encodeURIComponent(playerId)}`),
         { method: 'POST' }
       );
       const responseText = await response.text();

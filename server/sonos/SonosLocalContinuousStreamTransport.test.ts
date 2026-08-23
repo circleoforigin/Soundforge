@@ -65,3 +65,22 @@ test('local transport refuses bonded physical components without coordinator red
     updateTransport: () => undefined, addDiagnostic: () => undefined, terminate: () => undefined,
   }), /standalone physical player/i);
 });
+
+test('direct physical-device start uses LAN discovery without Sonos Cloud resolution', async () => {
+  let cloudResolutionCalls = 0;
+  const actions: string[] = [];
+  const transport = new SonosLocalContinuousStreamTransport(
+    async () => { cloudResolutionCalls += 1; return undefined; },
+    async (id) => ({ physicalDeviceId: id, address: '127.0.0.1', descriptionUrl: 'http://127.0.0.1/device.xml', avTransportControlUrl: 'http://127.0.0.1:1400/av' }),
+    { async setStreamUri() { actions.push('set'); }, async play() { actions.push('play'); }, async stop() { actions.push('stop'); } }
+  );
+  const resolved = fixture();
+  const context = {
+    device: resolved.device, transport: resolved.device.transports[0], streamId: 'room-endpoint', streamUrl: '',
+    bindHttpClient: () => undefined, updateTransport: () => undefined,
+    addDiagnostic: () => undefined, terminate: () => undefined,
+  };
+  const binding = await transport.startPhysicalDevice(context, 'RINCON_PLAY1', 'Office');
+  assert.equal(cloudResolutionCalls, 0); assert.deepEqual(actions, ['set', 'play']);
+  await transport.stop(binding); assert.equal(actions.at(-1), 'stop');
+});

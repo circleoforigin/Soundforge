@@ -194,6 +194,19 @@ export class LocalSoundLibraryService {
     );
   }
 
+  async readManagedAsset(asset: SoundAsset): Promise<File> {
+    if (asset.source.type !== 'local') {
+      throw new Error('Only managed local assets can be read from the SACscape Library folder.');
+    }
+    const handle = this.directoryHandle ?? await this.handleStore.load();
+    if (!handle || !await this.ensurePermission(handle, true)) {
+      throw new Error('SACscape Library folder permission is required to synchronize this sound.');
+    }
+    this.directoryHandle = handle;
+    this.manifestRepository.setDirectoryHandle(handle);
+    return new FileSystemAssetStorageProvider(handle).readAudio(asset.source.path);
+  }
+
   private async mergeDirectoryManifest(): Promise<void> {
     const cached = await this.manifestRepository.load();
     const directoryManifest =

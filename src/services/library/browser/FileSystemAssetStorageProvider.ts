@@ -42,6 +42,10 @@ export class FileSystemAssetStorageProvider
   }
 
   async resolveAudio(path: string): Promise<string> {
+    return URL.createObjectURL(await this.readAudio(path));
+  }
+
+  async readAudio(path: string): Promise<File> {
     const [directoryName, fileName] = path.split('/');
 
     if (directoryName !== 'Audio' || !fileName) {
@@ -52,7 +56,7 @@ export class FileSystemAssetStorageProvider
       directoryName
     );
     const fileHandle = await audioDirectory.getFileHandle(fileName);
-    return URL.createObjectURL(await fileHandle.getFile());
+    return fileHandle.getFile();
   }
 
   async deleteAudio(assetId: string): Promise<void> {

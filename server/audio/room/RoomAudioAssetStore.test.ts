@@ -39,3 +39,37 @@ test('Room Audio asset decode telemetry distinguishes miss from cache hit', asyn
   const first = await store.decodeWithTelemetry('wolf'); const second = await store.decodeWithTelemetry('wolf');
   assert.equal(first.cacheHit, false); assert.equal(second.cacheHit, true); assert.equal(first.asset, second.asset);
 });
+
+test('validated synchronization preserves binary bytes exactly and reuses its validation cache', async (t) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'room-audio-binary-'));
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const store = new RoomAudioAssetStore(root); const source = pcmWav();
+  const stored = await store.put('exact', source);
+  assert.match(stored.validationResult, /ffmpeg-probe-ok/);
+  assert.deepEqual(await fs.promises.readFile(path.join(root, 'exact.media')), source);
+  const first = await store.inspect('exact'); const second = await store.inspect('exact');
+  assert.equal(first.valid, true); assert.equal(second.cacheHit, true);
+});
+
+test('corrupt cached media is invalidated and replaced by a valid asset', async (t) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'room-audio-repair-'));
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  await fs.promises.writeFile(path.join(root, 'wolf.media'), '<!doctype html><html>not audio</html>');
+  const store = new RoomAudioAssetStore(root);
+  const invalid = await store.inspect('wolf');
+  assert.equal(invalid.valid, false); assert.match(invalid.validationResult, /not an audio/i);
+  assert.equal(await store.has('wolf'), false);
+  const replacement = await store.put('wolf', pcmWav());
+  assert.equal(replacement.invalidCacheReplaced, true);
+  assert.equal((await store.inspect('wolf')).valid, true);
+  assert.ok((await store.decode('wolf')).durationSamples > 0);
+});
+
+test('zero-byte and non-audio uploads are rejected without creating a cache hit', async (t) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'room-audio-reject-'));
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const store = new RoomAudioAssetStore(root);
+  await assert.rejects(store.put('empty', Buffer.alloc(0)), /empty/i);
+  await assert.rejects(store.put('html', Buffer.from('<!doctype html><html>SPA</html>')), /not an audio/i);
+  assert.equal(await store.has('empty'), false); assert.equal(await store.has('html'), false);
+});

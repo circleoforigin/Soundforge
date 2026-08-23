@@ -6,6 +6,8 @@ export interface SonosLocalDevice {
   address: string;
   descriptionUrl: string;
   avTransportControlUrl: string;
+  name?: string;
+  model?: string;
 }
 
 function xmlValue(xml: string, name: string): string | undefined {
@@ -25,6 +27,8 @@ export function parseSonosDeviceDescription(xml: string, descriptionUrl: string)
     address: base.hostname,
     descriptionUrl,
     avTransportControlUrl: new URL(controlUrl, base).toString(),
+    ...(xmlValue(xml, 'roomName') || xmlValue(xml, 'friendlyName') ? { name: xmlValue(xml, 'roomName') ?? xmlValue(xml, 'friendlyName') } : {}),
+    ...(xmlValue(xml, 'modelName') ? { model: xmlValue(xml, 'modelName') } : {}),
   };
 }
 
@@ -32,10 +36,9 @@ function locationsFromResponse(message: Buffer): string | undefined {
   return message.toString('utf8').match(/^location:\s*(.+)$/im)?.[1]?.trim();
 }
 
-export async function discoverLocalSonosDevice(
-  physicalDeviceId: string,
+export async function discoverLocalSonosDevices(
   timeoutMs = 1_800
-): Promise<SonosLocalDevice | undefined> {
+): Promise<SonosLocalDevice[]> {
   const addresses = Object.values(os.networkInterfaces()).flatMap((entries) =>
     (entries ?? []).filter((entry) => entry.family === 'IPv4' && !entry.internal).map((entry) => entry.address)
   );
@@ -65,15 +68,23 @@ export async function discoverLocalSonosDevice(
     });
   })));
 
+  const devices: SonosLocalDevice[] = [];
   for (const location of locations) {
     try {
       const response = await fetch(location, { signal: AbortSignal.timeout(2_500) });
       if (!response.ok) continue;
       const device = parseSonosDeviceDescription(await response.text(), location);
-      if (device?.physicalDeviceId === physicalDeviceId) return device;
+      if (device && !devices.some((item) => item.physicalDeviceId === device.physicalDeviceId)) devices.push(device);
     } catch {
       // A stale or unreachable SSDP response must not prevent checking other devices.
     }
   }
-  return undefined;
+  return devices;
+}
+
+export async function discoverLocalSonosDevice(
+  physicalDeviceId: string,
+  timeoutMs = 1_800
+): Promise<SonosLocalDevice | undefined> {
+  return (await discoverLocalSonosDevices(timeoutMs)).find((device) => device.physicalDeviceId === physicalDeviceId);
 }

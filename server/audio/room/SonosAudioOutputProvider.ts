@@ -2,9 +2,9 @@ import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { RoomAudioEndpoint } from '../../../src/models/RoomAudio.ts';
 import { ContinuousAudioStreamManager } from '../ContinuousAudioStreamManager.ts';
-import type { ContinuousStreamTransportBinding } from '../transports/ContinuousStreamTransport.ts';
-import { resolveSonosPhysicalDevice } from '../../research-lab/SonosAudioDeviceDiscovery.ts';
+import type { ContinuousStreamTransportBinding, ContinuousStreamTransportContext } from '../transports/ContinuousStreamTransport.ts';
 import { sonosLocalContinuousStreamTransport } from '../../sonos/SonosLocalContinuousStreamTransport.ts';
+import type { AudioDevice, AudioTransportOption } from '../../../src/models/ResearchLab.ts';
 import type { AudioEndpointConnection, AudioOutputProvider } from './AudioOutputProvider.ts';
 
 export class SonosAudioOutputProvider implements AudioOutputProvider {
@@ -15,16 +15,23 @@ export class SonosAudioOutputProvider implements AudioOutputProvider {
     endpoint: RoomAudioEndpoint,
     callbacks: { onFailure?: (error: Error) => void } = {}
   ): Promise<AudioEndpointConnection> {
-    const resolved = await resolveSonosPhysicalDevice(endpoint.deviceId);
-    if (!resolved) throw new Error(`Sonos physical device is not currently discovered: ${endpoint.displayName}`);
-    const transportOption = resolved.device.transports.find((item) => item.id === sonosLocalContinuousStreamTransport.id);
-    if (!transportOption || transportOption.availability === 'unavailable') {
-      throw new Error(transportOption?.limitation ?? 'Sonos local continuous transport is unavailable.');
-    }
+    const transportOption: AudioTransportOption = {
+      id: sonosLocalContinuousStreamTransport.id, name: 'Sonos local continuous stream',
+      operation: 'persistent-stream', scope: 'physical-device', independentlyTargetable: true,
+      availability: 'experimental', limitation: 'Direct LAN AVTransport stream.',
+    };
+    const localDevice: AudioDevice = {
+      id: `sonos-local-${endpoint.deviceId}`, provider: 'sonos', name: endpoint.displayName,
+      identity: {
+        providerIdentifierSuffix: endpoint.deviceId.slice(-10),
+        logicalPlayerName: endpoint.displayName,
+      },
+      capabilities: ['continuous-stream'], diagnosticActions: [], topology: [], transports: [transportOption],
+    };
     let streamId = '';
     let binding: ContinuousStreamTransportBinding;
     const stream = this.manager.create({
-      deviceId: resolved.device.id,
+      deviceId: localDevice.id,
       transportId: sonosLocalContinuousStreamTransport.id,
       encodingProfileId: 'aac-adts',
       externalPcmSource: true,
@@ -42,8 +49,8 @@ export class SonosAudioOutputProvider implements AudioOutputProvider {
     const prewarm = setInterval(() => stream.writeExternalPcmFrame(silence, performance.now()), 20);
     try {
       await stream.waitUntilReadyForClient();
-      binding = await sonosLocalContinuousStreamTransport.start({
-        device: resolved.device,
+      const context: ContinuousStreamTransportContext = {
+        device: localDevice,
         transport: transportOption,
         streamId,
         streamUrl: '',
@@ -51,7 +58,10 @@ export class SonosAudioOutputProvider implements AudioOutputProvider {
         updateTransport: (update, message) => stream.updateTransport(update, message),
         addDiagnostic: (message, details) => stream.addDiagnosticEvent('lifecycle', message, details),
         terminate: (reason) => callbacks.onFailure?.(new Error(reason)),
-      });
+      };
+      binding = await sonosLocalContinuousStreamTransport.startPhysicalDevice(
+        context, endpoint.deviceId, endpoint.displayName
+      );
       stream.updateTransport({ state: 'bound', bound: true, hasBinding: true }, 'Room Audio endpoint transport bound.');
       const deadline = Date.now() + 20_000;
       while (!stream.isReadyForTone() && Date.now() < deadline) {

@@ -4,8 +4,9 @@ import type { SceneObjectInstance } from '../models/SceneObjectInstance';
 import type { SoundAsset } from '../models/SoundAsset';
 import type { SpeakerMap } from '../models/SpeakerMap';
 import type { SpeakerMix } from '../utils/spatialMixMath';
-import { apiUrl } from '../config/api';
+import { runtimeUrl } from '../config/runtime';
 import { recordDiagnostic } from '../services/diagnostics/DiagnosticClient';
+import { localSoundLibrary } from '../services/library/browser/LocalSoundLibraryService';
 import { playbackEngine, type PlaybackRouting, type StereoMix } from './PlaybackEngine';
 import { requireSuccessfulRoomAudioResponse, roomAudioErrorMessage as errorMessage } from './RoomAudioHttp';
 import {
@@ -29,6 +30,16 @@ interface PlayIntent {
   onComplete?: () => void;
 }
 
+interface AssetSynchronizationResult {
+  sourceByteLength: number;
+  receivedByteLength: number;
+  storedByteLength: number;
+  mimeType: string;
+  cacheHit: boolean;
+  validationResult: string;
+  invalidCacheReplaced: boolean;
+}
+
 
 class RoomAudioEngine {
   private state: EngineState = 'idle';
@@ -41,7 +52,7 @@ class RoomAudioEngine {
     volumeType: PlaybackRouting['type'];
   }>();
   private readonly listeners = new Set<() => void>();
-  private readonly assetSyncRequests = new Map<string, Promise<void>>();
+  private readonly assetSyncRequests = new Map<string, Promise<AssetSynchronizationResult>>();
   private readonly positionUpdates = new Map<string, LatestValueDispatcher<{
     position: { x: number; y: number }; speakerMix: SpeakerMix[]; correlationId: string;
   }>>();
@@ -97,12 +108,12 @@ class RoomAudioEngine {
     this.positionUpdates.clear();
     this.sceneVolumeStates.clear(); this.nodeGainStates.clear();
     if (oldRoomId && (!wasLocal && (oldRoomId !== this.roomId || local))) {
-      await requireSuccessfulRoomAudioResponse(await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(oldRoomId)}/session`), { method: 'DELETE' })).catch(() => undefined);
+      await requireSuccessfulRoomAudioResponse(await fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(oldRoomId)}/session`), { method: 'DELETE' })).catch(() => undefined);
     }
     if (!room || local) { this.state = room ? 'ready' : 'idle'; this.stateMessage = local ? 'Browser audio ready.' : ''; this.emit(); return; }
     this.state = 'connecting'; this.stateMessage = 'Connecting persistent Room audio outputs…'; this.emit();
     try {
-      const response = await requireSuccessfulRoomAudioResponse(await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(room.id)}/session`), {
+      const response = await requireSuccessfulRoomAudioResponse(await fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(room.id)}/session`), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ roomId: room.id, roomName: room.name, endpoints }),
       }));
@@ -121,11 +132,21 @@ class RoomAudioEngine {
       return;
     }
     if (!intent.room || (this.state !== 'ready' && this.state !== 'degraded')) throw new Error(this.stateMessage || 'Room audio is not ready.');
-    await this.synchronizeAsset(intent.asset);
+    const synchronization = await this.synchronizeAsset(intent.asset);
     void recordDiagnostic({
       category: 'audio', level: 'info', event: 'room_audio.asset_synchronization_completed',
       message: 'Room audio asset synchronization completed.', correlationId: intent.correlationId,
-      details: { assetId: intent.asset.id, durationMs: Math.round((performance.now() - synchronizationStartedAt) * 100) / 100 },
+      details: {
+        assetId: intent.asset.id,
+        sourceByteLength: synchronization.sourceByteLength,
+        receivedByteLength: synchronization.receivedByteLength,
+        storedByteLength: synchronization.storedByteLength,
+        mimeType: synchronization.mimeType,
+        cacheHit: synchronization.cacheHit,
+        validationResult: synchronization.validationResult,
+        invalidCacheReplaced: synchronization.invalidCacheReplaced,
+        durationMs: Math.round((performance.now() - synchronizationStartedAt) * 100) / 100,
+      },
     });
     const request: RoomAudioSourceRequest = {
       correlationId: intent.correlationId, sceneInstanceId: intent.routing.sceneInstanceId,
@@ -141,7 +162,7 @@ class RoomAudioEngine {
       endpointGains: Object.fromEntries(intent.speakerMix.map((speaker) => [speaker.speakerId, speaker.gain])),
       frontendRequestInitiatedAt: new Date(Date.now() - (performance.now() - synchronizationStartedAt)).toISOString(),
     };
-    const response = await requireSuccessfulRoomAudioResponse(await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(intent.room.id)}/sources`), {
+    const response = await requireSuccessfulRoomAudioResponse(await fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(intent.room.id)}/sources`), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
     }));
     const source = await response.json() as RoomAudioSourceSnapshot;
@@ -193,7 +214,7 @@ class RoomAudioEngine {
     const playback = this.remotePlaybackIds.get(instanceId); if (!playback || !this.roomId) return;
     this.remotePlaybackIds.delete(instanceId); this.emit();
     this.positionUpdates.delete(instanceId);
-    this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/sources/${encodeURIComponent(playback.playbackId)}`), { method: 'DELETE' })), 'room_audio.source_stop_failed');
+    this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/sources/${encodeURIComponent(playback.playbackId)}`), { method: 'DELETE' })), 'room_audio.source_stop_failed');
   }
   async stopNode(node: SceneObjectInstance): Promise<void> { if (this.localMode) await playbackEngine.stopNode(node); else this.stop(node.instanceId); }
   async pause(node: SceneObjectInstance): Promise<void> { if (this.localMode) await playbackEngine.pause(node); else this.stop(node.instanceId); }
@@ -238,7 +259,7 @@ class RoomAudioEngine {
       if (playback.sceneId === sceneId) this.remotePlaybackIds.delete(objectId);
     }
     this.emit();
-    this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/scenes/${encodeURIComponent(sceneId)}/sources`), { method: 'DELETE' })), 'room_audio.scene_stop_failed');
+    this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/scenes/${encodeURIComponent(sceneId)}/sources`), { method: 'DELETE' })), 'room_audio.scene_stop_failed');
   }
   setSceneTransitionGain(sceneId: string, gain: number): void {
     if (this.localMode) { playbackEngine.setSceneTransitionGain(sceneId, gain); return; }
@@ -260,10 +281,10 @@ class RoomAudioEngine {
     this.roomId = null; this.configuredKey = ''; this.remotePlaybackIds.clear();
     this.positionUpdates.clear();
     this.state = 'idle'; this.stateMessage = ''; this.emit();
-    this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(roomId)}/session`), { method: 'DELETE' })), 'room_audio.session_stop_failed');
+    this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(roomId)}/session`), { method: 'DELETE' })), 'room_audio.session_stop_failed');
   }
 
-  private async synchronizeAsset(asset: SoundAsset): Promise<void> {
+  private async synchronizeAsset(asset: SoundAsset): Promise<AssetSynchronizationResult> {
     const pending = this.assetSyncRequests.get(asset.id);
     if (pending) return pending;
     const request = this.performAssetSynchronization(asset).finally(() => this.assetSyncRequests.delete(asset.id));
@@ -271,20 +292,44 @@ class RoomAudioEngine {
     return request;
   }
 
-  private async performAssetSynchronization(asset: SoundAsset): Promise<void> {
-    const url = apiUrl(`/api/audio/assets/${encodeURIComponent(asset.id)}`);
-    if ((await fetch(url, { method: 'HEAD' })).ok) return;
-    const sourceResponse = await fetch(asset.source.playbackUrl ?? asset.source.path);
-    if (!sourceResponse.ok) throw new Error('Unable to read this sound for Room audio synchronization.');
+  private async performAssetSynchronization(asset: SoundAsset): Promise<AssetSynchronizationResult> {
+    const url = runtimeUrl(`/api/audio/assets/${encodeURIComponent(asset.id)}`);
+    const cached = await fetch(url, { method: 'HEAD' });
+    if (cached.ok) {
+      return {
+        sourceByteLength: Number(cached.headers.get('X-SACscape-Asset-Bytes') ?? 0),
+        receivedByteLength: Number(cached.headers.get('X-SACscape-Asset-Bytes') ?? 0),
+        storedByteLength: Number(cached.headers.get('X-SACscape-Asset-Bytes') ?? 0),
+        mimeType: cached.headers.get('X-SACscape-Asset-Mime') ?? asset.mimeType ?? 'application/octet-stream',
+        cacheHit: true, validationResult: cached.headers.get('X-SACscape-Asset-Validation') ?? 'validated',
+        invalidCacheReplaced: false,
+      };
+    }
+    if (cached.status !== 404) throw new Error(await errorMessage(cached));
+    let file: File;
+    if (asset.source.type === 'local') {
+      file = await localSoundLibrary.readManagedAsset(asset);
+    } else {
+      const sourceResponse = await fetch(asset.source.path);
+      if (!sourceResponse.ok) throw new Error('Unable to read this sound for Room audio synchronization.');
+      const blob = await sourceResponse.blob();
+      file = new File([blob], asset.originalFileName ?? asset.name, {
+        type: blob.type || asset.mimeType || 'application/octet-stream',
+      });
+    }
+    if (file.size === 0) throw new Error('The selected sound file is empty and cannot be synchronized.');
     const form = new FormData();
-    form.append('file', new File([await sourceResponse.blob()], asset.originalFileName ?? asset.name, { type: asset.mimeType }));
+    form.append('file', file, asset.originalFileName ?? file.name ?? asset.name);
+    form.append('mimeType', file.type || asset.mimeType || 'application/octet-stream');
+    form.append('sourceByteLength', String(file.size));
     const response = await fetch(url, { method: 'POST', body: form });
     if (!response.ok) throw new Error(await errorMessage(response));
+    return await response.json() as AssetSynchronizationResult;
   }
 
   private async setRemoteSceneEnvelope(sceneId: string, gain: number, durationMs: number): Promise<void> {
     if (!this.roomId) return;
-    const response = await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/scenes/${encodeURIComponent(sceneId)}/envelope`), {
+    const response = await fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/scenes/${encodeURIComponent(sceneId)}/envelope`), {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gain, durationMs }),
     });
     if (!response.ok) throw new Error(await errorMessage(response));
@@ -296,7 +341,7 @@ class RoomAudioEngine {
     this.scheduleControlSummary();
     let response: Response;
     try {
-      response = await this.controlScheduler.schedule(() => fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId!)}/sources/${encodeURIComponent(playbackId)}`), {
+      response = await this.controlScheduler.schedule(() => fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId!)}/sources/${encodeURIComponent(playbackId)}`), {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(update),
       }));
     } catch (error) {
@@ -361,7 +406,7 @@ class RoomAudioEngine {
   private checkBackendHealthOnce(): void {
     if (this.healthCheckInFlight) return;
     this.healthCheckInFlight = true;
-    void fetch(apiUrl('/api/health')).then((response) => {
+    void fetch(runtimeUrl('/api/health')).then((response) => {
       if (response.ok) this.restoreControlPlaneState(); else { this.state = 'error'; this.stateMessage = `Backend health check failed (${response.status}).`; this.emit(); }
       return recordDiagnostic({
         category: response.ok ? 'lifecycle' : 'error', level: response.ok ? 'info' : 'error',

@@ -1,9 +1,9 @@
-import { apiUrl } from '../../config/api';
+import { runtimeUrl } from '../../config/runtime';
 import type { DiagnosticLogEntry, DiagnosticLogInput } from '../../models/DiagnosticLog';
 
 export async function recordDiagnostic(input: DiagnosticLogInput): Promise<void> {
   try {
-    await fetch(apiUrl('/api/diagnostics'), {
+    await fetch(runtimeUrl('/api/diagnostics'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
@@ -14,12 +14,12 @@ export async function recordDiagnostic(input: DiagnosticLogInput): Promise<void>
 }
 
 export async function loadDiagnostics(): Promise<DiagnosticLogEntry[]> {
-  const response = await fetch(apiUrl('/api/diagnostics'));
+  const response = await fetch(runtimeUrl('/api/diagnostics'));
   if (!response.ok) throw new Error('Unable to load diagnostic log.');
   return (await response.json() as { entries: DiagnosticLogEntry[] }).entries;
 }
 
 export async function clearDiagnostics(): Promise<void> {
-  const response = await fetch(apiUrl('/api/diagnostics'), { method: 'DELETE' });
+  const response = await fetch(runtimeUrl('/api/diagnostics'), { method: 'DELETE' });
   if (!response.ok) throw new Error('Unable to clear diagnostic log.');
 }

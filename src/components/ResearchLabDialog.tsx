@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from 'react';
 
-import { apiUrl } from '../config/api';
+import { runtimeUrl } from '../config/runtime';
 import { normalizeDiscoveredAudioDevices } from '../services/research-lab/normalizeAudioDevices';
 import {
   readResearchLabIdentifyFailure,
@@ -118,7 +118,7 @@ async function readFailure(response: Response, fallback: string): Promise<string
 async function describeResearchLabFailure(error: unknown, operation: string): Promise<string> {
   if (!(error instanceof TypeError)) return sanitizedErrorMessage(error);
   try {
-    const health = await fetch(apiUrl('/api/health'));
+    const health = await fetch(runtimeUrl('/api/health'));
     if (health.ok) {
       return `Backend reachable; ${operation} failed before receiving an API response.`;
     }
@@ -517,7 +517,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
     setDiscoveryError(null);
     setDiscoveryWarning(null);
     try {
-      const response = await fetch(apiUrl(
+      const response = await fetch(runtimeUrl(
         `/api/research-lab/devices${forceRefresh ? '?refresh=true' : ''}`
       ));
       if (!response.ok) {
@@ -539,7 +539,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
 
   const refreshStreams = useCallback(async () => {
     try {
-      const response = await fetch(apiUrl('/api/research-lab/streams'));
+      const response = await fetch(runtimeUrl('/api/research-lab/streams'));
       if (!response.ok) {
         throw new Error(await readFailure(response, 'Unable to load stream diagnostics.'));
       }
@@ -578,7 +578,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
     if (!multiSessionId || multiSessionState === 'stopped') return;
     const timer = window.setInterval(async () => {
       try {
-        const response = await fetch(apiUrl(`/api/research-lab/multi-speaker-sessions/${encodeURIComponent(multiSessionId)}`));
+        const response = await fetch(runtimeUrl(`/api/research-lab/multi-speaker-sessions/${encodeURIComponent(multiSessionId)}`));
         if (response.ok) {
           const data = await response.json() as { ok: true; session: MultiSpeakerSessionSnapshot };
           setMultiSession(data.session);
@@ -597,7 +597,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
         ? '/api/research-lab/multi-speaker-sessions'
         : `/api/research-lab/multi-speaker-sessions/${encodeURIComponent(multiSession!.id)}${
           action === 'stop' ? '' : `/${action}`}`;
-      const response = await fetch(apiUrl(path), {
+      const response = await fetch(runtimeUrl(path), {
         method: action === 'stop' ? 'DELETE' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         ...(action === 'start' ? { body: JSON.stringify({ deviceAId: speakerAId, deviceBId: speakerBId }) } : {}),
@@ -627,7 +627,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
     setStartingKey(key);
     setActionError(null);
     try {
-      const response = await fetch(apiUrl('/api/research-lab/streams'), {
+      const response = await fetch(runtimeUrl('/api/research-lab/streams'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -656,7 +656,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
       return next;
     });
     try {
-      const response = await fetch(apiUrl(
+      const response = await fetch(runtimeUrl(
         `/api/research-lab/devices/${encodeURIComponent(device.id)}/identify`
       ), { method: 'POST' });
       if (!response.ok) {
@@ -709,7 +709,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
       return next;
     });
     try {
-      const response = await fetch(apiUrl(
+      const response = await fetch(runtimeUrl(
         `/api/research-lab/devices/${encodeURIComponent(device.id)}/presentation`
       ), {
         method: 'PUT',
@@ -748,7 +748,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
     setBusyActions((current) => ({ ...current, [streamId]: action }));
     setActionError(null);
     try {
-      const response = await fetch(apiUrl(
+      const response = await fetch(runtimeUrl(
         action === 'tone'
           ? `/api/research-lab/streams/${encodeURIComponent(streamId)}/tone`
           : `/api/research-lab/streams/${encodeURIComponent(streamId)}`

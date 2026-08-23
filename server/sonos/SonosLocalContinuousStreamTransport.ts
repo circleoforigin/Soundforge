@@ -13,6 +13,7 @@ import { resolveSonosAudioDevice, type ResolvedSonosAudioDevice } from '../resea
 import { SonosLocalAvTransportClient } from './SonosLocalAvTransportClient.ts';
 import { discoverLocalSonosDevice, type SonosLocalDevice } from './SonosLocalDiscovery.ts';
 import { SonosLocalHttpStreamServer } from './SonosLocalHttpStreamServer.ts';
+import { resolveSonosLocalResearchDevice } from '../research-lab/SonosLocalAudioDeviceDiscovery.ts';
 
 interface LocalBindingData {
   streamId: string;
@@ -59,12 +60,28 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
   async start(context: ContinuousStreamTransportContext): Promise<ContinuousStreamTransportBinding> {
     this.contexts.set(context.streamId, context);
     context.updateTransport({ state: 'binding' }, 'Resolving selected physical Sonos device on the local network.');
+    const locallyDiscoveredPhysicalId = resolveSonosLocalResearchDevice(context.device.id);
+    if (locallyDiscoveredPhysicalId) {
+      return this.startPhysicalDevice(context, locallyDiscoveredPhysicalId,
+        context.device.presentation?.alias ?? context.device.name);
+    }
     const resolved = await this.resolveDevice(context.device.id);
     if (!resolved) throw new Error('The selected Sonos physical device is no longer present in cloud topology.');
     if (resolved.player.deviceIds.length !== 1 || !resolved.group || resolved.group.playerIds.length !== 1) {
       throw new Error('Experimental Sonos local continuous streaming currently supports only a standalone physical player. Bonded/group members are not redirected to a coordinator.');
     }
-    const local = await this.discoverLocal(resolved.physicalDeviceId);
+    return this.startPhysicalDevice(context, resolved.physicalDeviceId,
+      resolved.device.presentation?.alias ?? resolved.device.name);
+  }
+
+  async startPhysicalDevice(
+    context: ContinuousStreamTransportContext,
+    physicalDeviceId: string,
+    targetDescription: string
+  ): Promise<ContinuousStreamTransportBinding> {
+    this.contexts.set(context.streamId, context);
+    context.updateTransport({ state: 'binding' }, 'Resolving selected physical Sonos device on the local network.');
+    const local = await this.discoverLocal(physicalDeviceId);
     if (!local) throw new Error('The selected Sonos physical device was not found by local SSDP discovery. Confirm that SACscape and Sonos are on the same LAN.');
     const localAddress = await routeAddress(local.address);
     let server: SonosLocalHttpStreamServer | undefined;
@@ -80,7 +97,7 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
       const httpUrl = `http://${localAddress}:${port}${path}`;
       const sonosUri = `x-rincon-mp3radio://${localAddress}:${port}${path}`;
       context.addDiagnostic('Local Sonos stream listener started.', {
-        physicalDeviceIdSuffix: resolved.physicalDeviceId.slice(-10),
+        physicalDeviceIdSuffix: physicalDeviceId.slice(-10),
         localAddress, port, mimeType: 'audio/aac', framing: 'HTTP/1.0 connection-close',
       });
       await this.avTransport.setStreamUri(local.avTransportControlUrl, sonosUri);
@@ -88,7 +105,7 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
       context.updateTransport({
         state: 'bound',
         targetScope: 'physical-device',
-        targetDescription: resolved.device.presentation?.alias ?? resolved.device.name,
+        targetDescription,
         independentlyTargetable: true,
         bound: true,
         hasBinding: true,
@@ -98,7 +115,7 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
       return {
         transportId: this.id,
         targetScope: 'physical-device',
-        targetDescription: resolved.device.presentation?.alias ?? resolved.device.name,
+        targetDescription,
         independentlyTargetable: true,
         providerBinding: { streamId: context.streamId, controlUrl: local.avTransportControlUrl, server, httpUrl } satisfies LocalBindingData & { httpUrl: string },
       };

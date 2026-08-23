@@ -1,7 +1,7 @@
 import type { SceneObjectInstance } from '../models/SceneObjectInstance';
 import type { SoundAsset } from '../models/SoundAsset';
 import type { SpeakerMap } from '../models/SpeakerMap';
-import { apiUrl } from '../config/api';
+import { sonosBridgeUrl } from '../config/api';
 import type { SpeakerMix } from '../utils/spatialMixMath';
 
 interface SonosOneShotRequest {
@@ -47,7 +47,7 @@ async function resolveLogicalPlayer(deviceIds: string[]): Promise<{
   playerId: string;
   playerName: string;
 }> {
-  const response = await fetch(apiUrl('/api/sonos/resolve-logical-player'), {
+  const response = await fetch(sonosBridgeUrl('/api/sonos/resolve-logical-player'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceIds }),
@@ -70,7 +70,7 @@ async function performLocalAssetSynchronization(asset: SoundAsset): Promise<stri
     return cachedUrl;
   }
 
-  const mediaUrl = apiUrl(`/api/sonos/media/${encodeURIComponent(asset.id)}`);
+  const mediaUrl = sonosBridgeUrl(`/api/sonos/media/${encodeURIComponent(asset.id)}`);
   const existingResponse = await fetch(mediaUrl, { method: 'HEAD' });
 
   if (existingResponse.ok) {
@@ -232,7 +232,7 @@ export async function playSonosOneShot({
     targets.map(async ({ speakerId, playerId, label, volume, routingKind }) => {
       try {
         const response = await fetch(
-          apiUrl(`/api/sonos/audio-clip/${encodeURIComponent(playerId)}`),
+          sonosBridgeUrl(`/api/sonos/audio-clip/${encodeURIComponent(playerId)}`),
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
