@@ -8,6 +8,11 @@ import { apiUrl } from '../config/api';
 import { recordDiagnostic } from '../services/diagnostics/DiagnosticClient';
 import { playbackEngine, type PlaybackRouting, type StereoMix } from './PlaybackEngine';
 import { requireSuccessfulRoomAudioResponse, roomAudioErrorMessage as errorMessage } from './RoomAudioHttp';
+import {
+  BoundedControlRequestScheduler, createRoomAudioControlCounters,
+  LatestValueDispatcher, roomAudioGainSignature, roomAudioVolumeSignature,
+  SuccessfulControlStateDeduplicator, ControlFailureAccumulator,
+} from './RoomAudioControlPlane';
 
 type EngineState = 'idle' | 'connecting' | 'ready' | 'degraded' | 'error';
 
@@ -37,11 +42,19 @@ class RoomAudioEngine {
   }>();
   private readonly listeners = new Set<() => void>();
   private readonly assetSyncRequests = new Map<string, Promise<void>>();
-  private readonly positionUpdates = new Map<string, {
-    inFlight: boolean;
-    pending: { position: { x: number; y: number }; speakerMix: SpeakerMix[]; correlationId: string } | null;
-    runner?: Promise<void>;
-  }>();
+  private readonly positionUpdates = new Map<string, LatestValueDispatcher<{
+    position: { x: number; y: number }; speakerMix: SpeakerMix[]; correlationId: string;
+  }>>();
+  private readonly controlScheduler = new BoundedControlRequestScheduler(4);
+  private readonly controlCounters = createRoomAudioControlCounters();
+  private readonly sceneVolumeStates = new SuccessfulControlStateDeduplicator();
+  private readonly nodeGainStates = new SuccessfulControlStateDeduplicator();
+  private controlSummaryTimer: number | null = null;
+  private controlWindowStartedAt = performance.now();
+  private readonly controlFailures = new ControlFailureAccumulator();
+  private controlFailureTimer: number | null = null;
+  private healthCheckInFlight = false;
+  private stateBeforeControlFailure: EngineState | null = null;
   private version = 0;
   private configurationPromise: Promise<void> = Promise.resolve();
 
@@ -82,6 +95,7 @@ class RoomAudioEngine {
     this.localMode = local;
     this.remotePlaybackIds.clear();
     this.positionUpdates.clear();
+    this.sceneVolumeStates.clear(); this.nodeGainStates.clear();
     if (oldRoomId && (!wasLocal && (oldRoomId !== this.roomId || local))) {
       await requireSuccessfulRoomAudioResponse(await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(oldRoomId)}/session`), { method: 'DELETE' })).catch(() => undefined);
     }
@@ -148,24 +162,29 @@ class RoomAudioEngine {
 
   async updatePosition(objectInstanceId: string, position: { x: number; y: number }, speakerMix: SpeakerMix[], correlationId = `position-${crypto.randomUUID()}`): Promise<void> {
     if (this.localMode) return;
-    const state = this.positionUpdates.get(objectInstanceId) ?? { inFlight: false, pending: null };
-    state.pending = { position, speakerMix, correlationId };
-    this.positionUpdates.set(objectInstanceId, state);
-    if (state.inFlight) return state.runner;
-    state.inFlight = true;
-    state.runner = (async () => { try {
-      while (state.pending) {
-        const update = state.pending; state.pending = null;
+    this.controlCounters.positionRequested += 1;
+    let dispatcher = this.positionUpdates.get(objectInstanceId);
+    if (!dispatcher) {
+      dispatcher = new LatestValueDispatcher(async (update) => {
         const playback = this.remotePlaybackIds.get(objectInstanceId);
         if (!playback || !this.roomId) throw new Error('Active Room audio playback could not be resolved for this node.');
-        await this.patchRemoteSource(playback.playbackId, {
-          position: update.position,
-          endpointGains: Object.fromEntries(update.speakerMix.map((item) => [item.speakerId, item.gain])),
-          updateCorrelationId: update.correlationId,
-        });
-      }
-    } finally { state.inFlight = false; if (!state.pending) this.positionUpdates.delete(objectInstanceId); } })();
-    return state.runner;
+        this.controlCounters.positionSent += 1;
+        try {
+          await this.patchRemoteSource(playback.playbackId, {
+            position: update.position,
+            endpointGains: Object.fromEntries(update.speakerMix.map((item) => [item.speakerId, item.gain])),
+            updateCorrelationId: update.correlationId,
+          });
+          this.controlCounters.positionSucceeded += 1;
+        } catch (error) { this.controlCounters.positionFailed += 1; throw error; }
+      }, 20);
+      this.positionUpdates.set(objectInstanceId, dispatcher);
+    }
+    const coalescedBefore = dispatcher.coalesced;
+    const request = dispatcher.submit({ position, speakerMix, correlationId });
+    this.controlCounters.positionCoalesced += dispatcher.coalesced - coalescedBefore;
+    this.scheduleControlSummary();
+    return request;
   }
 
   isPlaying(instanceId: string): boolean { return this.localMode ? playbackEngine.isPlaying(instanceId) : this.remotePlaybackIds.has(instanceId); }
@@ -180,19 +199,36 @@ class RoomAudioEngine {
   async pause(node: SceneObjectInstance): Promise<void> { if (this.localMode) await playbackEngine.pause(node); else this.stop(node.instanceId); }
   setSceneVolume(sceneId: string, volume: PlaybackRouting['volume']): void {
     if (this.localMode) { playbackEngine.setSceneVolume(sceneId, volume); return; }
+    this.controlCounters.volumeRequested += 1;
+    const signature = roomAudioVolumeSignature(volume);
+    if (!this.sceneVolumeStates.begin(sceneId, signature)) { this.controlCounters.volumeDeduplicated += 1; this.scheduleControlSummary(); return; }
+    const requests: Promise<void>[] = [];
     for (const playback of this.remotePlaybackIds.values()) {
-      if (playback.sceneId === sceneId) this.observeMutation(this.patchRemoteSource(playback.playbackId, {
+      if (playback.sceneId === sceneId) { this.controlCounters.volumeSent += 1; requests.push(this.patchRemoteSource(playback.playbackId, {
         typeVolume: volume[playback.volumeType], sceneMasterVolume: volume.master,
-      }), 'room_audio.volume_update_failed');
+      })); }
     }
+    this.observeMutation(Promise.all(requests).then(() => {
+      this.sceneVolumeStates.succeed(sceneId, signature);
+    }).catch((error) => { this.sceneVolumeStates.fail(sceneId, signature); throw error; }), 'room_audio.volume_update_failed');
+    this.scheduleControlSummary();
   }
   updateNodeGain(sceneId: string, nodeId: string, gainDb: number, muted: boolean): void {
     if (this.localMode) { playbackEngine.updateNodeGain(sceneId, nodeId, gainDb, muted); return; }
+    this.controlCounters.nodeGainRequested += 1;
+    const key = `${sceneId}:${nodeId}`; const signature = roomAudioGainSignature(gainDb, muted);
+    if (!this.nodeGainStates.begin(key, signature)) { this.controlCounters.nodeGainDeduplicated += 1; this.scheduleControlSummary(); return; }
+    const requests: Promise<void>[] = [];
     for (const playback of this.remotePlaybackIds.values()) {
       if (playback.sceneId === sceneId && playback.sourceNodeId === nodeId) {
-        this.observeMutation(this.patchRemoteSource(playback.playbackId, { nodeGainDb: gainDb, muted }), 'room_audio.node_gain_update_failed');
+        this.controlCounters.nodeGainSent += 1;
+        requests.push(this.patchRemoteSource(playback.playbackId, { nodeGainDb: gainDb, muted }));
       }
     }
+    this.observeMutation(Promise.all(requests).then(() => {
+      this.nodeGainStates.succeed(key, signature);
+    }).catch((error) => { this.nodeGainStates.fail(key, signature); throw error; }), 'room_audio.node_gain_update_failed');
+    this.scheduleControlSummary();
   }
   updateSpatialMix(instanceId: string, mix: StereoMix): void { if (this.localMode) playbackEngine.updateSpatialMix(instanceId, mix); }
   stopScene(sceneId: string): void {
@@ -256,28 +292,102 @@ class RoomAudioEngine {
 
   private async patchRemoteSource(playbackId: string, update: Record<string, unknown>): Promise<void> {
     if (!this.roomId) return;
-    const response = await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/sources/${encodeURIComponent(playbackId)}`), {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(update),
-    });
+    this.controlCounters.totalHttpRequests += 1;
+    this.scheduleControlSummary();
+    let response: Response;
+    try {
+      response = await this.controlScheduler.schedule(() => fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId!)}/sources/${encodeURIComponent(playbackId)}`), {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(update),
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Room Audio control request failed.';
+      this.markControlPlaneDegraded(message);
+      this.recordControlFailure(message, { playbackId, updateCorrelationId: update.updateCorrelationId });
+      if (error && typeof error === 'object') Object.assign(error, { roomAudioControlRecorded: true });
+      throw error;
+    }
+    this.controlCounters.maxConcurrentRequests = Math.max(this.controlCounters.maxConcurrentRequests, this.controlScheduler.maxObservedConcurrency);
     if (!response.ok) {
       const message = await errorMessage(response);
-      this.state = 'error'; this.stateMessage = message; this.emit();
-      void recordDiagnostic({
-        category: 'error', level: 'error', event: 'room_audio.source_update_failed',
-        message: 'Room audio source update failed.',
-        correlationId: typeof update.updateCorrelationId === 'string' ? update.updateCorrelationId : undefined,
-        details: { playbackId, status: response.status, error: message },
-      });
-      throw new Error(message);
+      this.markControlPlaneDegraded(message);
+      this.recordControlFailure(message, { playbackId, status: response.status, updateCorrelationId: update.updateCorrelationId });
+      const error = new Error(message); Object.assign(error, { roomAudioControlRecorded: true }); throw error;
     }
+    this.restoreControlPlaneState();
   }
 
   private observeMutation(request: Promise<unknown>, event: string): void {
     void request.catch((error: unknown) => {
       const message = error instanceof Error ? error.message : 'Room audio operation failed.';
-      this.state = 'error'; this.stateMessage = message; this.emit();
-      void recordDiagnostic({ category: 'error', level: 'error', event, message, details: { error: message } });
+      if (error && typeof error === 'object' && 'roomAudioControlRecorded' in error) return;
+      this.markControlPlaneDegraded(message);
+      this.recordControlFailure(message, { operation: event });
     });
+  }
+
+  private scheduleControlSummary(): void {
+    if (this.controlSummaryTimer !== null) return;
+    this.controlSummaryTimer = window.setTimeout(() => {
+      this.controlSummaryTimer = null;
+      const elapsedMs = Math.max(1, performance.now() - this.controlWindowStartedAt);
+      void recordDiagnostic({
+        category: 'lifecycle', level: 'info', event: 'room_audio.control_pressure',
+        message: 'Room audio control-plane pressure summary.',
+        details: { ...this.controlCounters, windowMs: Math.round(elapsedMs), requestsPerSecond: Math.round(this.controlCounters.totalHttpRequests * 1000 / elapsedMs * 100) / 100 },
+      });
+      Object.assign(this.controlCounters, createRoomAudioControlCounters());
+      this.controlWindowStartedAt = performance.now();
+    }, 2_000);
+  }
+
+  private recordControlFailure(message: string, details: Record<string, unknown>): void {
+    const failure = this.controlFailures.record(message);
+    if (failure.first) {
+      void recordDiagnostic({ category: 'error', level: 'error', event: 'room_audio.control_update_failed', message: 'Room Audio control update failed.', details: { ...details, error: message } });
+      this.checkBackendHealthOnce();
+    }
+    if (this.controlFailureTimer !== null) return;
+    this.controlFailureTimer = window.setTimeout(() => {
+      const summary = this.controlFailures.flush();
+      void recordDiagnostic({
+        category: 'error', level: 'error', event: 'room_audio.control_failure_summary',
+        message: `Room Audio control updates failed ${summary.failureCount} times over ${summary.durationMs} ms.`,
+        details: summary,
+      });
+      this.controlFailureTimer = null;
+    }, 2_000);
+  }
+
+  private checkBackendHealthOnce(): void {
+    if (this.healthCheckInFlight) return;
+    this.healthCheckInFlight = true;
+    void fetch(apiUrl('/api/health')).then((response) => {
+      if (response.ok) this.restoreControlPlaneState(); else { this.state = 'error'; this.stateMessage = `Backend health check failed (${response.status}).`; this.emit(); }
+      return recordDiagnostic({
+        category: response.ok ? 'lifecycle' : 'error', level: response.ok ? 'info' : 'error',
+        event: 'room_audio.control_health_check',
+        message: response.ok ? 'Backend reachable after Room Audio control failure.' : 'Backend health check failed after Room Audio control failure.',
+        details: { reachable: response.ok, status: response.status },
+      });
+    }).catch((error: unknown) => {
+      this.state = 'error'; this.stateMessage = 'Backend API is unreachable.'; this.emit();
+      return recordDiagnostic({
+        category: 'error', level: 'error', event: 'room_audio.control_health_check',
+        message: 'Backend API unreachable after Room Audio control failure.', details: { reachable: false, error: error instanceof Error ? error.message : String(error) },
+      });
+    }).finally(() => { window.setTimeout(() => { this.healthCheckInFlight = false; }, 2_000); });
+  }
+
+  private markControlPlaneDegraded(message: string): void {
+    if (this.stateBeforeControlFailure === null) this.stateBeforeControlFailure = this.state;
+    this.state = 'degraded'; this.stateMessage = message; this.emit();
+  }
+
+  private restoreControlPlaneState(): void {
+    if (this.stateBeforeControlFailure === null) return;
+    this.state = this.stateBeforeControlFailure;
+    this.stateMessage = this.state === 'ready' ? 'Room audio ready.' : this.stateMessage;
+    this.stateBeforeControlFailure = null; this.emit();
   }
 
   private emit(): void { this.version += 1; for (const listener of this.listeners) listener(); }

@@ -11,6 +11,7 @@ import { getDistanceFromCenter } from '../utils/soundStageMath';
 import SoundNode from './SoundNode';
 import type { PlaybackRouting } from '../audio/PlaybackEngine';
 import { roomAudioEngine } from '../audio/RoomAudioEngine';
+import { soundStageNodeGainSignature } from '../audio/SoundStageControlState';
 import RoomLayer from './RoomLayer';
 import { getRoomSpeakerGeometry } from '../utils/roomSpeakerMath';
 import { getSpeakerMix } from '../utils/spatialMixMath';
@@ -191,26 +192,37 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
         fullVolumeRadius
       )
     : [];
-  const sceneVolume = scene.volume;
+  const sceneMasterVolume = scene.volume.master;
+  const sceneOneShotVolume = scene.volume.oneShot;
+  const sceneLoopVolume = scene.volume.loop;
+  const sceneAmbienceVolume = scene.volume.ambience;
   useEffect(() => {
-    roomAudioEngine.setSceneVolume(scene.instanceId, sceneVolume);
+    roomAudioEngine.setSceneVolume(scene.instanceId, {
+      master: sceneMasterVolume, oneShot: sceneOneShotVolume,
+      loop: sceneLoopVolume, ambience: sceneAmbienceVolume,
+    });
+  }, [
+    scene.instanceId,
+    sceneMasterVolume,
+    sceneOneShotVolume,
+    sceneLoopVolume,
+    sceneAmbienceVolume,
+  ]);
 
-    for (const node of [
-      ...scene.positionalObjects,
-      ...scene.ambientObjects,
-    ]) {
+  const nodeGainSignature = soundStageNodeGainSignature(scene);
+  useEffect(() => {
+    for (const state of nodeGainSignature.split('|').slice(1).filter(Boolean)) {
+      const [nodeId, gainDb, muted] = state.split(':');
       roomAudioEngine.updateNodeGain(
         scene.instanceId,
-        node.instanceId,
-        node.gainDb ?? 0,
-        node.muted
+        nodeId,
+        Number(gainDb),
+        muted === '1'
       );
     }
   }, [
     scene.instanceId,
-    sceneVolume,
-    scene.positionalObjects,
-    scene.ambientObjects,
+    nodeGainSignature,
   ]);
 
   useEffect(() => {
@@ -326,7 +338,8 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       const diagnostic = playbackDiagnosticsRef.current.get(instanceId);
       const now = performance.now();
       const updateCorrelationId = `position-${crypto.randomUUID()}`;
-      if (diagnostic && now - (lastPositionDiagnosticRef.current.get(instanceId) ?? 0) >= 500) {
+      const recordThisUpdate = Boolean(diagnostic && now - (lastPositionDiagnosticRef.current.get(instanceId) ?? 0) >= 500);
+      if (recordThisUpdate && diagnostic) {
         lastPositionDiagnosticRef.current.set(instanceId, now);
         void recordDiagnostic({
           category: 'spatial', level: 'info', event: 'spatial.gains_updated',
@@ -341,13 +354,13 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
           },
         });
       }
-      void roomAudioEngine.updatePosition(
+      const updateRequest = roomAudioEngine.updatePosition(
         instanceId,
         clampedPosition,
         getOutputSpeakerMixForNode({ ...deployedNode, position: clampedPosition }),
         updateCorrelationId
-      ).then(() => {
-        if (!diagnostic) return;
+      );
+      if (recordThisUpdate) void updateRequest.then(() => {
         void recordDiagnostic({
           category: 'spatial', level: 'info', event: 'spatial.gains_update_accepted',
           message: 'Spatial gain update accepted by the Room Audio backend.',
@@ -363,6 +376,7 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
         });
         showFieldMessage(message);
       });
+      else void updateRequest.catch(() => undefined);
     }
 
     const temporaryDeployment = temporaryDeployments.find(
