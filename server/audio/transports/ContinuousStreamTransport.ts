@@ -8,12 +8,14 @@ import type {
 } from '../../../src/models/ResearchLab.ts';
 import type { Writable } from 'node:stream';
 import type { ContinuousAudioEncodingProfileId } from '../ContinuousAudioEncodingProfile.ts';
+import type { SonosLatencyExperimentProfile } from '../../../src/models/SonosLatencyLab.ts';
 
 export interface ContinuousStreamTransportContext {
   device: AudioDevice;
   transport: AudioTransportOption;
   streamId: string;
   streamUrl: string;
+  latencyProfile?: SonosLatencyExperimentProfile;
   bindHttpClient(
     client: Writable & { destroyed: boolean; writableEnded: boolean; writableLength: number },
     metadata?: HttpStreamConnectionMetadata

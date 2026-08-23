@@ -28,6 +28,12 @@ import type {
   ContinuousHttpFramingMode,
   MultiSpeakerSessionSnapshot,
 } from '../models/ResearchLab';
+import {
+  sonosLatencyExperimentProfiles,
+  summarizeSonosLatencyResults,
+  type SonosLatencyProfileId,
+  type SonosLatencyResultSample,
+} from '../models/SonosLatencyLab';
 
 interface ResearchLabDialogProps {
   onClose: () => void;
@@ -503,6 +509,13 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
   const [multiBusy, setMultiBusy] = useState<string | null>(null);
   const [multiError, setMultiError] = useState<string | null>(null);
   const [multiMessage, setMultiMessage] = useState<string | null>(null);
+  const [latencyDeviceId, setLatencyDeviceId] = useState('');
+  const [latencyProfileId, setLatencyProfileId] = useState<SonosLatencyProfileId>('aac-radio');
+  const [latencyStreamId, setLatencyStreamId] = useState<string | null>(null);
+  const [latencyBusy, setLatencyBusy] = useState<'start' | 'tone' | 'stop' | null>(null);
+  const [latencyError, setLatencyError] = useState<string | null>(null);
+  const [observedDelay, setObservedDelay] = useState('');
+  const [latencyResults, setLatencyResults] = useState<SonosLatencyResultSample[]>([]);
 
   const multiEligibleDevices = useMemo(() => devices.filter((device) =>
     device.transports.some((transport) => transport.id === 'sonos-local-continuous'
@@ -511,6 +524,15 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
       && transport.independentlyTargetable
       && transport.availability !== 'unavailable')
   ), [devices]);
+  const latencyProfile = sonosLatencyExperimentProfiles.find(
+    (profile) => profile.id === latencyProfileId
+  )!;
+  const latencyStream = streams.find((stream) => stream.id === latencyStreamId);
+  const latencyStreamActive = Boolean(
+    latencyStream && !terminalLifecycles.has(latencyStream.lifecycle)
+  );
+  const latencySummaries = sonosLatencyExperimentProfiles.map((profile) =>
+    summarizeSonosLatencyResults(profile.id, latencyResults));
 
   const refreshDevices = useCallback(async (forceRefresh = false) => {
     setDiscovering(true);
@@ -773,6 +795,65 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
     }
   }
 
+  async function runLatencyAction(action: 'start' | 'tone' | 'stop') {
+    setLatencyBusy(action);
+    setLatencyError(null);
+    try {
+      const url = action === 'start'
+        ? '/api/research-lab/streams'
+        : action === 'tone'
+          ? `/api/research-lab/streams/${encodeURIComponent(latencyStreamId!)}/latency-tone`
+          : `/api/research-lab/streams/${encodeURIComponent(latencyStreamId!)}`;
+      const response = await fetch(runtimeUrl(url), {
+        method: action === 'stop' ? 'DELETE' : 'POST',
+        ...(action === 'start' ? {
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deviceId: latencyDeviceId,
+            transportId: 'sonos-local-continuous',
+            latencyProfileId,
+          }),
+        } : {}),
+      });
+      if (!response.ok) throw new Error(await readFailure(response, `Unable to ${action} latency stream.`));
+      const data = await response.json() as AudioStreamSnapshotResponse;
+      setStreams((current) => [data.stream, ...current.filter((item) => item.id !== data.stream.id)]);
+      if (action === 'start') setLatencyStreamId(data.stream.id);
+      if (action === 'stop') setLatencyStreamId(null);
+    } catch (error) {
+      setLatencyError(await describeResearchLabFailure(error, `Latency Lab ${action}`));
+    } finally {
+      setLatencyBusy(null);
+    }
+  }
+
+  async function recordLatencyResult() {
+    const value = Number(observedDelay);
+    if (!Number.isFinite(value) || value < 0) {
+      setLatencyError('Observed delay must be a non-negative number of milliseconds.');
+      return;
+    }
+    if (!latencyStreamId) {
+      setLatencyError('Start a latency stream before recording a result.');
+      return;
+    }
+    try {
+      const response = await fetch(runtimeUrl(`/api/research-lab/streams/${encodeURIComponent(latencyStreamId)}/latency-result`), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ observedDelayMs: value }),
+      });
+      if (!response.ok) throw new Error(await readFailure(response, 'Unable to record latency result.'));
+      setLatencyResults((current) => [...current, {
+        id: crypto.randomUUID(), profileId: latencyProfileId,
+        observedDelayMs: value, recordedAt: new Date().toISOString(),
+      }]);
+      setObservedDelay('');
+      setLatencyError(null);
+    } catch (error) {
+      setLatencyError(sanitizedErrorMessage(error));
+    }
+  }
+
   return (
     <div className="dialog-backdrop research-lab-backdrop">
       <div className="research-lab-dialog">
@@ -856,6 +937,44 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
                 </ResearchLabErrorBoundary>
               ))}
             </div>
+          </section>
+
+          <section className="research-lab-panel research-latency-panel">
+            <div className="research-section-heading">
+              <div><h3>Latency Transport Lab</h3><p>Compare Sonos-local stream semantics and formats without changing production Room Audio.</p></div>
+            </div>
+            <div className="research-latency-controls">
+              <label>Speaker<select value={latencyDeviceId} disabled={latencyStreamActive} onChange={(event) => setLatencyDeviceId(event.target.value)}>
+                <option value="">Select standalone device…</option>
+                {multiEligibleDevices.map((device) => <option key={device.id} value={device.id}>{device.presentation?.alias ?? device.name}</option>)}
+              </select></label>
+              <label>Profile<select value={latencyProfileId} disabled={latencyStreamActive} onChange={(event) => setLatencyProfileId(event.target.value as SonosLatencyProfileId)}>
+                {sonosLatencyExperimentProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
+              </select></label>
+              <div className="research-stream-actions">
+                <button disabled={!latencyDeviceId || latencyStreamActive || Boolean(latencyBusy)} onClick={() => void runLatencyAction('start')}>{latencyBusy === 'start' ? 'Starting…' : 'Start Stream'}</button>
+                <button disabled={!latencyStreamActive || Boolean(latencyBusy)} onClick={() => void runLatencyAction('stop')}>Stop Stream</button>
+                <button disabled={!latencyStream?.toneReady || Boolean(latencyBusy)} onClick={() => void runLatencyAction('tone')}>Inject Latency Tone</button>
+              </div>
+            </div>
+            <div className="research-latency-profile">
+              <span>{latencyProfile.codec} / {latencyProfile.container}</span>
+              <span>{latencyProfile.sampleRate / 1_000} kHz · {latencyProfile.channelCount} ch</span>
+              <span>{latencyProfile.bitrate ? `${latencyProfile.bitrate / 1_000} kbps` : 'Uncompressed'}</span>
+              <span>{latencyProfile.uriScheme} · {latencyProfile.sonosStreamType}</span>
+              <span>{latencyProfile.httpFraming}</span>
+            </div>
+            {latencyStream && <div className="research-latency-status">
+              State: {titleCase(latencyStream.lifecycle)} · PID {latencyStream.encoder.pid ?? '—'} · {latencyStream.httpClient.connected ? 'Consumer connected' : 'Waiting for consumer'} · {latencyStream.telemetry.deliveredBitsPerSecond.toLocaleString()} delivered bps
+            </div>}
+            {latencyError && <div className="research-error-message">{latencyError}</div>}
+            <div className="research-latency-record">
+              <label>Observed Delay <input type="number" min="0" step="1" value={observedDelay} onChange={(event) => setObservedDelay(event.target.value)} /> ms</label>
+              <button disabled={!observedDelay || !latencyStreamId} onClick={() => void recordLatencyResult()}>Record Result</button>
+            </div>
+            <table className="research-latency-results"><thead><tr><th>Profile</th><th>Samples</th><th>Avg</th><th>Min</th><th>Max</th></tr></thead><tbody>
+              {latencySummaries.map((summary) => <tr key={summary.profileId}><td>{sonosLatencyExperimentProfiles.find((profile) => profile.id === summary.profileId)?.label}</td><td>{summary.samples}</td><td>{summary.samples ? Math.round(summary.averageMs) : '—'}</td><td>{summary.samples ? summary.minimumMs : '—'}</td><td>{summary.samples ? summary.maximumMs : '—'}</td></tr>)}
+            </tbody></table>
           </section>
 
           <section className="research-lab-panel">

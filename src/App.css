@@ -560,7 +560,7 @@ body,
   gap: 12px;
   min-height: 0;
   padding: 12px;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .research-lab-panel {
@@ -572,6 +572,61 @@ body,
   background: #292b30;
   border: 1px solid #3e4046;
   border-radius: 6px;
+}
+
+.research-latency-panel {
+  grid-column: 1 / -1;
+}
+
+.research-latency-controls,
+.research-latency-profile,
+.research-latency-record {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 10px;
+}
+
+.research-latency-controls label,
+.research-latency-record label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #c7c9ce;
+  font-size: 11px;
+}
+
+.research-latency-profile span,
+.research-latency-status {
+  color: #aeb1b8;
+  font-size: 11px;
+}
+
+.research-latency-profile span {
+  padding: 3px 6px;
+  background: #222328;
+  border: 1px solid #3f4249;
+  border-radius: 3px;
+}
+
+.research-latency-record input {
+  width: 90px;
+}
+
+.research-latency-results {
+  width: 100%;
+  margin-top: 10px;
+  border-collapse: collapse;
+  color: #c7c9ce;
+  font-size: 11px;
+}
+
+.research-latency-results th,
+.research-latency-results td {
+  padding: 5px 7px;
+  text-align: left;
+  border-bottom: 1px solid #3e4046;
 }
 
 .research-section-heading {

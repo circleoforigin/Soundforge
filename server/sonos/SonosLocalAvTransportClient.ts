@@ -10,9 +10,9 @@ export class SonosLocalAvTransportError extends Error {
   }
 }
 export class SonosLocalAvTransportClient {
-  async setStreamUri(controlUrl: string, streamUri: string): Promise<void> {
+  async setStreamUri(controlUrl: string, streamUri: string, metadata = ''): Promise<void> {
     await this.action(controlUrl, 'SetAVTransportURI',
-      `<InstanceID>0</InstanceID><CurrentURI>${escapeXml(streamUri)}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>`);
+      `<InstanceID>0</InstanceID><CurrentURI>${escapeXml(streamUri)}</CurrentURI><CurrentURIMetaData>${escapeXml(metadata)}</CurrentURIMetaData>`);
   }
 
   async play(controlUrl: string): Promise<void> {

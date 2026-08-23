@@ -4,6 +4,7 @@ import test from 'node:test';
 import type { AudioDevice, AudioStreamTransportSnapshot } from '../../src/models/ResearchLab.ts';
 import type { ResolvedSonosAudioDevice } from '../research-lab/SonosAudioDeviceDiscovery.ts';
 import { SonosLocalContinuousStreamTransport } from './SonosLocalContinuousStreamTransport.ts';
+import { getSonosLatencyExperimentProfile } from '../../src/models/SonosLatencyLab.ts';
 
 function fixture(deviceIds = ['RINCON_PLAY1']): ResolvedSonosAudioDevice {
   const device: AudioDevice = {
@@ -83,4 +84,33 @@ test('direct physical-device start uses LAN discovery without Sonos Cloud resolu
   const binding = await transport.startPhysicalDevice(context, 'RINCON_PLAY1', 'Office');
   assert.equal(cloudResolutionCalls, 0); assert.deepEqual(actions, ['set', 'play']);
   await transport.stop(binding); assert.equal(actions.at(-1), 'stop');
+});
+
+test('latency broadcast profiles change the actual URI, MIME, and AVTransport metadata', async () => {
+  const resolved = fixture();
+  const calls: Array<{ uri: string; metadata: string }> = [];
+  const transport = new SonosLocalContinuousStreamTransport(
+    async () => resolved,
+    async (id) => ({ physicalDeviceId: id, address: '127.0.0.1', descriptionUrl: 'http://127.0.0.1/device.xml', avTransportControlUrl: 'http://127.0.0.1:1400/av' }),
+    {
+      async setStreamUri(_url, uri, metadata = '') { calls.push({ uri, metadata }); },
+      async play() {}, async stop() {},
+    }
+  );
+  for (const profileId of ['wav-broadcast', 'l16-broadcast'] as const) {
+    const profile = getSonosLatencyExperimentProfile(profileId);
+    assert.ok(profile);
+    const binding = await transport.start({
+      device: resolved.device, transport: resolved.device.transports[0],
+      streamId: `stream-${profileId}`, streamUrl: 'https://unused', latencyProfile: profile,
+      bindHttpClient: () => undefined, updateTransport: () => undefined,
+      addDiagnostic: () => undefined, terminate: () => undefined,
+    });
+    const call = calls.at(-1)!;
+    assert.match(call.uri, /^http:\/\/127\.0\.0\.1:\d+\/research-lab\//);
+    assert.doesNotMatch(call.uri, /^x-rincon-mp3radio:/);
+    assert.match(call.metadata, /object\.item\.audioItem\.audioBroadcast/);
+    assert.match(call.metadata, new RegExp(profile.mimeType.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    await transport.stop(binding);
+  }
 });

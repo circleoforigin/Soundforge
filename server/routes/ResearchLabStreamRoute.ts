@@ -82,10 +82,11 @@ export function registerResearchLabStreamRoute(
   });
 
   app.post('/api/research-lab/streams', json(), async (request, response) => {
-    const { deviceId, transportId, httpFramingMode } = request.body as {
+    const { deviceId, transportId, httpFramingMode, latencyProfileId } = request.body as {
       deviceId?: unknown;
       transportId?: unknown;
       httpFramingMode?: unknown;
+      latencyProfileId?: unknown;
     };
     if (typeof deviceId !== 'string' || typeof transportId !== 'string') {
       response.status(400).json({
@@ -101,13 +102,18 @@ export function registerResearchLabStreamRoute(
       });
       return;
     }
+    if (latencyProfileId !== undefined && typeof latencyProfileId !== 'string') {
+      response.status(400).json({ ok: false, message: 'latencyProfileId must be a string.' });
+      return;
+    }
     try {
       const baseUrl = getPublicBaseUrl(request);
       const stream = await service.start(
         deviceId,
         transportId,
         (streamId) => `${baseUrl}/api/research-lab/streams/${encodeURIComponent(streamId)}/live.mp3`,
-        httpFramingMode ?? 'chunked'
+        httpFramingMode ?? 'chunked',
+        latencyProfileId as string | undefined
       );
       response.status(201).json({ ok: true, stream });
     } catch (error) {
@@ -115,6 +121,32 @@ export function registerResearchLabStreamRoute(
         ok: false,
         code: researchLabErrorCode(error),
         message: error instanceof Error ? error.message : 'Unable to start continuous stream.',
+      });
+    }
+  });
+
+  app.post('/api/research-lab/streams/:streamId/latency-tone', json(), (request, response) => {
+    try {
+      response.json({ ok: true, stream: service.injectLatencyTone(request.params.streamId) });
+    } catch (error) {
+      response.status(error instanceof ResearchLabRequestError ? error.status : 500).json({
+        ok: false,
+        message: error instanceof Error ? error.message : 'Unable to inject latency tone.',
+      });
+    }
+  });
+
+  app.post('/api/research-lab/streams/:streamId/latency-result', json(), (request, response) => {
+    try {
+      const observedDelayMs = Number((request.body as { observedDelayMs?: unknown }).observedDelayMs);
+      response.json({
+        ok: true,
+        stream: service.recordLatencyObservation(request.params.streamId, observedDelayMs),
+      });
+    } catch (error) {
+      response.status(error instanceof ResearchLabRequestError ? error.status : 500).json({
+        ok: false,
+        message: error instanceof Error ? error.message : 'Unable to record latency result.',
       });
     }
   });

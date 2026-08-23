@@ -181,6 +181,36 @@ function inspectAdtsFrames(buffer: Buffer): Mp3FrameScan {
   return best;
 }
 
+function inspectPcmStartup(
+  buffer: Buffer,
+  format: ContinuousAudioEncodingProfile
+): Mp3FrameScan {
+  const bytesPerFrame = format.sampleRate * format.frameDurationMs / 1_000
+    * format.channelCount * format.bitsPerSample / 8;
+  const headerBytes = format.container === 'wav' ? 78 : 0;
+  if (format.container === 'wav') {
+    if (buffer.length < 12 || buffer.toString('ascii', 0, 4) !== 'RIFF'
+      || buffer.toString('ascii', 8, 12) !== 'WAVE') {
+      return { firstFrameOffset: null, firstFrameBytes: null, completeFrameCount: 0 };
+    }
+  }
+  const completeFrameCount = Math.max(0, Math.floor((buffer.length - headerBytes) / bytesPerFrame));
+  return {
+    firstFrameOffset: completeFrameCount > 0 ? headerBytes : null,
+    firstFrameBytes: completeFrameCount > 0 ? bytesPerFrame : null,
+    completeFrameCount,
+  };
+}
+
+function inspectEncodedFrames(
+  buffer: Buffer,
+  format: ContinuousAudioEncodingProfile
+): Mp3FrameScan {
+  if (format.container === 'adts') return inspectAdtsFrames(buffer);
+  if (format.container === 'mp3') return inspectMp3Frames(buffer);
+  return inspectPcmStartup(buffer, format);
+}
+
 function sanitizeDiagnosticText(value: string): string {
   return value
     .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
@@ -287,6 +317,7 @@ export class ContinuousAudioStream {
   private toneSamplesRemaining = 0;
   private tonePhase = 0;
   private startupBuffer = Buffer.alloc(0);
+  private retainedStartupPrefix = Buffer.alloc(0);
   private startupPrefixBytes = 0;
   private startupBufferReady = false;
   private startupBufferFlushed = false;
@@ -541,15 +572,25 @@ export class ContinuousAudioStream {
         this.start();
       }
       if (reconnecting) {
-        this.aligningReconnect = true;
-        this.reconnectAlignmentBuffer = Buffer.alloc(0);
         this.firstLiveBytesDelivered = false;
         this.state = 'preparing';
-        this.encoder?.stdout.resume();
-        this.resumePcmForReconnect();
-        this.record('http', 'startup-client-reconnected', 'Startup reconnect consumer attached; waiting for a complete encoded frame.', {
-          connectionOrdinal: ordinal,
-        });
+        if (this.format.container === 'wav') {
+          this.startupBuffer = Buffer.from(this.retainedStartupPrefix);
+          this.startupBufferFlushed = false;
+          this.record('http', 'startup-client-reconnected', 'Startup reconnect consumer attached; replaying the WAV container prefix.', {
+            connectionOrdinal: ordinal,
+            replayedPrefixBytes: this.startupBuffer.length,
+          });
+          this.flushStartupBuffer();
+        } else {
+          this.aligningReconnect = true;
+          this.reconnectAlignmentBuffer = Buffer.alloc(0);
+          this.encoder?.stdout.resume();
+          this.resumePcmForReconnect();
+          this.record('http', 'startup-client-reconnected', 'Startup reconnect consumer attached; waiting for a complete encoded frame.', {
+            connectionOrdinal: ordinal,
+          });
+        }
       } else if (this.startupBufferReady) {
         this.flushStartupBuffer();
       }
@@ -872,12 +913,10 @@ export class ContinuousAudioStream {
       startupBufferBytes: this.startupBuffer.length,
       maximumStartupBufferBytes,
     });
-    const frameScan = this.format.container === 'adts'
-      ? inspectAdtsFrames(this.startupBuffer)
-      : inspectMp3Frames(this.startupBuffer);
+    const frameScan = inspectEncodedFrames(this.startupBuffer, this.format);
     if (frameScan.firstFrameOffset !== null && this.firstMpegFrameOffset === null) {
       this.firstMpegFrameOffset = frameScan.firstFrameOffset;
-      this.record('encoder', this.format.container === 'adts' ? 'first-adts-frame' : 'first-mpeg-frame', 'First complete encoded audio frame found.', {
+      this.record('encoder', this.format.container === 'adts' ? 'first-adts-frame' : this.format.container === 'mp3' ? 'first-mpeg-frame' : 'first-pcm-frame', 'First complete output audio frame found.', {
         byteOffset: frameScan.firstFrameOffset,
         frameBytes: frameScan.firstFrameBytes,
       });
@@ -886,6 +925,7 @@ export class ContinuousAudioStream {
     if (!this.startupBufferReady && frameScan.completeFrameCount >= startupReadyFrameCount) {
       this.startupBufferReady = true;
       this.startupPrefixBytes = this.startupBuffer.length;
+      this.retainedStartupPrefix = Buffer.from(this.startupBuffer);
       encoder.stdout.pause();
       this.pausePcmForReady();
       this.record('encoder', 'startup-buffer-ready', 'Encoded startup buffer is ready for a client.', {
@@ -993,9 +1033,7 @@ export class ContinuousAudioStream {
 
   private writeReconnectAlignedChunk(encoder: ChildProcessWithoutNullStreams, chunk: Buffer): void {
     this.reconnectAlignmentBuffer = Buffer.concat([this.reconnectAlignmentBuffer, chunk]);
-    const scan = this.format.container === 'adts'
-      ? inspectAdtsFrames(this.reconnectAlignmentBuffer)
-      : inspectMp3Frames(this.reconnectAlignmentBuffer);
+    const scan = inspectEncodedFrames(this.reconnectAlignmentBuffer, this.format);
     if (scan.firstFrameOffset === null || scan.completeFrameCount < 1) {
       if (this.reconnectAlignmentBuffer.length > maximumStartupBufferBytes) {
         this.recordError('reconnect-alignment-overflow', new Error('Reconnect frame alignment buffer exceeded its bound.'));
@@ -1432,6 +1470,20 @@ export class ContinuousAudioStream {
   }
 
   private countEncodedFrames(chunk: Buffer): void {
+    if (this.format.container === 'wav' || this.format.container === 'l16') {
+      const bytesPerFrame = this.format.sampleRate * this.format.frameDurationMs / 1_000
+        * this.format.channelCount * this.format.bitsPerSample / 8;
+      this.encodedFrameTelemetryBuffer = Buffer.concat([this.encodedFrameTelemetryBuffer, chunk]);
+      const headerBytes = this.format.container === 'wav' && this.encodedFramesProduced === 0 ? 78 : 0;
+      if (this.encodedFrameTelemetryBuffer.length <= headerBytes) return;
+      const available = this.encodedFrameTelemetryBuffer.length - headerBytes;
+      const frames = Math.floor(available / bytesPerFrame);
+      this.encodedFramesProduced += frames;
+      this.encodedFrameTelemetryBuffer = this.encodedFrameTelemetryBuffer.subarray(
+        headerBytes + frames * bytesPerFrame
+      );
+      return;
+    }
     this.encodedFrameTelemetryBuffer = Buffer.concat([this.encodedFrameTelemetryBuffer, chunk]);
     let cursor = 0;
     const minimumHeader = this.format.container === 'adts' ? 7 : 4;

@@ -3,6 +3,7 @@ import net, { type Socket } from 'node:net';
 interface LocalStreamServerOptions {
   streamId: string;
   bindAddress: string;
+  contentType?: string;
   onClient(client: Socket, metadata: {
     remoteAddress?: string;
     httpVersion?: string;
@@ -93,9 +94,10 @@ export class SonosLocalHttpStreamServer {
       this.connectionOrdinal = ordinal;
       this.client = socket;
       socket.once('close', () => { if (this.client === socket) this.client = null; });
-      socket.write('HTTP/1.0 200 OK\r\nContent-Type: audio/aac\r\nCache-Control: no-store, no-cache, must-revalidate, no-transform\r\nConnection: close\r\n\r\n');
+      const contentType = this.options.contentType ?? 'audio/aac';
+      socket.write(`HTTP/1.0 200 OK\r\nContent-Type: ${contentType}\r\nCache-Control: no-store, no-cache, must-revalidate, no-transform\r\nConnection: close\r\n\r\n`);
       this.options.onDiagnostic('Sonos local non-chunked HTTP/1.0 response started.', {
-        contentType: 'audio/aac', transferEncoding: null, contentLength: null,
+        contentType, transferEncoding: null, contentLength: null,
       });
       this.options.onClient(socket, {
         ...(socket.remoteAddress ? { remoteAddress: socket.remoteAddress } : {}),

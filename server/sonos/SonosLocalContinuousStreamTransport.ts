@@ -15,6 +15,10 @@ import { discoverLocalSonosDevice, type SonosLocalDevice } from './SonosLocalDis
 import { SonosLocalHttpStreamServer } from './SonosLocalHttpStreamServer.ts';
 import { resolveSonosLocalResearchDevice } from '../research-lab/SonosLocalAudioDeviceDiscovery.ts';
 
+function broadcastMetadata(streamUrl: string, mimeType: string): string {
+  return `<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="0" restricted="1"><dc:title>SACscape Latency Lab</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><res protocolInfo="http-get:*:${mimeType}:*">${streamUrl}</res></item></DIDL-Lite>`;
+}
+
 interface LocalBindingData {
   streamId: string;
   controlUrl: string;
@@ -86,21 +90,34 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
     const localAddress = await routeAddress(local.address);
     let server: SonosLocalHttpStreamServer | undefined;
     try {
+      const profile = context.latencyProfile;
+      const mimeType = profile?.mimeType ?? 'audio/aac';
       server = new SonosLocalHttpStreamServer({
         streamId: context.streamId,
         bindAddress: localAddress,
+        contentType: mimeType,
         onClient: context.bindHttpClient,
         onDiagnostic: context.addDiagnostic,
       });
       const port = await server.listen();
-      const path = `/research-lab/${encodeURIComponent(context.streamId)}.aac`;
+      const extension = profile?.container ?? 'aac';
+      const path = `/research-lab/${encodeURIComponent(context.streamId)}.${extension}`;
       const httpUrl = `http://${localAddress}:${port}${path}`;
-      const sonosUri = `x-rincon-mp3radio://${localAddress}:${port}${path}`;
+      const sonosUri = profile?.uriScheme === 'http'
+        ? httpUrl
+        : `x-rincon-mp3radio://${localAddress}:${port}${path}`;
+      const metadata = profile?.metadataMode === 'audio-broadcast'
+        ? broadcastMetadata(httpUrl, mimeType)
+        : '';
       context.addDiagnostic('Local Sonos stream listener started.', {
         physicalDeviceIdSuffix: physicalDeviceId.slice(-10),
-        localAddress, port, mimeType: 'audio/aac', framing: 'HTTP/1.0 connection-close',
+        localAddress, port, mimeType, framing: 'HTTP/1.0 connection-close',
+        latencyProfileId: profile?.id ?? null,
+        sonosStreamType: profile?.sonosStreamType ?? 'radio',
+        uriScheme: profile?.uriScheme ?? 'x-rincon-mp3radio',
+        metadataMode: profile?.metadataMode ?? 'empty',
       });
-      await this.avTransport.setStreamUri(local.avTransportControlUrl, sonosUri);
+      await this.avTransport.setStreamUri(local.avTransportControlUrl, sonosUri, metadata);
       await this.avTransport.play(local.avTransportControlUrl);
       context.updateTransport({
         state: 'bound',

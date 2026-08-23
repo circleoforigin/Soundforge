@@ -3,6 +3,7 @@ import type {
   AudioStreamSnapshot,
   ContinuousHttpFramingMode,
 } from '../../src/models/ResearchLab.ts';
+import crypto from 'node:crypto';
 import type {
   ContinuousStreamTransport,
   ContinuousStreamTransportBinding,
@@ -15,6 +16,11 @@ import {
 import { sonosCloudContinuousStreamTransport } from '../sonos/SonosCloudContinuousStreamTransport.ts';
 import { sonosLocalContinuousStreamTransport } from '../sonos/SonosLocalContinuousStreamTransport.ts';
 import { getSonosAudioDevices } from './SonosAudioDeviceDiscovery.ts';
+import {
+  getSonosLatencyExperimentProfile,
+  type SonosLatencyExperimentProfile,
+} from '../../src/models/SonosLatencyLab.ts';
+import { performance } from 'node:perf_hooks';
 
 interface ActiveTransportBinding {
   transport: ContinuousStreamTransport;
@@ -63,7 +69,8 @@ export class ResearchLabStreamService {
     deviceId: string,
     transportId: string,
     createStreamUrl: (streamId: string) => string,
-    httpFramingMode: ContinuousHttpFramingMode = 'chunked'
+    httpFramingMode: ContinuousHttpFramingMode = 'chunked',
+    latencyProfileId?: string
   ): Promise<AudioStreamSnapshot> {
     const device = (await this.discoverDevices()).find((candidate) => candidate.id === deviceId);
     if (!device) {
@@ -83,13 +90,21 @@ export class ResearchLabStreamService {
     if (!transport) {
       throw new ResearchLabRequestError(501, 'The requested transport has no server implementation.');
     }
+    let latencyProfile: SonosLatencyExperimentProfile | undefined;
+    if (latencyProfileId !== undefined) {
+      latencyProfile = getSonosLatencyExperimentProfile(latencyProfileId);
+      if (!latencyProfile) throw new ResearchLabRequestError(400, 'Unknown latency experiment profile.');
+      if (transportId !== 'sonos-local-continuous') {
+        throw new ResearchLabRequestError(400, 'Latency transport profiles require Sonos Local continuous streaming.');
+      }
+    }
 
     let streamId = '';
     const stream = this.manager.create({
       deviceId,
       transportId,
       httpFramingMode,
-      encodingProfileId: transport.encodingProfileId,
+      encodingProfileId: latencyProfile?.encodingProfileId ?? transport.encodingProfileId,
       clientReconnectGraceMs: transport.clientReconnectGraceMs,
       minimumConnectionsForTone: transport.minimumConnectionsForTone,
       onEvent: (event) => transport.handleRuntimeEvent?.(
@@ -105,6 +120,21 @@ export class ResearchLabStreamService {
     });
     streamId = stream.id;
     const streamUrl = createStreamUrl(stream.id);
+    if (latencyProfile) {
+      stream.addDiagnosticEvent('lifecycle', 'Sonos latency experiment profile selected.', {
+        profileId: latencyProfile.id,
+        codec: latencyProfile.codec,
+        container: latencyProfile.container,
+        mimeType: latencyProfile.mimeType,
+        sampleRate: latencyProfile.sampleRate,
+        channelCount: latencyProfile.channelCount,
+        bitrate: latencyProfile.bitrate ?? null,
+        sonosStreamType: latencyProfile.sonosStreamType,
+        uriScheme: latencyProfile.uriScheme,
+        metadataMode: latencyProfile.metadataMode,
+        httpFraming: latencyProfile.httpFraming,
+      }, 'latency-profile-selected');
+    }
 
     try {
       stream.start();
@@ -120,6 +150,7 @@ export class ResearchLabStreamService {
         transport: transportOption,
         streamId: stream.id,
         streamUrl,
+        ...(latencyProfile ? { latencyProfile } : {}),
         bindHttpClient: (client) => stream.bindHttpClient(client),
         updateTransport: (update, message) => stream.updateTransport(update, message),
         addDiagnostic: (message, details) =>
@@ -155,6 +186,43 @@ export class ResearchLabStreamService {
       this.manager.stop(stream.id, 'transport start failed');
       throw error;
     }
+  }
+
+  injectLatencyTone(streamId: string): AudioStreamSnapshot {
+    const stream = this.manager.getActive(streamId);
+    const binding = this.bindings.get(streamId);
+    if (!stream) throw new ResearchLabRequestError(404, 'Active continuous audio stream not found.');
+    if (!binding || !stream.getSnapshot().transport?.bound) {
+      throw new ResearchLabRequestError(409, 'The stream transport is not bound.');
+    }
+    if (!stream.isReadyForTone()) {
+      throw new ResearchLabRequestError(409, 'The continuous stream is not ready for latency-tone injection yet.');
+    }
+    const requestedAt = performance.now();
+    stream.scheduleTone({
+      eventId: `latency-${crypto.randomUUID()}`,
+      targetMonotonicTime: requestedAt,
+      frequencyHz: 880,
+      durationMs: 200,
+    });
+    stream.addDiagnosticEvent('source', 'Latency tone requested.', {
+      requestedMonotonicTime: requestedAt,
+      frequencyHz: 880,
+      durationMs: 200,
+    }, 'latency-tone-requested');
+    return stream.getSnapshot();
+  }
+
+  recordLatencyObservation(streamId: string, observedDelayMs: number): AudioStreamSnapshot {
+    const stream = this.manager.get(streamId);
+    if (!stream) throw new ResearchLabRequestError(404, 'Continuous audio stream not found.');
+    if (!Number.isFinite(observedDelayMs) || observedDelayMs < 0) {
+      throw new ResearchLabRequestError(400, 'Observed delay must be a non-negative number of milliseconds.');
+    }
+    stream.addDiagnosticEvent('source', 'User recorded an observed acoustic delay.', {
+      observedDelayMs,
+    }, 'latency-observation-recorded');
+    return stream.getSnapshot();
   }
 
   injectTone(streamId: string): AudioStreamSnapshot {
