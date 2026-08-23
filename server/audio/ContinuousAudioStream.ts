@@ -269,6 +269,7 @@ type ContinuousAudioStreamState =
   | 'error';
 
 export interface ContinuousAudioStreamOptions {
+  latencyLabSessionId?: string;
   deviceId?: string;
   transportId?: string;
   httpFramingMode?: ContinuousHttpFramingMode;
@@ -280,6 +281,27 @@ export interface ContinuousAudioStreamOptions {
   onEvent?: (event: AudioStreamDiagnosticEvent) => void;
   onClientDisconnected?: (reason: string) => void;
   onEncoderExit?: (details: { code: number | null; signal: NodeJS.Signals | null }) => void;
+}
+
+export interface ContinuousAudioToneReadiness {
+  toneReady: boolean;
+  reason: string | null;
+  lifecycleState: AudioStreamLifecycleState;
+  clientConnected: boolean;
+  hasDeliveredBytes: boolean;
+  pcmRunning: boolean;
+  pcmPaused: boolean;
+  pcmCanResume: boolean;
+  stdinBackpressured: boolean;
+  httpBackpressured: boolean;
+  encoderRunning: boolean;
+  externalPcmSource: boolean;
+  connectionOrdinal: number | null;
+  connectionCount: number;
+  requiredConnectionCount: number;
+  encoderStdinWritableLength: number;
+  encoderStdoutReadableLength: number;
+  httpWritableLength: number;
 }
 
 interface HttpStreamClient extends Writable {
@@ -378,8 +400,25 @@ export class ContinuousAudioStream {
   private activeTone: {
     ordinal: number;
     requestedAt: Date;
+    requestedMonotonicTime: number;
     pcmStartedAt: Date | null;
     encodedBytesBefore: number;
+    pcmBytesBefore: number;
+    deliveredBytesBefore: number;
+    framesBefore: number;
+    frequencyHz: number;
+    durationMs: number;
+    diagnosticPrefix: string | null;
+    diagnosticDetails: Record<string, unknown>;
+  } | null = null;
+  private pendingToneOutputVerification: {
+    details: Record<string, unknown>;
+    frameIndex: number;
+    framePeak: number;
+    frameRms: number;
+    pcmBytesBeforeOutput: number;
+    encodedBytesBeforeOutput: number;
+    httpBytesBeforeOutput: number;
   } | null = null;
   private lastToneCompletedAt: Date | null = null;
   private readonly scheduledEvents: ScheduledResearchAudioEventResult[] = [];
@@ -609,30 +648,60 @@ export class ContinuousAudioStream {
     return this.format;
   }
 
-  injectTestTone(): { frequencyHz: number; durationMs: number } {
-    if (!this.isReadyForTone()) {
-      throw new Error('The continuous audio stream is not ready for tone injection.');
+  injectTestTone(options: {
+    durationMs?: number;
+    frequencyHz?: number;
+    diagnosticPrefix?: string;
+    diagnosticDetails?: Record<string, unknown>;
+    acceptStableInitialConsumer?: boolean;
+  } = {}): { frequencyHz: number; durationMs: number } {
+    const readiness = this.prepareForToneInjection({
+      acceptStableInitialConsumer: options.acceptStableInitialConsumer,
+    });
+    if (!readiness.toneReady) {
+      throw new Error(`The continuous audio stream is not ready for tone injection: ${readiness.reason ?? 'unknown reason'}`);
     }
-    this.toneSamplesRemaining = Math.round(
-      this.format.sampleRate * toneDurationMs / 1000
-    );
+    const durationMs = options.durationMs ?? toneDurationMs;
+    const frequencyHz = options.frequencyHz ?? toneFrequencyHz;
+    this.toneSamplesRemaining = Math.round(this.format.sampleRate * durationMs / 1000);
     this.tonePhase = 0;
     this.toneOrdinal += 1;
     this.activeTone = {
       ordinal: this.toneOrdinal,
       requestedAt: new Date(),
+      requestedMonotonicTime: performance.now(),
       pcmStartedAt: null,
       encodedBytesBefore: this.encodedBytesProduced,
+      pcmBytesBefore: this.pcmBytesGenerated,
+      deliveredBytesBefore: this.clientBytesWritten,
+      framesBefore: this.pcmFramesGenerated,
+      frequencyHz,
+      durationMs,
+      diagnosticPrefix: options.diagnosticPrefix ?? null,
+      diagnosticDetails: options.diagnosticDetails ?? {},
     };
     this.record('source', 'tone-injected', 'Diagnostic test tone injected.', {
-      frequencyHz: toneFrequencyHz,
-      durationMs: toneDurationMs,
+      frequencyHz,
+      durationMs,
       toneOrdinal: this.toneOrdinal,
       requestedAt: this.activeTone.requestedAt.toISOString(),
       encodedBytesBefore: this.activeTone.encodedBytesBefore,
       consumerConnected: this.hasActiveClient(),
     });
-    return { frequencyHz: toneFrequencyHz, durationMs: toneDurationMs };
+    if (this.activeTone.diagnosticPrefix) {
+      this.record('source', `${this.activeTone.diagnosticPrefix}.tone_requested`, 'Latency Lab tone requested.', {
+        ...this.activeTone.diagnosticDetails,
+        requestMonotonicTimestamp: this.activeTone.requestedMonotonicTime,
+        runtimeState: this.getLifecycleState(),
+        sourceModeBefore: 'silence',
+        pcmBytes: this.pcmBytesGenerated,
+        encodedBytes: this.encodedBytesProduced,
+        httpBytesDelivered: this.clientBytesWritten,
+        consumerConnected: this.hasActiveClient(),
+        writableBacklog: this.client?.writableLength ?? 0,
+      });
+    }
+    return { frequencyHz, durationMs };
   }
 
   scheduleTone(event: {
@@ -641,8 +710,11 @@ export class ContinuousAudioStream {
     frequencyHz?: number;
     durationMs?: number;
     gainEnvelope?: ScheduledResearchAudioGainEnvelope;
+    acceptStableInitialConsumer?: boolean;
   }): ScheduledResearchAudioEventResult {
-    if (!this.isReadyForTone()) {
+    if (!this.prepareForToneInjection({
+      acceptStableInitialConsumer: event.acceptStableInitialConsumer,
+    }).toneReady) {
       throw new Error('The continuous audio stream is not ready for scheduled tone generation.');
     }
     if (this.scheduledEvents.some((candidate) => candidate.eventId === event.eventId)) {
@@ -656,6 +728,7 @@ export class ContinuousAudioStream {
       gainEnvelope: event.gainEnvelope ? { ...event.gainEnvelope } : null,
       status: 'scheduled',
       actualPcmStartMonotonicTime: null,
+      actualPcmFrameIndex: null,
       scheduleErrorMs: null,
     };
     this.scheduledEvents.push(scheduled);
@@ -683,8 +756,90 @@ export class ContinuousAudioStream {
   }
 
   isReadyForTone(): boolean {
-    return this.state === 'running' && this.hasActiveClient() && this.firstLiveBytesDelivered
-      && this.connections.length >= (this.options.minimumConnectionsForTone ?? 1);
+    return this.getToneReadiness().toneReady;
+  }
+
+  getToneReadiness(options: { acceptStableInitialConsumer?: boolean } = {}): ContinuousAudioToneReadiness {
+    const lifecycleState = this.getLifecycleState();
+    const clientConnected = this.hasActiveClient();
+    const encoderRunning = Boolean(this.encoder && this.getEncoderState() === 'running');
+    const pcmRunning = Boolean(this.frameTimer);
+    const pcmCanResume = Boolean(
+      this.pcmPausedForReady && clientConnected && this.startupBufferFlushed && this.encoder
+      && !this.stdinBackpressured && !this.httpBackpressured && !this.options.externalPcmSource
+    );
+    let reason: string | null = null;
+    if (this.state === 'stopping' || this.state === 'stopped' || this.state === 'error') {
+      reason = `Stream lifecycle is ${lifecycleState}.`;
+    } else if (!clientConnected) {
+      reason = 'No active Sonos HTTP consumer.';
+    } else if (!this.firstLiveBytesDelivered) {
+      reason = 'The connected consumer has not received live audio bytes yet.';
+    } else if (!options.acceptStableInitialConsumer
+      && this.connections.length < (this.options.minimumConnectionsForTone ?? 1)) {
+      reason = `Waiting for the stable Sonos stream consumer (${this.connections.length}/${this.options.minimumConnectionsForTone ?? 1}).`;
+    } else if (this.options.externalPcmSource) {
+      reason = 'This stream uses an externally controlled PCM source.';
+    } else if (this.stdinBackpressured) {
+      reason = 'PCM encoder input is backpressured.';
+    } else if (this.httpBackpressured) {
+      reason = 'The HTTP stream consumer is backpressured.';
+    } else if (!encoderRunning) {
+      reason = 'The stream output pipeline is not running.';
+    } else if (!pcmRunning && !pcmCanResume) {
+      reason = this.pcmPausedForReady
+        ? 'PCM source is paused and could not resume.'
+        : 'PCM source clock is not running.';
+    }
+    return {
+      toneReady: reason === null,
+      reason,
+      lifecycleState,
+      clientConnected,
+      hasDeliveredBytes: this.firstLiveBytesDelivered,
+      pcmRunning,
+      pcmPaused: this.pcmPausedForReady,
+      pcmCanResume,
+      stdinBackpressured: this.stdinBackpressured,
+      httpBackpressured: this.httpBackpressured,
+      encoderRunning,
+      externalPcmSource: Boolean(this.options.externalPcmSource),
+      connectionOrdinal: this.currentConnection?.ordinal ?? null,
+      connectionCount: this.connections.length,
+      requiredConnectionCount: this.options.minimumConnectionsForTone ?? 1,
+      encoderStdinWritableLength: this.encoder?.stdin.writableLength ?? 0,
+      encoderStdoutReadableLength: this.encoder?.stdout.readableLength ?? 0,
+      httpWritableLength: this.client?.writableLength ?? this.lastClientWritableLength,
+    };
+  }
+
+  prepareForToneInjection(
+    options: { acceptStableInitialConsumer?: boolean } = {}
+  ): ContinuousAudioToneReadiness {
+    let readiness = this.getToneReadiness(options);
+    if (!readiness.toneReady && readiness.pcmCanResume) {
+      this.resumePcmAfterStartupFlush();
+      readiness = this.getToneReadiness(options);
+    }
+    return readiness;
+  }
+
+  getToneDiagnosticState(): Record<string, unknown> {
+    return {
+      streamId: this.id,
+      toneSamplesRemaining: this.toneSamplesRemaining,
+      sourceMode: this.currentSourceMode(),
+      pcmFrameIndex: this.pcmFramesGenerated,
+      pcmRunning: Boolean(this.frameTimer),
+      pcmPaused: this.pcmPausedForReady,
+      clientConnected: this.hasActiveClient(),
+      consumerOrdinal: this.currentConnection?.ordinal ?? null,
+      lifecycleState: this.getLifecycleState(),
+      outputState: this.getEncoderState(),
+      pcmBytesGenerated: this.pcmBytesGenerated,
+      encodedBytesProduced: this.encodedBytesProduced,
+      httpBytesDelivered: this.clientBytesWritten,
+    };
   }
 
   stop(reason = 'stream stopped'): void {
@@ -772,6 +927,9 @@ export class ContinuousAudioStream {
       : 'silence';
     return {
       id: this.id,
+      ...(this.options.latencyLabSessionId
+        ? { latencyLabSessionId: this.options.latencyLabSessionId }
+        : {}),
       ...(this.options.deviceId ? { deviceId: this.options.deviceId } : {}),
       ...(this.options.transportId ? { transportId: this.options.transportId } : {}),
       lifecycle,
@@ -1008,6 +1166,25 @@ export class ContinuousAudioStream {
       this.maximumClientWritableLength,
       client.writableLength
     );
+    if (this.pendingToneOutputVerification) {
+      const verification = this.pendingToneOutputVerification;
+      this.pendingToneOutputVerification = null;
+      this.record('source', 'latency_lab.tone_output_verified', 'Output bytes produced after verified tone PCM entered the selected profile pipeline.', {
+        ...verification.details,
+        profile: this.format.id,
+        sourcePcmFrameIndex: verification.frameIndex,
+        sourcePcmPeak: verification.framePeak,
+        sourcePcmRms: verification.frameRms,
+        pcmBytesBefore: verification.pcmBytesBeforeOutput,
+        pcmBytesAfter: this.pcmBytesGenerated,
+        encodedBytesBefore: verification.encodedBytesBeforeOutput,
+        encodedBytesAfter: this.encodedBytesProduced,
+        httpBytesBefore: verification.httpBytesBeforeOutput,
+        httpBytesAfter: this.clientBytesWritten,
+        outputChunkBytes: chunk.length,
+        consumerConnected: this.hasActiveClient(),
+      });
+    }
     if (!this.firstLiveBytesDelivered) {
       this.firstLiveBytesDelivered = true;
       this.state = 'running';
@@ -1067,6 +1244,7 @@ export class ContinuousAudioStream {
       && logicalFrameStartMonotonicTime >= nextScheduled.targetMonotonicTime) {
       nextScheduled.status = 'started';
       nextScheduled.actualPcmStartMonotonicTime = logicalFrameStartMonotonicTime;
+      nextScheduled.actualPcmFrameIndex = this.pcmFramesGenerated;
       nextScheduled.scheduleErrorMs = logicalFrameStartMonotonicTime - nextScheduled.targetMonotonicTime;
       this.activeScheduledEvent = nextScheduled;
       this.toneSamplesRemaining = Math.max(0, Math.round(
@@ -1076,8 +1254,16 @@ export class ContinuousAudioStream {
       this.activeTone = {
         ordinal: this.toneOrdinal,
         requestedAt: new Date(),
-        pcmStartedAt: new Date(),
+        requestedMonotonicTime: performance.now(),
+        pcmStartedAt: null,
         encodedBytesBefore: this.encodedBytesProduced,
+        pcmBytesBefore: this.pcmBytesGenerated,
+        deliveredBytesBefore: this.clientBytesWritten,
+        framesBefore: this.pcmFramesGenerated,
+        frequencyHz: nextScheduled.frequencyHz,
+        durationMs: nextScheduled.durationMs,
+        diagnosticPrefix: null,
+        diagnosticDetails: {},
       };
       this.record('source', 'scheduled-tone-started', 'Scheduled diagnostic tone PCM generation began.', {
         eventId: nextScheduled.eventId,
@@ -1102,6 +1288,17 @@ export class ContinuousAudioStream {
         encodedBytesBefore: this.activeTone.encodedBytesBefore,
         consumerConnected: this.hasActiveClient(),
       });
+      if (this.activeTone.diagnosticPrefix) {
+        this.record('source', `${this.activeTone.diagnosticPrefix}.tone_pcm_started`, 'Latency Lab tone entered the authoritative PCM stream.', {
+          ...this.activeTone.diagnosticDetails,
+          firstLogicalFrameIndex: this.pcmFramesGenerated,
+          pcmMonotonicTimestamp: logicalFrameStartMonotonicTime,
+          frequencyHz: this.activeTone.frequencyHz,
+          requestedDurationMs: this.activeTone.durationMs,
+          sourceModeBefore: 'silence',
+          sourceModeAfter: 'test-tone',
+        });
+      }
     }
     for (let sampleIndex = 0; sampleIndex < samplesPerFrame; sampleIndex += 1) {
       let sample = 0;
@@ -1120,12 +1317,48 @@ export class ContinuousAudioStream {
         ));
       } else if (this.toneSamplesRemaining > 0) {
         sample = Math.round(Math.sin(this.tonePhase) * toneAmplitude * 32_767);
-        this.tonePhase += 2 * Math.PI * toneFrequencyHz / this.format.sampleRate;
+        this.tonePhase += 2 * Math.PI
+          * (this.activeTone?.frequencyHz ?? toneFrequencyHz) / this.format.sampleRate;
         this.toneSamplesRemaining -= 1;
       }
       const offset = sampleIndex * this.format.channelCount * 2;
       frame.writeInt16LE(sample, offset);
       frame.writeInt16LE(sample, offset + 2);
+    }
+
+    if (this.activeTone?.diagnosticPrefix === 'latency_lab' && this.activeTone.pcmStartedAt
+      && !this.pendingToneOutputVerification
+      && this.pcmFramesGenerated === this.activeTone.framesBefore) {
+      let peak = 0;
+      let sumSquares = 0;
+      const firstSamples: number[] = [];
+      for (let offset = 0; offset < frame.length; offset += this.format.channelCount * 2) {
+        const sample = frame.readInt16LE(offset);
+        peak = Math.max(peak, Math.abs(sample));
+        sumSquares += sample * sample;
+        if (firstSamples.length < 12) firstSamples.push(sample);
+      }
+      const rms = Math.round(Math.sqrt(sumSquares / samplesPerFrame));
+      this.record('source', 'latency_lab.tone_pcm_verified', 'Generated PCM frame contains measured latency-tone samples.', {
+        ...this.activeTone.diagnosticDetails,
+        frameIndex: this.pcmFramesGenerated,
+        logicalFrameTimestamp: logicalFrameStartMonotonicTime,
+        toneSamplesRemaining: this.toneSamplesRemaining,
+        framePeak: peak,
+        frameRms: rms,
+        firstSamples,
+        sourceMode: this.currentSourceMode(),
+        verifiedNonZero: peak > 0,
+      });
+      this.pendingToneOutputVerification = {
+        details: { ...this.activeTone.diagnosticDetails },
+        frameIndex: this.pcmFramesGenerated,
+        framePeak: peak,
+        frameRms: rms,
+        pcmBytesBeforeOutput: this.pcmBytesGenerated,
+        encodedBytesBeforeOutput: this.encodedBytesProduced,
+        httpBytesBeforeOutput: this.clientBytesWritten,
+      };
     }
 
     const scheduledCompleted = this.activeScheduledEvent
@@ -1145,6 +1378,25 @@ export class ContinuousAudioStream {
         consumerConnected: this.hasActiveClient(),
         encodedBitsPerSecond: this.encodedRate.current,
       });
+      if (this.activeTone.diagnosticPrefix) {
+        this.record('source', `${this.activeTone.diagnosticPrefix}.tone_pcm_completed`, 'Latency Lab tone PCM generation completed and silence resumed.', {
+          ...this.activeTone.diagnosticDetails,
+          sampleCount: Math.round(this.format.sampleRate * this.activeTone.durationMs / 1_000),
+          actualDurationMs: this.activeTone.pcmStartedAt
+            ? completedAt.getTime() - this.activeTone.pcmStartedAt.getTime()
+            : null,
+          pcmFramesGeneratedDuringTone: this.pcmFramesGenerated - this.activeTone.framesBefore + 1,
+          pcmBytesBefore: this.activeTone.pcmBytesBefore,
+          pcmBytesAfter: this.pcmBytesGenerated + frame.length,
+          encodedBytesBefore: this.activeTone.encodedBytesBefore,
+          encodedBytesAfter: this.encodedBytesProduced,
+          httpBytesBefore: this.activeTone.deliveredBytesBefore,
+          httpBytesAfter: this.clientBytesWritten,
+          consumerConnected: this.hasActiveClient(),
+          writableBacklog: this.client?.writableLength ?? 0,
+          sourceModeAfter: 'silence',
+        });
+      }
       this.activeTone = null;
       if (this.activeScheduledEvent) {
         this.activeScheduledEvent.status = 'completed';

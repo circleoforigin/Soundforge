@@ -1,9 +1,7 @@
 import express from 'express';
 import { registerAppSettingsRoute } from './routes/AppSettingsRoute.ts';
 import { registerDiagnosticLogRoute } from './routes/DiagnosticLogRoute.ts';
-import { registerResearchLabDeviceRoute } from './routes/ResearchLabDeviceRoute.ts';
-import { registerResearchLabMultiSpeakerRoute } from './routes/ResearchLabMultiSpeakerRoute.ts';
-import { registerResearchLabStreamRoute } from './routes/ResearchLabStreamRoute.ts';
+import { registerResearchLabRoutes } from './routes/ResearchLabRoutes.ts';
 import { registerRoomAudioAssetRoute } from './routes/RoomAudioAssetRoute.ts';
 import { registerRoomAudioRoute } from './routes/RoomAudioRoute.ts';
 import { discoverSonosLocalAudioDevices } from './research-lab/SonosLocalAudioDeviceDiscovery.ts';
@@ -40,12 +38,14 @@ const localMultiSpeakerService = new MultiSpeakerSessionService(
   localResearchService,
   discoverSonosLocalAudioDevices
 );
-registerResearchLabDeviceRoute(app, {
-  discoverDevices: () => discoverSonosLocalAudioDevices(),
-  identifyDevice: async () => { throw new Error('Identify Speaker requires the optional Sonos Cloud service.'); },
+registerResearchLabRoutes(app, {
+  device: {
+    discoverDevices: () => discoverSonosLocalAudioDevices(),
+    identifyDevice: async () => { throw new Error('Identify Speaker requires the optional Sonos Cloud service.'); },
+  },
+  stream: { manager: localStreamManager, service: localResearchService },
+  multiSpeaker: localMultiSpeakerService,
 });
-registerResearchLabStreamRoute(app, { manager: localStreamManager, service: localResearchService });
-registerResearchLabMultiSpeakerRoute(app, localMultiSpeakerService);
 registerRoomAudioAssetRoute(app);
 registerRoomAudioRoute(app);
 
@@ -56,5 +56,4 @@ const server = app.listen(port, '127.0.0.1', () => {
   const address = server.address();
   const actualPort = address && typeof address !== 'string' ? address.port : port;
   console.log(`SACscape local runtime running at http://127.0.0.1:${actualPort}`);
-  if (smokeTest) server.close();
 });

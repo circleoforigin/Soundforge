@@ -119,9 +119,21 @@ export function normalizeDiscoveredAudioDevices(payload: unknown): NormalizedAud
         providerIdentifierSuffix: typeof identity.providerIdentifierSuffix === 'string'
           ? identity.providerIdentifierSuffix
           : '',
+        ...(typeof identity.providerIdentifier === 'string'
+          ? { providerIdentifier: identity.providerIdentifier }
+          : {}),
         logicalPlayerName,
         ...(typeof identity.componentRole === 'string'
           ? { componentRole: identity.componentRole }
+          : {}),
+        ...(typeof identity.modelNumber === 'string'
+          ? { modelNumber: identity.modelNumber }
+          : {}),
+        ...(typeof identity.serialNumber === 'string'
+          ? { serialNumber: identity.serialNumber }
+          : {}),
+        ...(typeof identity.networkAddress === 'string'
+          ? { networkAddress: identity.networkAddress }
           : {}),
       },
       capabilities,

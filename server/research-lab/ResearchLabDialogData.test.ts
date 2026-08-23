@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { normalizeDiscoveredAudioDevices } from '../../src/services/research-lab/normalizeAudioDevices.ts';
 import { readResearchLabIdentifyFailure } from '../../src/services/research-lab/researchLabErrors.ts';
+import { formatAudioDeviceSelectorLabel } from '../../src/services/research-lab/audioDeviceLabels.ts';
 
 function bondedDevice(component: number, includeIdentificationMetadata: boolean) {
   const physicalId = `RINCON_PLAY1_COMPONENT_${component}`;
@@ -14,6 +15,7 @@ function bondedDevice(component: number, includeIdentificationMetadata: boolean)
     ...(includeIdentificationMetadata ? {
       identity: {
         providerIdentifierSuffix: physicalId.slice(-10),
+        providerIdentifier: physicalId,
         logicalPlayerName: 'Living Room',
         componentRole: `Bonded component ${component}`,
       },
@@ -76,6 +78,29 @@ test('normalizes current bonded PLAY:1 discovery data without changing device id
   assert.equal(result.devices[1].name, 'Bonded component 2');
   assert.equal(result.devices[1].model, 'PLAY:1');
   assert.equal(result.devices[1].diagnosticActions[0]?.availability, 'available');
+});
+
+test('duplicate friendly names remain unambiguous by model and physical ID suffix', () => {
+  const first = bondedDevice(1, true);
+  const second = bondedDevice(2, true);
+  first.name = 'Living Room';
+  second.name = 'Living Room';
+  const result = normalizeDiscoveredAudioDevices({
+    ok: true,
+    devices: [first, second],
+  });
+  const labels = result.devices.map(formatAudioDeviceSelectorLabel);
+  assert.equal(labels[0], 'Living Room — PLAY:1 — …NENT_1');
+  assert.equal(labels[1], 'Living Room — PLAY:1 — …NENT_2');
+  assert.equal(new Set(labels).size, 2);
+  assert.notEqual(result.devices[0].identity.providerIdentifier, result.devices[1].identity.providerIdentifier);
+});
+
+test('selector labels gracefully fall back when model metadata is unavailable', () => {
+  const device = bondedDevice(1, true);
+  (device as { model?: string }).model = undefined;
+  const [normalized] = normalizeDiscoveredAudioDevices({ ok: true, devices: [device] }).devices;
+  assert.equal(formatAudioDeviceSelectorLabel(normalized), 'Bonded component 1 — …NENT_1');
 });
 
 test('keeps the React device-card contract safe during backend/frontend version skew', () => {

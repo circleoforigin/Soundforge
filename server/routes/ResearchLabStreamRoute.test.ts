@@ -11,7 +11,10 @@ import type {
 } from '../../src/models/ResearchLab.ts';
 import { ContinuousAudioStreamManager } from '../audio/ContinuousAudioStreamManager.ts';
 import { ContinuousStreamTransportRegistry } from '../audio/transports/ContinuousStreamTransportRegistry.ts';
-import { ResearchLabStreamService } from '../research-lab/ResearchLabStreamService.ts';
+import {
+  ResearchLabRequestError,
+  ResearchLabStreamService,
+} from '../research-lab/ResearchLabStreamService.ts';
 import {
   indefiniteStreamContentLength,
   registerResearchLabStreamRoute,
@@ -107,6 +110,56 @@ test('Research Lab stream diagnostics routes return list, snapshot, and not-foun
     assert.equal(responseMetadata?.details?.transferEncoding, 'chunked');
   } finally {
     manager.stopAll('route test cleanup');
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
+test('latency tone rejection returns its complete structured readiness snapshot', async () => {
+  const manager = new ContinuousAudioStreamManager();
+  const readiness = {
+    profileId: 'aac-radio', streamId: 'latency-stream', physicalDeviceId: 'RINCON_TEST',
+    toneReady: false, reason: 'No active Sonos HTTP consumer.', lifecycleState: 'running',
+    clientConnected: false, hasDeliveredBytes: true, pcmRunning: true, pcmPaused: false,
+    pcmCanResume: false, stdinBackpressured: false, httpBackpressured: false,
+    encoderRunning: true, externalPcmSource: false, connectionOrdinal: null,
+    connectionCount: 1, requiredConnectionCount: 2, encoderStdinWritableLength: 0,
+    encoderStdoutReadableLength: 0, httpWritableLength: 0,
+  };
+  const service = {
+    injectLatencyTone() {
+      throw new ResearchLabRequestError(
+        409,
+        'Tone unavailable: No active Sonos HTTP consumer.',
+        'latency_stream_not_tone_ready',
+        { readiness }
+      );
+    },
+  } as unknown as ResearchLabStreamService;
+  const app = express();
+  registerResearchLabStreamRoute(app, { manager, service });
+  const server = app.listen(0, '127.0.0.1');
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('listening', resolve);
+      server.once('error', reject);
+    });
+    const address = server.address() as AddressInfo;
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/research-lab/streams/latency-stream/latency-tone`,
+      { method: 'POST' }
+    );
+    const body = await response.json() as {
+      code: string;
+      message: string;
+      readiness: typeof readiness;
+    };
+    assert.equal(response.status, 409);
+    assert.equal(body.code, 'latency_stream_not_tone_ready');
+    assert.equal(body.message, 'Tone unavailable: No active Sonos HTTP consumer.');
+    assert.deepEqual(body.readiness, readiness);
+  } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     });

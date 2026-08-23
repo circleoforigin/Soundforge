@@ -3,6 +3,7 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import type { AudioDevice } from '../../src/models/ResearchLab.ts';
+import type { DiagnosticLogInput } from '../../src/models/DiagnosticLog.ts';
 import { ContinuousAudioStreamManager } from '../audio/ContinuousAudioStreamManager.ts';
 import type {
   ContinuousStreamTransport,
@@ -81,6 +82,37 @@ class MockTransport implements ContinuousStreamTransport {
     if (this.failStop) {
       throw new Error('Mock provider stop failed.');
     }
+  }
+}
+
+class LatencyCaptureTransport implements ContinuousStreamTransport {
+  readonly id = 'sonos-local-continuous';
+  readonly encodingProfileId = 'aac-adts' as const;
+  readonly minimumConnectionsForTone = 2;
+  readonly clients = new Map<string, PassThrough>();
+  readonly receivedLatencyProfiles: Array<string | null> = [];
+
+  async start(context: ContinuousStreamTransportContext): Promise<ContinuousStreamTransportBinding> {
+    this.receivedLatencyProfiles.push(context.latencyProfile?.id ?? null);
+    const client = new PassThrough();
+    client.resume();
+    this.clients.set(context.streamId, client);
+    context.bindHttpClient(client);
+    context.updateTransport({
+      state: 'active', targetScope: 'physical-device', targetDescription: context.device.name,
+      independentlyTargetable: true, bound: true, hasBinding: true,
+    });
+    return {
+      transportId: this.id, targetScope: 'physical-device',
+      targetDescription: context.device.name, independentlyTargetable: true,
+      providerBinding: { streamId: context.streamId, httpUrl: `http://127.0.0.1/${context.streamId}` },
+    };
+  }
+
+  async stop(binding: ContinuousStreamTransportBinding): Promise<void> {
+    const streamId = (binding.providerBinding as { streamId: string }).streamId;
+    this.clients.get(streamId)?.destroy();
+    this.clients.delete(streamId);
   }
 }
 
@@ -183,6 +215,112 @@ test('tone and transport diagnostics remain isolated per stream', async () => {
       client.destroy();
     }
     manager.stopAll('tone test cleanup');
+  }
+});
+
+test('Latency Lab request resolves and mutates the exact connected runtime', async () => {
+  const target = device('latency-physical-device', true, 'experimental');
+  target.identity.providerIdentifier = 'RINCON_LATENCY_TEST';
+  const manager = new ContinuousAudioStreamManager();
+  const transport = new LatencyCaptureTransport();
+  const registry = new ContinuousStreamTransportRegistry();
+  registry.register(transport);
+  const service = new ResearchLabStreamService(manager, registry, async () => [target]);
+  try {
+    const started = await service.start(
+      target.id, transport.id, (id) => `http://127.0.0.1/${id}`, 'chunked', 'aac-radio'
+    );
+    await waitFor(() => manager.getSnapshot(started.id)?.lifecycle === 'running');
+    const before = manager.getSnapshot(started.id);
+    const response = service.injectLatencyTone(started.id, {
+      correlationId: 'hardware-path-test', uiStreamId: started.id,
+      profileId: 'aac-radio', deviceId: target.id,
+    });
+    assert.equal(response.id, started.id);
+    await waitFor(() => Boolean(manager.getSnapshot(started.id)?.recentEvents.some(
+      (event) => event.code === 'latency_lab.tone_output_verified'
+    )));
+    const after = manager.getSnapshot(started.id);
+    assert.equal(after?.encoder.pid, before?.encoder.pid);
+    assert.equal(after?.httpClient.currentConnectionOrdinal, 1);
+    const codes = after?.recentEvents.map((event) => event.code) ?? [];
+    for (const code of [
+      'latency_lab.route_tone_request_received',
+      'latency_lab.tone_readiness_checked',
+      'latency_lab.tone_state_before',
+      'latency_lab.tone_requested',
+      'latency_lab.tone_state_after_request',
+      'latency_lab.tone_pcm_verified',
+      'latency_lab.tone_output_verified',
+    ]) assert.ok(codes.includes(code), `missing ${code}`);
+    const identity = after?.recentEvents.find(
+      (event) => event.code === 'latency_lab.route_tone_request_received'
+    );
+    assert.equal(identity?.details?.identityMatches, true);
+    assert.equal(identity?.details?.runtimeStreamId, started.id);
+    assert.equal(identity?.details?.transportStreamId, started.id);
+  } finally {
+    manager.stopAll('latency identity test cleanup');
+    for (const client of transport.clients.values()) client.destroy();
+  }
+});
+
+test('Known Working Baseline takes the literal normal Sonos Local transport-start path', async () => {
+  const target = device('baseline-device', true, 'experimental');
+  const manager = new ContinuousAudioStreamManager();
+  const transport = new LatencyCaptureTransport();
+  const registry = new ContinuousStreamTransportRegistry();
+  registry.register(transport);
+  const service = new ResearchLabStreamService(manager, registry, async () => [target]);
+  try {
+    const baseline = await service.start(
+      target.id, transport.id, (id) => `http://127.0.0.1/${id}`,
+      'chunked', 'known-working-baseline'
+    );
+    assert.deepEqual(transport.receivedLatencyProfiles, [null]);
+    assert.equal(baseline.encoder.codec, 'aac-lc');
+    assert.ok(baseline.latencyLabSessionId);
+  } finally {
+    manager.stopAll('known baseline test cleanup');
+    for (const client of transport.clients.values()) client.destroy();
+  }
+});
+
+test('Latency Lab runtime events flow into the general diagnostic log with session identity', async () => {
+  const target = device('diagnostic-baseline-device', true, 'experimental');
+  target.identity.providerIdentifier = 'RINCON_DIAGNOSTIC';
+  const manager = new ContinuousAudioStreamManager();
+  const transport = new LatencyCaptureTransport();
+  const registry = new ContinuousStreamTransportRegistry();
+  registry.register(transport);
+  const entries: DiagnosticLogInput[] = [];
+  const service = new ResearchLabStreamService(
+    manager, registry, async () => [target],
+    { record: async (entry) => { entries.push(entry); return null; } }
+  );
+  try {
+    const started = await service.start(
+      target.id, transport.id, (id) => `http://127.0.0.1/${id}`,
+      'chunked', 'known-working-baseline'
+    );
+    await waitFor(() => manager.getSnapshot(started.id)?.lifecycle === 'running');
+    service.injectLatencyTone(started.id, {
+      correlationId: 'diagnostic-correlation', uiStreamId: started.id,
+      profileId: 'known-working-baseline', deviceId: target.id,
+    });
+    await waitFor(() => entries.some((entry) => entry.event === 'latency_lab.tone_output_verified'));
+    const chain = entries.filter((entry) => entry.event.startsWith('latency_lab.'));
+    assert.ok(chain.some((entry) => entry.event === 'latency_lab.live_stream_identity'));
+    assert.ok(chain.some((entry) => entry.event === 'latency_lab.tone_output_verified'));
+    for (const entry of chain) {
+      assert.equal(entry.details?.latencyLabSessionId, started.latencyLabSessionId);
+      assert.equal(entry.details?.streamId, started.id);
+      assert.equal(entry.details?.profileId, 'known-working-baseline');
+      assert.equal(entry.details?.physicalDeviceId, 'RINCON_DIAGNOSTIC');
+    }
+  } finally {
+    manager.stopAll('diagnostic bridge test cleanup');
+    for (const client of transport.clients.values()) client.destroy();
   }
 });
 

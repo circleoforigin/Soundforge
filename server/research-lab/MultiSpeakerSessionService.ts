@@ -7,6 +7,7 @@ import type {
   MultiSpeakerParticipantSlot,
   MultiSpeakerSessionSnapshot,
   MultiSpeakerTeardownSummary,
+  WavTimingObservation,
 } from '../../src/models/ResearchLab.ts';
 import { ResearchLabRequestError, ResearchLabStreamService } from './ResearchLabStreamService.ts';
 import { getSonosAudioDevices } from './SonosAudioDeviceDiscovery.ts';
@@ -32,6 +33,12 @@ interface Session {
   lastMigrationEventId: string | null;
   teardown: MultiSpeakerTeardownSummary | null;
   stopPromise: Promise<MultiSpeakerSessionSnapshot> | null;
+  mode: 'standard' | 'wav-timing';
+  pulseOrdinal: number;
+  lastWavPulseEventId: string | null;
+  lastWavScheduledFrame: number | null;
+  baselineConnectionCounts: Map<MultiSpeakerParticipantSlot, number>;
+  observations: WavTimingObservation[];
 }
 
 export class MultiSpeakerSessionService {
@@ -50,7 +57,8 @@ export class MultiSpeakerSessionService {
   async create(
     deviceAId: string,
     deviceBId: string,
-    createStreamUrl: (streamId: string) => string
+    createStreamUrl: (streamId: string) => string,
+    mode: 'standard' | 'wav-timing' = 'standard'
   ): Promise<MultiSpeakerSessionSnapshot> {
     if (deviceAId === deviceBId) throw new ResearchLabRequestError(400, 'Speaker A and Speaker B must be different physical devices.');
     const devices = await this.discoverDevices();
@@ -69,16 +77,22 @@ export class MultiSpeakerSessionService {
       id, participants: [], events: [], stopping: false, stopped: false,
       lastSimultaneousEventId: null, lastMigrationEventId: null,
       teardown: null, stopPromise: null,
+      mode, pulseOrdinal: 0, lastWavPulseEventId: null, lastWavScheduledFrame: null,
+      baselineConnectionCounts: new Map(), observations: [],
     };
     this.sessions.set(id, session);
     this.record(session, 'Multi-speaker session created.');
     const results = await Promise.allSettled((selected as AudioDevice[]).map((device) =>
-      this.streamService.start(device.id, 'sonos-local-continuous', createStreamUrl)
+      this.streamService.start(
+        device.id, 'sonos-local-continuous', createStreamUrl, 'chunked',
+        mode === 'wav-timing' ? 'wav-broadcast' : undefined
+      )
     ));
     for (const [index, result] of results.entries()) {
       const slot: MultiSpeakerParticipantSlot = index === 0 ? 'A' : 'B';
       if (result.status === 'fulfilled') {
         session.participants.push({ slot, device: (selected as AudioDevice[])[index], streamId: result.value.id });
+        session.baselineConnectionCounts.set(slot, result.value.httpClient.connectionCount);
         this.record(session, `Participant ${slot} transport started.`, { streamId: result.value.id });
       } else {
         this.record(session, `Participant ${slot} failed to start.`, { error: result.reason instanceof Error ? result.reason.message : String(result.reason) }, 'error');
@@ -123,6 +137,75 @@ export class MultiSpeakerSessionService {
       this.streamService.manager.getActive(participant.streamId)!.scheduleTone({ eventId, targetMonotonicTime });
     }
     this.record(session, 'Simultaneous PCM-generation event scheduled.', { eventId, targetMonotonicTime, targets: ['A', 'B'] });
+    return this.snapshot(session);
+  }
+
+  identify(id: string, slot: MultiSpeakerParticipantSlot): MultiSpeakerSessionSnapshot {
+    const session = this.requireReady(id);
+    const participant = session.participants.find((candidate) => candidate.slot === slot);
+    if (!participant) throw new ResearchLabRequestError(404, `Speaker ${slot} is unavailable.`);
+    const eventId = crypto.randomUUID();
+    const targetMonotonicTime = this.nextSharedFrameTime();
+    this.streamService.manager.getActive(participant.streamId)!.scheduleTone({
+      eventId, targetMonotonicTime, durationMs: 200,
+      acceptStableInitialConsumer: session.mode === 'wav-timing',
+    });
+    this.record(session, `Identify ${slot} pulse scheduled.`, { eventId, slot, targetMonotonicTime });
+    return this.snapshot(session);
+  }
+
+  runWavSyncPulse(id: string): MultiSpeakerSessionSnapshot {
+    const session = this.requireReady(id);
+    if (session.mode !== 'wav-timing') throw new ResearchLabRequestError(409, 'This is not a WAV timing session.');
+    const eventId = crypto.randomUUID();
+    const targetMonotonicTime = this.nextSharedFrameTime();
+    const scheduledFrame = Math.round(targetMonotonicTime / 20);
+    session.pulseOrdinal += 1;
+    session.lastWavPulseEventId = eventId;
+    session.lastWavScheduledFrame = scheduledFrame;
+    for (const participant of session.participants) {
+      this.streamService.manager.getActive(participant.streamId)!.scheduleTone({
+        eventId, targetMonotonicTime, durationMs: 200,
+        acceptStableInitialConsumer: true,
+      });
+    }
+    this.record(session, 'WAV simultaneous pulse scheduled from the shared logical clock.', {
+      sessionId: session.id, pulseOrdinal: session.pulseOrdinal, eventId,
+      scheduledFrame, targetMonotonicTime,
+    }, 'source', 'multi_speaker.wav_sync_pulse_scheduled');
+    return this.snapshot(session);
+  }
+
+  runRepeatedWavSync(id: string): MultiSpeakerSessionSnapshot {
+    const session = this.requireReady(id);
+    if (session.mode !== 'wav-timing') throw new ResearchLabRequestError(409, 'This is not a WAV timing session.');
+    const firstTarget = this.nextSharedFrameTime();
+    for (let pulse = 0; pulse < 10; pulse += 1) {
+      const eventId = crypto.randomUUID();
+      const targetMonotonicTime = firstTarget + pulse * 2_000;
+      for (const participant of session.participants) {
+        this.streamService.manager.getActive(participant.streamId)!.scheduleTone({
+          eventId, targetMonotonicTime, durationMs: 150,
+          acceptStableInitialConsumer: true,
+        });
+      }
+    }
+    this.record(session, 'Ten WAV synchronization pulses scheduled from one logical clock.', {
+      firstScheduledFrame: Math.round(firstTarget / 20), intervalMs: 2_000, pulseCount: 10,
+    }, 'source', 'multi_speaker.wav_repeated_sync');
+    return this.snapshot(session);
+  }
+
+  recordTimingObservation(
+    id: string,
+    impression: WavTimingObservation['impression'],
+    estimatedSkewMs?: number
+  ): MultiSpeakerSessionSnapshot {
+    const session = this.requireSession(id);
+    session.observations.push({
+      id: crypto.randomUUID(), recordedAt: new Date().toISOString(), impression,
+      ...(Number.isFinite(estimatedSkewMs) ? { estimatedSkewMs } : {}),
+    });
     return this.snapshot(session);
   }
 
@@ -248,11 +331,18 @@ export class MultiSpeakerSessionService {
         streamId: participant.streamId, state: stream?.transport?.state ?? stream?.lifecycle ?? 'missing',
         encoderPid: stream?.encoder.pid ?? null,
         consumerConnected: stream?.httpClient.connected ?? false,
+        connectionOrdinal: stream?.httpClient.currentConnectionOrdinal ?? null,
+        reconnectCount: Math.max(0, (stream?.httpClient.connectionCount ?? 0) - 1),
+        ...(participant.device.model ? { model: participant.device.model } : {}),
       };
     });
     const ready = participants.length === 2 && participants.every((participant) => {
       const stream = this.streamService.manager.getSnapshot(participant.streamId);
-      return stream?.transport?.state === 'active' && stream.toneReady;
+      const runtime = this.streamService.manager.getActive(participant.streamId);
+      const toneReady = session.mode === 'wav-timing'
+        ? runtime?.getToneReadiness({ acceptStableInitialConsumer: true }).toneReady
+        : stream?.toneReady;
+      return stream?.transport?.state === 'active' && toneReady;
     });
     const degraded = participants.length !== 2 || participants.some((participant) => {
       const stream = this.streamService.manager.getSnapshot(participant.streamId);
@@ -271,12 +361,54 @@ export class MultiSpeakerSessionService {
     const migrationA = migrationEvents[0];
     const migrationB = migrationEvents[1];
     const migrationStatuses = migrationEvents.map((event) => event?.status);
+    const timingContinuityValid = session.participants.every((participant) => {
+      const connectionCount = this.streamService.manager.getSnapshot(participant.streamId)
+        ?.httpClient.connectionCount ?? 0;
+      if ((session.baselineConnectionCounts.get(participant.slot) ?? 0) === 0 && connectionCount > 0) {
+        session.baselineConnectionCounts.set(participant.slot, connectionCount);
+      }
+      return connectionCount === (session.baselineConnectionCounts.get(participant.slot) ?? connectionCount);
+    });
+    const wavEventId = session.lastWavPulseEventId;
+    const wavSpeakers = wavEventId ? session.participants.map((participant) => {
+      const stream = this.streamService.manager.getSnapshot(participant.streamId);
+      const event = stream?.scheduledEvents.find((candidate) => candidate.eventId === wavEventId);
+      const firstToneFrame = event?.actualPcmStartMonotonicTime == null
+        ? null : Math.round(event.actualPcmStartMonotonicTime / 20);
+      return {
+        slot: participant.slot, deviceId: participant.device.id, streamId: participant.streamId,
+        scheduledFrame: session.lastWavScheduledFrame ?? 0,
+        firstToneFrame,
+        logicalOffsetFrames: firstToneFrame === null ? null
+          : firstToneFrame - (session.lastWavScheduledFrame ?? firstToneFrame),
+        connectionOrdinal: stream?.httpClient.currentConnectionOrdinal ?? null,
+        encodedBytes: stream?.encoder.encodedBytesProduced ?? 0,
+        httpBytesDelivered: stream?.httpClient.deliveredBytes ?? 0,
+      };
+    }) : [];
+    if (wavEventId && wavSpeakers.length === 2
+      && wavSpeakers.every((speaker) => speaker.firstToneFrame !== null)
+      && !session.events.some((event) => event.code === 'multi_speaker.wav_sync_pulse'
+        && event.details?.eventId === wavEventId)) {
+      this.record(session, 'WAV synchronization pulse reached both PCM streams.', {
+        sessionId: session.id, pulseOrdinal: session.pulseOrdinal,
+        scheduledFrame: session.lastWavScheduledFrame, speakers: wavSpeakers,
+      }, 'source', 'multi_speaker.wav_sync_pulse');
+    }
     return {
       id: session.id,
       state: session.stopped ? 'stopped' : session.stopping ? 'stopping' : degraded ? 'degraded' : ready ? 'ready' : 'starting',
       participants,
       recentEvents: [...session.events],
       teardown: session.teardown,
+      mode: session.mode,
+      timingContinuityValid,
+      timingObservations: [...session.observations],
+      lastWavSyncPulse: wavEventId ? {
+        sessionId: session.id, pulseOrdinal: session.pulseOrdinal,
+        eventId: wavEventId, scheduledFrame: session.lastWavScheduledFrame ?? 0,
+        speakers: wavSpeakers,
+      } : null,
       lastMigrationResult: migrationEventId && migrationA && migrationB ? {
         eventId: migrationEventId,
         direction: 'A-to-B',
@@ -311,6 +443,10 @@ export class MultiSpeakerSessionService {
           : null,
       } : null,
     };
+  }
+
+  private nextSharedFrameTime(): number {
+    return Math.ceil((performance.now() + multiSpeakerEventLeadMs) / 20) * 20;
   }
 
   private captureSimultaneousDiagnostics(session: Session): void {

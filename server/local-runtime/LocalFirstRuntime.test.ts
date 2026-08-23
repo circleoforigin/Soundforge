@@ -44,6 +44,18 @@ test('local runtime entry registers local services and no public Sonos OAuth/med
   const source = fs.readFileSync('server/local-runtime.ts', 'utf8');
   assert.match(source, /registerRoomAudioRoute/);
   assert.match(source, /registerDiagnosticLogRoute/);
+  assert.match(source, /registerResearchLabRoutes/);
   assert.match(source, /new MultiSpeakerSessionService\([\s\S]*discoverSonosLocalAudioDevices/);
   assert.doesNotMatch(source, /registerSonosAuthRoute|registerSonosMediaRoute|initializeSonosTokenStore/);
+});
+
+test('full server and local runtime share the complete Research Lab route registrar', () => {
+  const localRuntime = fs.readFileSync('server/local-runtime.ts', 'utf8');
+  const fullServer = fs.readFileSync('server/index.ts', 'utf8');
+  const registrar = fs.readFileSync('server/routes/ResearchLabRoutes.ts', 'utf8');
+  assert.match(localRuntime, /registerResearchLabRoutes\(app,/);
+  assert.match(fullServer, /registerResearchLabRoutes\(app\)/);
+  assert.match(registrar, /registerResearchLabDeviceRoute/);
+  assert.match(registrar, /registerResearchLabStreamRoute/);
+  assert.match(registrar, /registerResearchLabMultiSpeakerRoute/);
 });

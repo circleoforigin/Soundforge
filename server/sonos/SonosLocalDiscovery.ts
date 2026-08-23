@@ -8,6 +8,8 @@ export interface SonosLocalDevice {
   avTransportControlUrl: string;
   name?: string;
   model?: string;
+  modelNumber?: string;
+  serialNumber?: string;
 }
 
 function xmlValue(xml: string, name: string): string | undefined {
@@ -29,6 +31,10 @@ export function parseSonosDeviceDescription(xml: string, descriptionUrl: string)
     avTransportControlUrl: new URL(controlUrl, base).toString(),
     ...(xmlValue(xml, 'roomName') || xmlValue(xml, 'friendlyName') ? { name: xmlValue(xml, 'roomName') ?? xmlValue(xml, 'friendlyName') } : {}),
     ...(xmlValue(xml, 'modelName') ? { model: xmlValue(xml, 'modelName') } : {}),
+    ...(xmlValue(xml, 'modelNumber') ? { modelNumber: xmlValue(xml, 'modelNumber') } : {}),
+    ...(xmlValue(xml, 'serialNum') || xmlValue(xml, 'serialNumber')
+      ? { serialNumber: xmlValue(xml, 'serialNum') ?? xmlValue(xml, 'serialNumber') }
+      : {}),
   };
 }
 

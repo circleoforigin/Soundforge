@@ -84,6 +84,12 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
     targetDescription: string
   ): Promise<ContinuousStreamTransportBinding> {
     this.contexts.set(context.streamId, context);
+    if (context.latencyProfile?.id === 'wav-broadcast') {
+      context.addDiagnostic('WAV Sonos startup attempt began.', {
+        streamId: context.streamId,
+        physicalDeviceIdSuffix: physicalDeviceId.slice(-10),
+      }, 'wav_start_attempt');
+    }
     context.updateTransport({ state: 'binding' }, 'Resolving selected physical Sonos device on the local network.');
     const local = await this.discoverLocal(physicalDeviceId);
     if (!local) throw new Error('The selected Sonos physical device was not found by local SSDP discovery. Confirm that SACscape and Sonos are on the same LAN.');
@@ -159,14 +165,46 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
   ): void {
     const context = this.contexts.get(streamId);
     if (!context) return;
+    const wav = context.latencyProfile?.id === 'wav-broadcast';
+    if (wav && event.code === 'client-connected') {
+      const ordinal = Number(event.details?.connectionOrdinal ?? 0);
+      context.addDiagnostic(
+        ordinal === 1 ? 'WAV first Sonos HTTP consumer connected.' : 'WAV Sonos HTTP reconnect connected.',
+        { streamId, connectionOrdinal: ordinal, ...event.details },
+        ordinal === 1 ? 'wav_first_consumer' : 'wav_reconnect_success'
+      );
+    }
+    if (wav && event.code === 'client-disconnected') {
+      context.addDiagnostic('WAV Sonos HTTP consumer disconnected.', {
+        streamId, ...event.details,
+      }, 'wav_consumer_disconnect');
+    }
+    if (wav && event.code === 'awaiting-startup-reconnect') {
+      context.addDiagnostic('WAV startup reconnect is expected within the bounded grace window.', {
+        streamId, ...event.details,
+      }, 'wav_reconnect_expected');
+    }
+    if (wav && event.code === 'startup-reconnect-timeout') {
+      context.addDiagnostic('WAV startup failed because the Sonos consumer did not reconnect.', {
+        streamId, ...event.details,
+      }, 'wav_start_failed');
+    }
     if (event.code === 'awaiting-startup-reconnect') {
       context.updateTransport({ state: 'bound', providerPlaybackState: 'AWAITING_STARTUP_RECONNECT' }, 'First local HTTP consumer closed; awaiting bounded startup reconnect.');
     }
     if (event.code === 'startup-client-reconnected') {
       context.updateTransport({ state: 'bound', providerPlaybackState: 'STARTUP_RECONNECTED' }, 'Second local Sonos HTTP consumer connected.');
     }
-    if (event.code === 'first-live-bytes' && (snapshot?.httpClient.connectionCount ?? 0) >= 2) {
+    if (event.code === 'first-live-bytes'
+      && ((snapshot?.httpClient.connectionCount ?? 0) >= 2 || wav)) {
       context.updateTransport({ state: 'active', providerPlaybackState: 'STREAMING' }, 'Local Sonos reconnect consumer is receiving aligned AAC audio.');
+      if (wav) {
+        context.addDiagnostic('WAV Sonos stream reached stable live delivery.', {
+          streamId,
+          connectionOrdinal: snapshot?.httpClient.currentConnectionOrdinal ?? null,
+          deliveredBytes: snapshot?.httpClient.deliveredBytes ?? 0,
+        }, 'wav_stream_stable');
+      }
     }
   }
 }

@@ -25,7 +25,11 @@ export function normalizeSonosLocalAudioDevices(
       ...(local.model ? { model: local.model } : {}),
       identity: {
         providerIdentifierSuffix: local.physicalDeviceId.slice(-10),
+        providerIdentifier: local.physicalDeviceId,
         logicalPlayerName: name,
+        ...(local.modelNumber ? { modelNumber: local.modelNumber } : {}),
+        ...(local.serialNumber ? { serialNumber: local.serialNumber } : {}),
+        networkAddress: local.address,
       },
       capabilities: ['continuous-stream'],
       diagnosticActions: [{

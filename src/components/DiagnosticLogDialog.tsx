@@ -10,10 +10,19 @@ export default function DiagnosticLogDialog({ onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const [filter, setFilter] = useState<'all' | 'room' | 'research' | 'latency' | 'sonos'>('all');
+  const filteredEntries = entries.filter((entry) => {
+    if (filter === 'all') return true;
+    if (filter === 'room') return entry.event.startsWith('room_audio.');
+    if (filter === 'latency') return entry.event.startsWith('latency_lab.');
+    if (filter === 'research') return entry.event.startsWith('latency_lab.')
+      || entry.event.startsWith('research_lab.') || entry.event.startsWith('multi_speaker.');
+    return entry.event.startsWith('sonos.') || entry.event.includes('sonos');
+  });
 
   async function copyFullReport() {
     try {
-      await navigator.clipboard.writeText(formatDiagnosticReport(entries));
+      await navigator.clipboard.writeText(formatDiagnosticReport(filteredEntries));
       setCopyStatus('Full report copied to clipboard.');
       window.setTimeout(() => setCopyStatus(null), 2500);
     } catch { setCopyStatus('Unable to copy the diagnostic report.'); }
@@ -44,9 +53,16 @@ export default function DiagnosticLogDialog({ onClose }: Props) {
       <header><div><h2>Diagnostic Log</h2><small>Newest first</small></div><button onClick={onClose}>Close</button></header>
       {loading && <p>Loading…</p>}
       {error && <p className="diagnostic-error">{error}</p>}
+      <label className="diagnostic-log-filter">Show <select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
+        <option value="all">All</option>
+        <option value="room">Room Audio</option>
+        <option value="research">Research Lab</option>
+        <option value="latency">Latency Lab</option>
+        <option value="sonos">Sonos</option>
+      </select></label>
       {!loading && !error && entries.length === 0 && <p>No diagnostic entries.</p>}
       <div className="diagnostic-entry-list">
-        {entries.map((entry) => <details key={entry.id} className={`diagnostic-entry diagnostic-${entry.level}`}>
+        {filteredEntries.map((entry) => <details key={entry.id} className={`diagnostic-entry diagnostic-${entry.level}`}>
           <summary>
             <time>{new Date(entry.timestamp).toLocaleTimeString()}</time>
             <strong>{entry.category.toUpperCase()}</strong>
@@ -60,7 +76,7 @@ export default function DiagnosticLogDialog({ onClose }: Props) {
         </details>)}
       </div>
       <footer className="dialog-buttons diagnostic-log-actions">
-        <button onClick={() => void copyFullReport()} disabled={entries.length === 0}>Copy Full Report</button>
+        <button onClick={() => void copyFullReport()} disabled={filteredEntries.length === 0}>Copy Full Report</button>
         {copyStatus && <span role="status">{copyStatus}</span>}
         <button onClick={() => void refresh()}>Refresh</button>
         <button onClick={() => void (async () => { await clearDiagnostics(); setEntries([]); })()}>Clear Log</button>

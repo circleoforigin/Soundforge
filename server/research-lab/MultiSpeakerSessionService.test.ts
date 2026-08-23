@@ -151,6 +151,67 @@ test('session owns two runtimes and schedules simultaneous and alternating event
   assert.deepEqual(stoppedAgain.teardown, stopped.teardown);
 });
 
+test('WAV timing session shares one logical frame and preserves runtimes across pulses', async () => {
+  const a = device('wav-a'); const b = device('wav-b');
+  const { service, manager, clients } = harness([a, b]);
+  let sessionId: string | null = null;
+  try {
+    const ready = service.get((await service.create(
+      a.id, b.id, () => 'unused', 'wav-timing'
+    )).id);
+    sessionId = ready.id;
+    assert.equal(ready.mode, 'wav-timing');
+    assert.equal(ready.state, 'ready');
+    const identities = ready.participants.map((participant) => ({
+      streamId: participant.streamId, encoderPid: participant.encoderPid,
+    }));
+
+    service.identify(ready.id, 'A');
+    assert.equal(manager.getSnapshot(ready.participants[0].streamId)!.scheduledEvents.length, 1);
+    assert.equal(manager.getSnapshot(ready.participants[1].streamId)!.scheduledEvents.length, 0);
+    service.identify(ready.id, 'B');
+    assert.equal(manager.getSnapshot(ready.participants[1].streamId)!.scheduledEvents.length, 1);
+    await waitFor(() => ready.participants.every((participant) =>
+      manager.getSnapshot(participant.streamId)!.scheduledEvents.every(
+        (event) => event.status === 'completed'
+      )
+    ));
+
+    service.runWavSyncPulse(ready.id);
+    await waitFor(() => service.get(ready.id).lastWavSyncPulse?.speakers.every(
+      (speaker) => speaker.firstToneFrame !== null
+    ) === true);
+    const pulse = service.get(ready.id).lastWavSyncPulse!;
+    assert.equal(pulse.speakers[0].scheduledFrame, pulse.speakers[1].scheduledFrame);
+    assert.ok(Math.abs((pulse.speakers[0].firstToneFrame ?? 0)
+      - (pulse.speakers[1].firstToneFrame ?? 0)) <= 1);
+    assert.ok(Math.abs(pulse.speakers[0].logicalOffsetFrames ?? 99) <= 1);
+    assert.ok(Math.abs(pulse.speakers[1].logicalOffsetFrames ?? 99) <= 1);
+
+    const scheduledBeforeRepeat = ready.participants.map((participant) =>
+      manager.getSnapshot(participant.streamId)!.scheduledEvents.length);
+    service.runRepeatedWavSync(ready.id);
+    const after = service.get(ready.id);
+    assert.deepEqual(after.participants.map((participant) => ({
+      streamId: participant.streamId, encoderPid: participant.encoderPid,
+    })), identities);
+    const aScheduled = manager.getSnapshot(ready.participants[0].streamId)!.scheduledEvents;
+    const bScheduled = manager.getSnapshot(ready.participants[1].streamId)!.scheduledEvents;
+    assert.deepEqual(aScheduled.slice(scheduledBeforeRepeat[0]).map((event) => event.targetMonotonicTime),
+      bScheduled.slice(scheduledBeforeRepeat[1]).map((event) => event.targetMonotonicTime));
+
+    const first = ready.participants[0];
+    clients.get(first.streamId)?.destroy();
+    const replacement = new PassThrough(); replacement.resume();
+    clients.set(first.streamId, replacement);
+    manager.getActive(first.streamId)!.bindHttpClient(replacement);
+    await waitFor(() => manager.getSnapshot(first.streamId)!.httpClient.connectionCount === 2);
+    assert.equal(service.get(ready.id).timingContinuityValid, false);
+  } finally {
+    if (sessionId) await service.stop(sessionId);
+  }
+});
+
 test('Stop All remains successful when one participant is already stopped', async () => {
   const a = device('speaker-a'); const b = device('speaker-b');
   const { service, manager, clients } = harness([a, b]);

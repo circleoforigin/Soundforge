@@ -37,14 +37,17 @@ export function registerResearchLabMultiSpeakerRoute(
   service: MultiSpeakerSessionService = multiSpeakerSessionService
 ): void {
   app.post('/api/research-lab/multi-speaker-sessions', json(), async (request, response) => {
-    const { deviceAId, deviceBId } = request.body as { deviceAId?: unknown; deviceBId?: unknown };
+    const { deviceAId, deviceBId, mode } = request.body as {
+      deviceAId?: unknown; deviceBId?: unknown; mode?: unknown;
+    };
     if (typeof deviceAId !== 'string' || typeof deviceBId !== 'string') {
       response.status(400).json({ ok: false, message: 'deviceAId and deviceBId are required.' }); return;
     }
     try {
       const base = publicBaseUrl(request);
       const session = await service.create(deviceAId, deviceBId,
-        (streamId) => `${base}/api/research-lab/streams/${encodeURIComponent(streamId)}/live.mp3`);
+        (streamId) => `${base}/api/research-lab/streams/${encodeURIComponent(streamId)}/live.mp3`,
+        mode === 'wav-timing' ? 'wav-timing' : 'standard');
       response.status(201).json({ ok: true, session });
     } catch (error) { sendError(response, error); }
   });
@@ -59,6 +62,39 @@ export function registerResearchLabMultiSpeakerRoute(
   app.post('/api/research-lab/multi-speaker-sessions/:sessionId/simultaneous', json(), (request, response) => {
     try { response.json({ ok: true, session: service.runSimultaneous(request.params.sessionId) }); }
     catch (error) { sendError(response, error); }
+  });
+  app.post('/api/research-lab/multi-speaker-sessions/:sessionId/identify/:slot', json(), (request, response) => {
+    try {
+      const slot = request.params.slot === 'A' || request.params.slot === 'B'
+        ? request.params.slot : null;
+      if (!slot) throw new ResearchLabRequestError(400, 'Speaker slot must be A or B.');
+      response.json({ ok: true, session: service.identify(request.params.sessionId, slot) });
+    } catch (error) { sendError(response, error); }
+  });
+  app.post('/api/research-lab/multi-speaker-sessions/:sessionId/wav-sync-pulse', json(), (request, response) => {
+    try { response.json({ ok: true, session: service.runWavSyncPulse(request.params.sessionId) }); }
+    catch (error) { sendError(response, error); }
+  });
+  app.post('/api/research-lab/multi-speaker-sessions/:sessionId/wav-repeated-sync', json(), (request, response) => {
+    try { response.json({ ok: true, session: service.runRepeatedWavSync(request.params.sessionId) }); }
+    catch (error) { sendError(response, error); }
+  });
+  app.post('/api/research-lab/multi-speaker-sessions/:sessionId/timing-result', json(), (request, response) => {
+    try {
+      const { impression, estimatedSkewMs } = request.body as {
+        impression?: unknown; estimatedSkewMs?: unknown;
+      };
+      if (impression !== 'simultaneous' && impression !== 'slight-echo' && impression !== 'double-hit') {
+        throw new ResearchLabRequestError(400, 'A valid timing impression is required.');
+      }
+      response.json({
+        ok: true,
+        session: service.recordTimingObservation(
+          request.params.sessionId, impression,
+          typeof estimatedSkewMs === 'number' ? estimatedSkewMs : undefined
+        ),
+      });
+    } catch (error) { sendError(response, error); }
   });
   app.post('/api/research-lab/multi-speaker-sessions/:sessionId/migration', json(), (request, response) => {
     try { response.json({ ok: true, session: service.runMigration(request.params.sessionId) }); }

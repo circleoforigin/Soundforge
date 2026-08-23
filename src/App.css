@@ -538,6 +538,30 @@ body,
   border-bottom: 1px solid #45474e;
 }
 
+.research-lab-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  background: #25262a;
+  border-bottom: 1px solid #45474e;
+}
+
+.research-lab-tabs button {
+  padding: 7px 11px;
+  color: #aeb1b8;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  border-radius: 4px 4px 0 0;
+}
+
+.research-lab-tabs button.active {
+  color: #f0f0f0;
+  background: #292b30;
+  border-color: #45474e;
+  border-bottom-color: #7fa68a;
+}
+
 .research-lab-header h2,
 .research-section-heading h3,
 .research-device-card h4,
@@ -578,6 +602,15 @@ body,
   grid-column: 1 / -1;
 }
 
+.research-tab-full-panel {
+  grid-column: 1 / -1;
+}
+
+.research-tab-latency,
+.research-tab-multi {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .research-latency-controls,
 .research-latency-profile,
 .research-latency-record {
@@ -601,6 +634,43 @@ body,
 .research-latency-status {
   color: #aeb1b8;
   font-size: 11px;
+}
+
+.research-tone-status {
+  align-self: flex-start;
+  margin-top: 8px;
+  padding: 4px 7px;
+  color: #a8cfb3;
+  font-size: 11px;
+  background: rgb(64 125 80 / 18%);
+  border: 1px solid rgb(100 160 115 / 35%);
+  border-radius: 3px;
+}
+
+.research-latency-device-details {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px;
+  background: #222328;
+  border: 1px solid #3f4249;
+  border-radius: 4px;
+}
+
+.research-latency-device-details span {
+  min-width: 0;
+  color: #b8bbc1;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.research-latency-device-details strong {
+  display: block;
+  margin-bottom: 2px;
+  color: #858991;
+  font-size: 9px;
+  text-transform: uppercase;
 }
 
 .research-latency-profile span {

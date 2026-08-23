@@ -45,8 +45,12 @@ export interface AudioDeviceDiagnosticAction {
 
 export interface AudioDeviceIdentityDetails {
   providerIdentifierSuffix: string;
+  providerIdentifier?: string;
   logicalPlayerName: string;
   componentRole?: string;
+  modelNumber?: string;
+  serialNumber?: string;
+  networkAddress?: string;
 }
 
 export interface AudioDevicePresentationMetadata {
@@ -211,6 +215,7 @@ export interface AudioStreamTransportSnapshot {
 
 export interface AudioStreamSnapshot {
   id: string;
+  latencyLabSessionId?: string;
   deviceId?: string;
   transportId?: string;
   lifecycle: AudioStreamLifecycleState;
@@ -235,6 +240,7 @@ export interface ScheduledResearchAudioEventResult {
   gainEnvelope: ScheduledResearchAudioGainEnvelope | null;
   status: 'scheduled' | 'started' | 'completed' | 'cancelled';
   actualPcmStartMonotonicTime: number | null;
+  actualPcmFrameIndex?: number | null;
   scheduleErrorMs: number | null;
 }
 
@@ -254,6 +260,37 @@ export interface MultiSpeakerParticipantSnapshot {
   state: string;
   encoderPid: number | null;
   consumerConnected: boolean;
+  connectionOrdinal?: number | null;
+  reconnectCount?: number;
+  model?: string;
+}
+
+export interface WavSyncPulseParticipantResult {
+  slot: MultiSpeakerParticipantSlot;
+  deviceId: string;
+  streamId: string;
+  scheduledFrame: number;
+  firstToneFrame: number | null;
+  logicalOffsetFrames: number | null;
+  connectionOrdinal: number | null;
+  encodedBytes: number;
+  httpBytesDelivered: number;
+}
+
+export interface WavSyncPulseResult {
+  sessionId: string;
+  pulseOrdinal: number;
+  eventId: string;
+  scheduledFrame: number;
+  speakers: WavSyncPulseParticipantResult[];
+}
+
+export interface WavTimingObservation {
+  id: string;
+  recordedAt: string;
+  impression: 'simultaneous' | 'slight-echo' | 'double-hit';
+  estimatedSkewMs?: number;
+  measuredAcousticSkewMs?: number;
 }
 
 export interface MultiSpeakerSimultaneousResult {
@@ -289,6 +326,10 @@ export interface MultiSpeakerSessionSnapshot {
   lastSimultaneousResult: MultiSpeakerSimultaneousResult | null;
   lastMigrationResult: MultiSpeakerMigrationResult | null;
   teardown: MultiSpeakerTeardownSummary | null;
+  mode?: 'standard' | 'wav-timing';
+  timingContinuityValid?: boolean;
+  lastWavSyncPulse?: WavSyncPulseResult | null;
+  timingObservations?: WavTimingObservation[];
 }
 
 export interface MultiSpeakerParticipantTeardown {

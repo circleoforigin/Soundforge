@@ -23,7 +23,7 @@ import {
 } from '../sonos/SonosClient.ts';
 import { logSonosError } from '../sonos/SonosDiagnosticLog.ts';
 
-interface ResearchLabDeviceRouteDependencies {
+export interface ResearchLabDeviceRouteDependencies {
   discoverDevices: (options?: { forceRefresh?: boolean }) => Promise<Awaited<ReturnType<typeof discoverSonosAudioDevices>>>;
   identifyDevice: typeof identifySonosAudioDevice;
   presentationStore?: Pick<AudioDevicePresentationStore, 'apply' | 'setAlias'>;

@@ -8,7 +8,12 @@ import {
 } from 'react';
 
 import { runtimeUrl } from '../config/runtime';
+import { recordDiagnostic } from '../services/diagnostics/DiagnosticClient';
 import { normalizeDiscoveredAudioDevices } from '../services/research-lab/normalizeAudioDevices';
+import {
+  audioDeviceSelectorTitle,
+  formatAudioDeviceSelectorLabel,
+} from '../services/research-lab/audioDeviceLabels';
 import {
   readResearchLabIdentifyFailure,
   sanitizeDiagnosticForDisplay,
@@ -285,12 +290,19 @@ function ResearchDeviceCard({
       <details className="research-identity-details">
         <summary>Topology and identity</summary>
         <div>Device ID: <code>{device.id}</code></div>
+        {device.identity.providerIdentifier && (
+          <div>Physical Device ID: <code>{device.identity.providerIdentifier}</code></div>
+        )}
         {device.identity.providerIdentifierSuffix && (
           <div>
             Provider ID suffix: <code>…{device.identity.providerIdentifierSuffix}</code>
           </div>
         )}
         <div>Logical player: {device.identity.logicalPlayerName}</div>
+        {device.model && <div>Model: {device.model}</div>}
+        {device.identity.modelNumber && <div>Model number: {device.identity.modelNumber}</div>}
+        {device.identity.serialNumber && <div>Serial number: {device.identity.serialNumber}</div>}
+        {device.identity.networkAddress && <div>IP address: <code>{device.identity.networkAddress}</code></div>}
         {device.identity.componentRole && (
           <div>Component role: {device.identity.componentRole}</div>
         )}
@@ -485,6 +497,7 @@ function StreamExperiment({
 }
 
 function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
+  const [activeTab, setActiveTab] = useState<'streams' | 'multi' | 'latency'>('streams');
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [streams, setStreams] = useState<AudioStreamSnapshot[]>([]);
   const [discovering, setDiscovering] = useState(true);
@@ -509,6 +522,9 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
   const [multiBusy, setMultiBusy] = useState<string | null>(null);
   const [multiError, setMultiError] = useState<string | null>(null);
   const [multiMessage, setMultiMessage] = useState<string | null>(null);
+  const [multiMode, setMultiMode] = useState<'standard' | 'wav-timing'>('standard');
+  const [timingImpression, setTimingImpression] = useState<'simultaneous' | 'slight-echo' | 'double-hit'>('simultaneous');
+  const [estimatedTimingSkew, setEstimatedTimingSkew] = useState('');
   const [latencyDeviceId, setLatencyDeviceId] = useState('');
   const [latencyProfileId, setLatencyProfileId] = useState<SonosLatencyProfileId>('aac-radio');
   const [latencyStreamId, setLatencyStreamId] = useState<string | null>(null);
@@ -528,9 +544,30 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
     (profile) => profile.id === latencyProfileId
   )!;
   const latencyStream = streams.find((stream) => stream.id === latencyStreamId);
+  const latencyToneCanAttempt = Boolean(
+    latencyStream
+    && !terminalLifecycles.has(latencyStream.lifecycle)
+    && latencyStream.transport?.bound
+    && latencyStream.httpClient.connected
+    && latencyStream.httpClient.deliveredBytes > 0
+    && !latencyStream.httpClient.backpressured
+    && !latencyStream.encoder.stdinBackpressured
+  );
+  const latencyDevice = devices.find((device) => device.id === latencyDeviceId);
   const latencyStreamActive = Boolean(
     latencyStream && !terminalLifecycles.has(latencyStream.lifecycle)
   );
+  const latencyToneCodes = latencyStream?.recentEvents.map((event) => event.code) ?? [];
+  const lastToneRequest = latencyToneCodes.lastIndexOf('latency_lab.tone_requested');
+  const lastToneStarted = latencyToneCodes.lastIndexOf('latency_lab.tone_pcm_started');
+  const lastToneCompleted = latencyToneCodes.lastIndexOf('latency_lab.tone_pcm_completed');
+  const latencyToneStatus = lastToneRequest < 0
+    ? null
+    : lastToneCompleted > lastToneRequest
+      ? 'Tone completed — silence resumed'
+      : lastToneStarted > lastToneRequest
+        ? 'Tone entered PCM'
+        : 'Tone requested';
   const latencySummaries = sonosLatencyExperimentProfiles.map((profile) =>
     summarizeSonosLatencyResults(profile.id, latencyResults));
 
@@ -612,17 +649,28 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
     return () => window.clearInterval(timer);
   }, [multiSessionId, multiSessionState]);
 
-  async function multiAction(action: 'start' | 'alternating' | 'simultaneous' | 'migration' | 'stop') {
+  async function multiAction(action: 'start' | 'alternating' | 'simultaneous' | 'migration' | 'stop'
+    | 'identify-A' | 'identify-B' | 'wav-sync-pulse' | 'wav-repeated-sync' | 'timing-result') {
     setMultiBusy(action); setMultiError(null); setMultiMessage(null);
     try {
+      const actionPath = action.startsWith('identify-')
+        ? `/identify/${action.slice(-1)}`
+        : action === 'timing-result' ? '/timing-result'
+          : action === 'stop' ? '' : `/${action}`;
       const path = action === 'start'
         ? '/api/research-lab/multi-speaker-sessions'
-        : `/api/research-lab/multi-speaker-sessions/${encodeURIComponent(multiSession!.id)}${
-          action === 'stop' ? '' : `/${action}`}`;
+        : `/api/research-lab/multi-speaker-sessions/${encodeURIComponent(multiSession!.id)}${actionPath}`;
       const response = await fetch(runtimeUrl(path), {
         method: action === 'stop' ? 'DELETE' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        ...(action === 'start' ? { body: JSON.stringify({ deviceAId: speakerAId, deviceBId: speakerBId }) } : {}),
+        ...(action === 'start' ? {
+          body: JSON.stringify({ deviceAId: speakerAId, deviceBId: speakerBId, mode: multiMode }),
+        } : action === 'timing-result' ? {
+          body: JSON.stringify({
+            impression: timingImpression,
+            ...(estimatedTimingSkew ? { estimatedSkewMs: Number(estimatedTimingSkew) } : {}),
+          }),
+        } : {}),
       });
       if (!response.ok) throw new Error(await readFailure(response, `Unable to ${action} multi-speaker session.`));
       const data = await response.json() as { ok: true; session: MultiSpeakerSessionSnapshot };
@@ -637,6 +685,9 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
         } else {
           setMultiMessage('Session stopped.');
         }
+      } else if (action === 'timing-result') {
+        setMultiMessage('Timing observation recorded.');
+        setEstimatedTimingSkew('');
       }
       void refreshStreams();
     } catch (error) {
@@ -804,7 +855,29 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
         : action === 'tone'
           ? `/api/research-lab/streams/${encodeURIComponent(latencyStreamId!)}/latency-tone`
           : `/api/research-lab/streams/${encodeURIComponent(latencyStreamId!)}`;
-      const response = await fetch(runtimeUrl(url), {
+      const requestUrl = runtimeUrl(url);
+      const toneCorrelationId = action === 'tone' ? crypto.randomUUID() : null;
+      const requestStarted = performance.now();
+      if (action === 'tone') {
+        const details = {
+          latencyLabSessionId: latencyStream?.latencyLabSessionId ?? null,
+          correlationId: toneCorrelationId,
+          profileId: latencyProfileId,
+          physicalDeviceId: latencyDevice?.identity.providerIdentifier ?? latencyDeviceId,
+          streamId: latencyStreamId,
+          runtimeUrl: requestUrl,
+          requestPath: url,
+          requestStartedAt: new Date().toISOString(),
+        };
+        console.info('latency_lab.frontend_tone_request', details);
+        await recordDiagnostic({
+          category: 'audio', level: 'info', event: 'latency_lab.frontend_tone_request',
+          message: 'Latency Lab frontend requested tone injection.',
+          correlationId: toneCorrelationId ?? undefined,
+          details,
+        });
+      }
+      const response = await fetch(requestUrl, {
         method: action === 'stop' ? 'DELETE' : 'POST',
         ...(action === 'start' ? {
           headers: { 'Content-Type': 'application/json' },
@@ -813,8 +886,43 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
             transportId: 'sonos-local-continuous',
             latencyProfileId,
           }),
+        } : action === 'tone' ? {
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            correlationId: toneCorrelationId,
+            streamId: latencyStreamId,
+            profileId: latencyProfileId,
+            deviceId: latencyDeviceId,
+            requestStartedAt: new Date().toISOString(),
+          }),
         } : {}),
       });
+      if (action === 'tone') {
+        const responseBody = await response.clone().json().catch(() => null) as unknown;
+        const details = {
+          latencyLabSessionId: latencyStream?.latencyLabSessionId ?? null,
+          streamId: latencyStreamId,
+          profileId: latencyProfileId,
+          physicalDeviceId: latencyDevice?.identity.providerIdentifier ?? latencyDeviceId,
+          toneCorrelationId,
+          correlationId: toneCorrelationId,
+          httpStatus: response.status,
+          responseBody,
+          requestDurationMs: Math.round((performance.now() - requestStarted) * 10) / 10,
+          success: response.ok,
+        };
+        console.info('latency_lab.frontend_tone_response', details);
+        await recordDiagnostic({
+          category: response.ok ? 'audio' : 'error',
+          level: response.ok ? 'info' : 'error',
+          event: 'latency_lab.frontend_tone_response',
+          message: response.ok
+            ? 'Latency Lab frontend received tone response.'
+            : 'Latency Lab frontend received tone failure response.',
+          correlationId: toneCorrelationId ?? undefined,
+          details,
+        });
+      }
       if (!response.ok) throw new Error(await readFailure(response, `Unable to ${action} latency stream.`));
       const data = await response.json() as AudioStreamSnapshotResponse;
       setStreams((current) => [data.stream, ...current.filter((item) => item.id !== data.stream.id)]);
@@ -865,8 +973,23 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
           <button onClick={onClose}>Close</button>
         </header>
 
-        <div className="research-lab-content">
-          <section className="research-lab-panel">
+        <nav className="research-lab-tabs" aria-label="Research Lab experiments">
+          {([
+            ['streams', 'Stream Experiments'],
+            ['multi', 'Multi-Speaker Lab'],
+            ['latency', 'Latency Transport Lab'],
+          ] as const).map(([id, label]) => (
+            <button
+              key={id}
+              className={activeTab === id ? 'active' : ''}
+              aria-selected={activeTab === id}
+              onClick={() => setActiveTab(id)}
+            >{label}</button>
+          ))}
+        </nav>
+
+        <div className={`research-lab-content research-tab-${activeTab}`}>
+          {activeTab === 'streams' && <section className="research-lab-panel">
             <div className="research-section-heading">
               <div>
                 <h3>Audio Devices</h3>
@@ -937,16 +1060,16 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
                 </ResearchLabErrorBoundary>
               ))}
             </div>
-          </section>
+          </section>}
 
-          <section className="research-lab-panel research-latency-panel">
+          {activeTab === 'latency' && <section className="research-lab-panel research-latency-panel">
             <div className="research-section-heading">
               <div><h3>Latency Transport Lab</h3><p>Compare Sonos-local stream semantics and formats without changing production Room Audio.</p></div>
             </div>
             <div className="research-latency-controls">
               <label>Speaker<select value={latencyDeviceId} disabled={latencyStreamActive} onChange={(event) => setLatencyDeviceId(event.target.value)}>
                 <option value="">Select standalone device…</option>
-                {multiEligibleDevices.map((device) => <option key={device.id} value={device.id}>{device.presentation?.alias ?? device.name}</option>)}
+                {multiEligibleDevices.map((device) => <option key={device.id} value={device.id} title={audioDeviceSelectorTitle(device)}>{formatAudioDeviceSelectorLabel(device)}</option>)}
               </select></label>
               <label>Profile<select value={latencyProfileId} disabled={latencyStreamActive} onChange={(event) => setLatencyProfileId(event.target.value as SonosLatencyProfileId)}>
                 {sonosLatencyExperimentProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
@@ -954,9 +1077,15 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
               <div className="research-stream-actions">
                 <button disabled={!latencyDeviceId || latencyStreamActive || Boolean(latencyBusy)} onClick={() => void runLatencyAction('start')}>{latencyBusy === 'start' ? 'Starting…' : 'Start Stream'}</button>
                 <button disabled={!latencyStreamActive || Boolean(latencyBusy)} onClick={() => void runLatencyAction('stop')}>Stop Stream</button>
-                <button disabled={!latencyStream?.toneReady || Boolean(latencyBusy)} onClick={() => void runLatencyAction('tone')}>Inject Latency Tone</button>
+                <button disabled={!latencyToneCanAttempt || Boolean(latencyBusy)} onClick={() => void runLatencyAction('tone')}>Inject Latency Tone</button>
               </div>
             </div>
+            {latencyDevice && <div className="research-latency-device-details">
+              <span><strong>Name</strong>{latencyDevice.presentation?.alias ?? latencyDevice.name}</span>
+              <span><strong>Model</strong>{latencyDevice.model ?? 'Unavailable'}</span>
+              <span><strong>Physical Device ID</strong><code>{latencyDevice.identity.providerIdentifier ?? `…${latencyDevice.identity.providerIdentifierSuffix}`}</code></span>
+              <span><strong>IP address</strong><code>{latencyDevice.identity.networkAddress ?? 'Unavailable'}</code></span>
+            </div>}
             <div className="research-latency-profile">
               <span>{latencyProfile.codec} / {latencyProfile.container}</span>
               <span>{latencyProfile.sampleRate / 1_000} kHz · {latencyProfile.channelCount} ch</span>
@@ -967,6 +1096,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
             {latencyStream && <div className="research-latency-status">
               State: {titleCase(latencyStream.lifecycle)} · PID {latencyStream.encoder.pid ?? '—'} · {latencyStream.httpClient.connected ? 'Consumer connected' : 'Waiting for consumer'} · {latencyStream.telemetry.deliveredBitsPerSecond.toLocaleString()} delivered bps
             </div>}
+            {latencyToneStatus && <div className="research-tone-status">{latencyToneStatus}</div>}
             {latencyError && <div className="research-error-message">{latencyError}</div>}
             <div className="research-latency-record">
               <label>Observed Delay <input type="number" min="0" step="1" value={observedDelay} onChange={(event) => setObservedDelay(event.target.value)} /> ms</label>
@@ -975,20 +1105,24 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
             <table className="research-latency-results"><thead><tr><th>Profile</th><th>Samples</th><th>Avg</th><th>Min</th><th>Max</th></tr></thead><tbody>
               {latencySummaries.map((summary) => <tr key={summary.profileId}><td>{sonosLatencyExperimentProfiles.find((profile) => profile.id === summary.profileId)?.label}</td><td>{summary.samples}</td><td>{summary.samples ? Math.round(summary.averageMs) : '—'}</td><td>{summary.samples ? summary.minimumMs : '—'}</td><td>{summary.samples ? summary.maximumMs : '—'}</td></tr>)}
             </tbody></table>
-          </section>
+          </section>}
 
-          <section className="research-lab-panel">
+          {activeTab === 'multi' && <section className="research-lab-panel research-tab-full-panel">
             <div className="research-section-heading">
               <div><h3>Multi-Speaker Lab</h3><p>PCM/source-generation experiments for two independent physical streams.</p></div>
             </div>
             <div className="research-multi-selectors">
+              <label>Experiment<select value={multiMode} disabled={Boolean(multiSession && multiSession.state !== 'stopped')} onChange={(event) => setMultiMode(event.target.value as typeof multiMode)}>
+                <option value="standard">Standard Multi-Speaker</option>
+                <option value="wav-timing">WAV Multi-Speaker Timing</option>
+              </select></label>
               <label>Speaker A<select value={speakerAId} disabled={Boolean(multiSession && multiSession.state !== 'stopped')} onChange={(event) => setSpeakerAId(event.target.value)}>
                 <option value="">Select device…</option>
-                {multiEligibleDevices.map((device) => <option key={device.id} value={device.id} disabled={device.id === speakerBId}>{device.presentation?.alias ?? device.name}</option>)}
+                {multiEligibleDevices.map((device) => <option key={device.id} value={device.id} title={audioDeviceSelectorTitle(device)} disabled={device.id === speakerBId}>{formatAudioDeviceSelectorLabel(device)}</option>)}
               </select></label>
               <label>Speaker B<select value={speakerBId} disabled={Boolean(multiSession && multiSession.state !== 'stopped')} onChange={(event) => setSpeakerBId(event.target.value)}>
                 <option value="">Select device…</option>
-                {multiEligibleDevices.map((device) => <option key={device.id} value={device.id} disabled={device.id === speakerAId}>{device.presentation?.alias ?? device.name}</option>)}
+                {multiEligibleDevices.map((device) => <option key={device.id} value={device.id} title={audioDeviceSelectorTitle(device)} disabled={device.id === speakerAId}>{formatAudioDeviceSelectorLabel(device)}</option>)}
               </select></label>
             </div>
             <div className="research-stream-actions">
@@ -1005,10 +1139,37 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
                 </div>
                 <h4>Coordinated Tests</h4>
                 <div className="research-stream-actions">
-                  <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('alternating')}>Run Alternating Test</button>
-                  <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('simultaneous')}>Run Simultaneous Test</button>
-                  <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('migration')}>Migrate A → B</button>
+                  {multiSession.mode === 'wav-timing' ? <>
+                    <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('identify-A')}>Identify A</button>
+                    <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('identify-B')}>Identify B</button>
+                    <button disabled={multiSession.state !== 'ready' || !multiSession.timingContinuityValid || Boolean(multiBusy)} onClick={() => void multiAction('wav-sync-pulse')}>Inject Simultaneous Pulse</button>
+                    <button disabled={multiSession.state !== 'ready' || !multiSession.timingContinuityValid || Boolean(multiBusy)} onClick={() => void multiAction('wav-repeated-sync')}>Repeated Sync Test</button>
+                  </> : <>
+                    <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('alternating')}>Run Alternating Test</button>
+                    <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('simultaneous')}>Run Simultaneous Test</button>
+                    <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('migration')}>Migrate A → B</button>
+                  </>}
                 </div>
+                {multiSession.mode === 'wav-timing' && <>
+                  <div className={multiSession.timingContinuityValid ? 'research-device-action-message' : 'research-warning-message'}>
+                    Timing continuity: {multiSession.timingContinuityValid ? 'Valid' : 'Invalidated by reconnect — start a new session'}
+                  </div>
+                  {multiSession.lastWavSyncPulse && <div className="research-multi-result">
+                    <strong>Last WAV Sync Pulse</strong>
+                    <span>Shared frame: {multiSession.lastWavSyncPulse.scheduledFrame}</span>
+                    {multiSession.lastWavSyncPulse.speakers.map((speaker) => <span key={speaker.slot}>Speaker {speaker.slot}: frame {speaker.firstToneFrame ?? 'pending'} · offset {speaker.logicalOffsetFrames ?? 'pending'} · connection {speaker.connectionOrdinal ?? '—'}</span>)}
+                    <small>Logical PCM timing only; acoustic skew remains a manual observation.</small>
+                  </div>}
+                  <div className="research-latency-record">
+                    <label>Observed Skew<select value={timingImpression} onChange={(event) => setTimingImpression(event.target.value as typeof timingImpression)}>
+                      <option value="simultaneous">Indistinguishable / simultaneous</option>
+                      <option value="slight-echo">Slight echo</option>
+                      <option value="double-hit">Clear double hit</option>
+                    </select></label>
+                    <label>Estimated skew <input type="number" min="0" value={estimatedTimingSkew} onChange={(event) => setEstimatedTimingSkew(event.target.value)} /> ms</label>
+                    <button disabled={multiSession.state !== 'ready' || Boolean(multiBusy)} onClick={() => void multiAction('timing-result')}>Record Result</button>
+                  </div>
+                </>}
                 {multiSession.lastSimultaneousResult && <div className="research-multi-result">
                   <strong>Last Simultaneous PCM Result</strong>
                   <span>Event: {multiSession.lastSimultaneousResult.eventId}</span>
@@ -1037,9 +1198,9 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
                 </details>
               </div>
             )}
-          </section>
+          </section>}
 
-          <section className="research-lab-panel research-streams-panel">
+          {activeTab === 'streams' && <section className="research-lab-panel research-streams-panel">
             <div className="research-section-heading">
               <div>
                 <h3>Stream Experiments</h3>
@@ -1063,7 +1224,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
                 ))}
               </div>
             )}
-          </section>
+          </section>}
         </div>
       </div>
     </div>

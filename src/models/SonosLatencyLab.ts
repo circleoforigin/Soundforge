@@ -1,4 +1,8 @@
-export type SonosLatencyProfileId = 'aac-radio' | 'wav-broadcast' | 'l16-broadcast';
+export type SonosLatencyProfileId =
+  | 'known-working-baseline'
+  | 'aac-radio'
+  | 'wav-broadcast'
+  | 'l16-broadcast';
 
 export type SonosLatencyStreamType = 'radio' | 'broadcast';
 
@@ -17,9 +21,17 @@ export interface SonosLatencyExperimentProfile {
   metadataMode: 'empty' | 'audio-broadcast';
   httpFraming: 'HTTP/1.0 connection-close';
   limitation?: string;
+  useTransportDefaults?: boolean;
 }
 
 export const sonosLatencyExperimentProfiles: readonly SonosLatencyExperimentProfile[] = [
+  {
+    id: 'known-working-baseline', label: 'Known Working Baseline',
+    encodingProfileId: 'aac-adts', codec: 'aac-lc', container: 'adts',
+    mimeType: 'audio/aac', sampleRate: 48_000, channelCount: 2, bitrate: 256_000,
+    sonosStreamType: 'radio', uriScheme: 'x-rincon-mp3radio', metadataMode: 'empty',
+    httpFraming: 'HTTP/1.0 connection-close', useTransportDefaults: true,
+  },
   {
     id: 'aac-radio', label: 'AAC / Radio (baseline)', encodingProfileId: 'aac-adts',
     codec: 'aac-lc', container: 'adts', mimeType: 'audio/aac', sampleRate: 48_000,

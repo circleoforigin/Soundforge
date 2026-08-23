@@ -25,6 +25,7 @@ function researchLabStatus(error: unknown): number {
 }
 
 function researchLabErrorCode(error: unknown): string {
+  if (error instanceof ResearchLabRequestError) return error.code;
   if (error instanceof SonosApiError && error.status === 429) return 'SONOS_RATE_LIMITED';
   if (error instanceof SonosTopologyCooldownError) return 'SONOS_RATE_LIMIT_COOLDOWN';
   if (error instanceof SonosTopologyTimeoutError) return 'SONOS_TOPOLOGY_TIMEOUT';
@@ -47,7 +48,7 @@ function isHttpFramingMode(value: unknown): value is ContinuousHttpFramingMode {
   return value === 'chunked' || value === 'indefinite-content-length';
 }
 
-interface ResearchLabStreamRouteDependencies {
+export interface ResearchLabStreamRouteDependencies {
   manager: ContinuousAudioStreamManager;
   service: ResearchLabStreamService;
 }
@@ -127,11 +128,26 @@ export function registerResearchLabStreamRoute(
 
   app.post('/api/research-lab/streams/:streamId/latency-tone', json(), (request, response) => {
     try {
-      response.json({ ok: true, stream: service.injectLatencyTone(request.params.streamId) });
+      const body = request.body && typeof request.body === 'object'
+        ? request.body as Record<string, unknown>
+        : {};
+      response.json({
+        ok: true,
+        stream: service.injectLatencyTone(request.params.streamId, {
+          correlationId: typeof body.correlationId === 'string' ? body.correlationId : undefined,
+          uiStreamId: typeof body.streamId === 'string' ? body.streamId : undefined,
+          profileId: typeof body.profileId === 'string' ? body.profileId : undefined,
+          deviceId: typeof body.deviceId === 'string' ? body.deviceId : undefined,
+          requestStartedAt: typeof body.requestStartedAt === 'string' ? body.requestStartedAt : undefined,
+          requestPath: request.path,
+        }),
+      });
     } catch (error) {
       response.status(error instanceof ResearchLabRequestError ? error.status : 500).json({
         ok: false,
+        code: researchLabErrorCode(error),
         message: error instanceof Error ? error.message : 'Unable to inject latency tone.',
+        ...(error instanceof ResearchLabRequestError && error.details ? error.details : {}),
       });
     }
   });

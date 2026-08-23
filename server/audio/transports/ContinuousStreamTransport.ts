@@ -21,7 +21,7 @@ export interface ContinuousStreamTransportContext {
     metadata?: HttpStreamConnectionMetadata
   ): void;
   updateTransport(update: Partial<AudioStreamTransportSnapshot>, message?: string): void;
-  addDiagnostic(message: string, details?: Record<string, unknown>): void;
+  addDiagnostic(message: string, details?: Record<string, unknown>, code?: string): void;
   terminate(reason: string): void;
 }
 

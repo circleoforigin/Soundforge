@@ -53,9 +53,7 @@ import {
 import {
   registerSonosEventRoute,
 } from './routes/SonosEventRoute.ts';
-import { registerResearchLabDeviceRoute } from './routes/ResearchLabDeviceRoute.ts';
-import { registerResearchLabStreamRoute } from './routes/ResearchLabStreamRoute.ts';
-import { registerResearchLabMultiSpeakerRoute } from './routes/ResearchLabMultiSpeakerRoute.ts';
+import { registerResearchLabRoutes } from './routes/ResearchLabRoutes.ts';
 import { initializeSonosTokenStore } from './sonos/SonosTokenStore.ts';
 import { registerAppSettingsRoute } from './routes/AppSettingsRoute.ts';
 import { registerDiagnosticLogRoute } from './routes/DiagnosticLogRoute.ts';
@@ -175,9 +173,7 @@ registerSonosDiscoveryRoute(app);
 registerSonosMediaRoute(app);
 registerSonosGroupStreamRoute(app);
 registerSonosEventRoute(app);
-registerResearchLabDeviceRoute(app);
-registerResearchLabStreamRoute(app);
-registerResearchLabMultiSpeakerRoute(app);
+registerResearchLabRoutes(app);
 registerAppSettingsRoute(app);
 registerDiagnosticLogRoute(app);
 registerRoomAudioAssetRoute(app);
