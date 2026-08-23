@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { DiagnosticLogEntry } from '../models/DiagnosticLog';
 import { clearDiagnostics, loadDiagnostics } from '../services/diagnostics/DiagnosticClient';
+import { formatDiagnosticReport } from '../services/diagnostics/DiagnosticReportFormatter';
 
 interface Props { onClose: () => void; }
 
@@ -8,6 +9,15 @@ export default function DiagnosticLogDialog({ onClose }: Props) {
   const [entries, setEntries] = useState<DiagnosticLogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+
+  async function copyFullReport() {
+    try {
+      await navigator.clipboard.writeText(formatDiagnosticReport(entries));
+      setCopyStatus('Full report copied to clipboard.');
+      window.setTimeout(() => setCopyStatus(null), 2500);
+    } catch { setCopyStatus('Unable to copy the diagnostic report.'); }
+  }
 
   async function refresh() {
     setLoading(true);
@@ -50,6 +60,8 @@ export default function DiagnosticLogDialog({ onClose }: Props) {
         </details>)}
       </div>
       <footer className="dialog-buttons diagnostic-log-actions">
+        <button onClick={() => void copyFullReport()} disabled={entries.length === 0}>Copy Full Report</button>
+        {copyStatus && <span role="status">{copyStatus}</span>}
         <button onClick={() => void refresh()}>Refresh</button>
         <button onClick={() => void (async () => { await clearDiagnostics(); setEntries([]); })()}>Clear Log</button>
         <button onClick={onClose}>Close</button>

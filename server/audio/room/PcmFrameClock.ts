@@ -7,6 +7,7 @@ export class PcmFrameClock {
   private timer: NodeJS.Timeout | null = null;
   private nextFrameTime = 0;
   private frameIndex = 0;
+  private startedAt = 0;
 
   constructor(
     frameDurationMs: number,
@@ -16,6 +17,7 @@ export class PcmFrameClock {
   start(): void {
     if (this.timer) return;
     this.nextFrameTime = performance.now();
+    this.startedAt = this.nextFrameTime;
     this.timer = setInterval(() => {
       const result = advancePcmScheduler(
         this.nextFrameTime, performance.now(), this.frameDurationMs,
@@ -27,4 +29,9 @@ export class PcmFrameClock {
 
   stop(): void { if (this.timer) clearInterval(this.timer); this.timer = null; }
   get currentFrameIndex(): number { return this.frameIndex; }
+  telemetry() {
+    const wallElapsedMs = this.startedAt ? Math.max(0, performance.now() - this.startedAt) : 0;
+    const generatedAudioMs = this.frameIndex * this.frameDurationMs;
+    return { wallElapsedMs, generatedAudioMs, driftMs: generatedAudioMs - wallElapsedMs, framesGenerated: this.frameIndex, expectedFrames: Math.floor(wallElapsedMs / this.frameDurationMs) };
+  }
 }

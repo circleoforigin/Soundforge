@@ -325,6 +325,7 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       );
       const diagnostic = playbackDiagnosticsRef.current.get(instanceId);
       const now = performance.now();
+      const updateCorrelationId = `position-${crypto.randomUUID()}`;
       if (diagnostic && now - (lastPositionDiagnosticRef.current.get(instanceId) ?? 0) >= 500) {
         lastPositionDiagnosticRef.current.set(instanceId, now);
         void recordDiagnostic({
@@ -334,7 +335,8 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
             oldPosition, newPosition: clampedPosition,
             oldGains: oldMix,
             newGains: getOutputSpeakerMixForNode({ ...deployedNode, position: clampedPosition }),
-            gainRoutingUpdatedLive: true,
+            updateState: 'requested', updateCorrelationId,
+            gainRoutingUpdatedLive: false,
             playbackReconstructed: false,
           },
         });
@@ -342,8 +344,25 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       void roomAudioEngine.updatePosition(
         instanceId,
         clampedPosition,
-        getOutputSpeakerMixForNode({ ...deployedNode, position: clampedPosition })
-      );
+        getOutputSpeakerMixForNode({ ...deployedNode, position: clampedPosition }),
+        updateCorrelationId
+      ).then(() => {
+        if (!diagnostic) return;
+        void recordDiagnostic({
+          category: 'spatial', level: 'info', event: 'spatial.gains_update_accepted',
+          message: 'Spatial gain update accepted by the Room Audio backend.',
+          correlationId: updateCorrelationId,
+          details: { objectInstanceId: instanceId, updateState: 'accepted', gainRoutingUpdatedLive: true },
+        });
+      }).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : 'Unable to update Room audio position.';
+        void recordDiagnostic({
+          category: 'error', level: 'error', event: 'spatial.gains_update_failed',
+          message: 'Spatial gain update failed.', correlationId: updateCorrelationId,
+          details: { objectInstanceId: instanceId, updateState: 'failed', error: message },
+        });
+        showFieldMessage(message);
+      });
     }
 
     const temporaryDeployment = temporaryDeployments.find(

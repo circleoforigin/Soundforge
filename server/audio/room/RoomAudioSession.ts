@@ -28,6 +28,12 @@ interface ActiveSource {
   completionReason?: string;
   lastObservedPlayhead: number;
   loopWrapCount: number;
+  pendingGainApplication?: { correlationId: string; requestedAtFrame: number };
+  peakMixed: number;
+  sumSquaresMixed: number;
+  mixedSampleCount: number;
+  clippingCount: number;
+  firstAudibleFrameRecorded: boolean;
 }
 
 interface EndpointRuntime {
@@ -37,6 +43,8 @@ interface EndpointRuntime {
   lastError?: string;
 }
 
+type RoomAudioAssetDecoder = Pick<RoomAudioAssetStore, 'decode'> & Partial<Pick<RoomAudioAssetStore, 'decodeWithTelemetry'>>;
+
 function dbToLinear(db: number): number { return Math.pow(10, db / 20); }
 
 export class RoomAudioSession {
@@ -44,7 +52,7 @@ export class RoomAudioSession {
   readonly roomId: string;
   private readonly roomName: string;
   private readonly registry: AudioOutputProviderRegistry;
-  private readonly assetStore: RoomAudioAssetStore;
+  private readonly assetStore: RoomAudioAssetDecoder;
   private readonly diagnostics: DiagnosticLogService;
   private readonly createdAt = new Date();
   private state: RoomAudioSessionSnapshot['state'] = 'starting';
@@ -57,7 +65,7 @@ export class RoomAudioSession {
   constructor(
     request: RoomAudioSessionRequest,
     registry: AudioOutputProviderRegistry,
-    assetStore: RoomAudioAssetStore = roomAudioAssetStore,
+    assetStore: RoomAudioAssetDecoder = roomAudioAssetStore,
     diagnostics: DiagnosticLogService = diagnosticLogService
   ) {
     this.roomId = request.roomId;
@@ -109,12 +117,18 @@ export class RoomAudioSession {
 
   async addSource(request: RoomAudioSourceRequest): Promise<RoomAudioSourceSnapshot> {
     if (this.state !== 'ready' && this.state !== 'degraded') throw new Error('Room audio session is not ready.');
-    const asset = await this.assetStore.decode(request.assetId);
+    const decodeStartedAt = performance.now();
+    const decoded = this.assetStore.decodeWithTelemetry
+      ? await this.assetStore.decodeWithTelemetry(request.assetId)
+      : { asset: await this.assetStore.decode(request.assetId), cacheHit: false, durationMs: performance.now() - decodeStartedAt };
+    const asset = decoded.asset;
     const source: ActiveSource = {
       request: structuredClone(request), playbackId: crypto.randomUUID(),
       logicalStartFrame: this.clock.currentFrameIndex, playheadSamples: 0, renderedSamples: 0, startCount: 1,
       state: 'playing', asset, fadeOutSamplesRemaining: 0, fadeOutTotalSamples: 0,
       lastObservedPlayhead: 0, loopWrapCount: 0,
+      peakMixed: 0, sumSquaresMixed: 0, mixedSampleCount: 0, clippingCount: 0,
+      firstAudibleFrameRecorded: false,
     };
     if (request.randomStart && request.playbackMode === 'loop' && asset.durationSamples > 1) {
       source.playheadSamples = Math.floor(Math.random() * (asset.durationSamples - 1));
@@ -128,8 +142,17 @@ export class RoomAudioSession {
         logicalStartFrame: source.logicalStartFrame, sharesSourceTimeline: true,
         sourceInstancesCreated: 1, endpointRenderCount: this.readyConnections().length,
         endpointIds: this.readyConnections().map((item) => item.endpoint.endpointId), startCount: 1,
+        frontendRequestInitiatedAt: request.frontendRequestInitiatedAt,
+        backendSourceCreatedAt: new Date().toISOString(), decodeDurationMs: decoded.durationMs, decodeCacheHit: decoded.cacheHit,
       },
     });
+    await this.diagnostics.record({
+      category: 'audio', level: 'info', event: 'room_audio.asset_decoded',
+      message: decoded.cacheHit ? 'Room audio asset decode cache hit.' : 'Room audio asset decoded.',
+      correlationId: request.correlationId,
+      details: { assetId: request.assetId, cacheHit: decoded.cacheHit, decodeDurationMs: decoded.durationMs, assetPeak: asset.peak, assetRms: asset.rms },
+    });
+    await this.recordGainCheckpoint(source, 'room_audio.source_gain_chain', 'Room audio source gain chain initialized.');
     await this.diagnostics.record({
       category: 'audio', level: 'info', event: 'room_audio.render_scheduled',
       message: 'Room audio render scheduled.', correlationId: request.correlationId,
@@ -138,12 +161,18 @@ export class RoomAudioSession {
     return this.sourceSnapshot(source);
   }
 
-  updateSource(playbackId: string, update: Partial<Pick<RoomAudioSourceRequest, 'position' | 'endpointGains' | 'nodeGainDb' | 'muted' | 'typeVolume' | 'sceneMasterVolume' | 'sceneTransitionGain'>>): RoomAudioSourceSnapshot {
+  updateSource(playbackId: string, update: Partial<Pick<RoomAudioSourceRequest, 'position' | 'endpointGains' | 'nodeGainDb' | 'muted' | 'typeVolume' | 'sceneMasterVolume' | 'sceneTransitionGain' | 'updateCorrelationId'>>): RoomAudioSourceSnapshot {
     const source = this.sources.get(playbackId);
     if (!source) throw new Error('Room audio source not found.');
     const oldPosition = source.request.position;
     const oldGains = source.request.endpointGains;
     source.request = { ...source.request, ...structuredClone(update) };
+    if (update.position || update.endpointGains) {
+      source.pendingGainApplication = {
+        correlationId: update.updateCorrelationId ?? source.request.correlationId,
+        requestedAtFrame: this.clock.currentFrameIndex,
+      };
+    }
     const now = Date.now();
     if (now - (this.lastPositionDiagnosticAt.get(playbackId) ?? 0) >= 500) {
       this.lastPositionDiagnosticAt.set(playbackId, now);
@@ -155,6 +184,7 @@ export class RoomAudioSession {
           oldGains, newGains: source.request.endpointGains, playheadSamples: source.playheadSamples,
           logicalStartFrame: source.logicalStartFrame, startCount: source.startCount,
           sourceRecreated: false, providersReopened: false, encodersRecreated: false,
+          updateCorrelationId: update.updateCorrelationId,
         },
       });
     }
@@ -224,10 +254,31 @@ export class RoomAudioSession {
 
   private renderFrame(logicalTime: number): void {
     const connections = this.readyConnections();
+    if (this.clock.currentFrameIndex > 0 && this.clock.currentFrameIndex % 1_500 === 0) {
+      void this.diagnostics.record({
+        category: 'transport', level: 'info', event: 'room_audio.transport_telemetry',
+        message: 'Room audio transport and clock telemetry checkpoint.',
+        details: { roomId: this.roomId, sessionId: this.sessionId, clock: this.clock.telemetry(), endpoints: this.endpointTelemetry() },
+      });
+    }
     const samplesPerFrame = ROOM_AUDIO_FORMAT.sampleRate * ROOM_AUDIO_FORMAT.frameDurationMs / 1000;
     const buses = new Map(connections.map(({ endpoint }) => [endpoint.endpointId, new Float32Array(samplesPerFrame * 2)]));
     for (const source of [...this.sources.values()]) {
       if (source.state !== 'playing') continue;
+      const gainApplication = source.pendingGainApplication;
+      if (gainApplication) {
+        source.pendingGainApplication = undefined;
+        void this.diagnostics.record({
+          category: 'spatial', level: 'info', event: 'room_audio.source_gain_applied',
+          message: 'Updated spatial gains applied by the Room mixer.', correlationId: gainApplication.correlationId,
+          details: {
+            playbackId: source.playbackId, sessionId: this.sessionId, frameIndex: this.clock.currentFrameIndex,
+            requestedAtFrame: gainApplication.requestedAtFrame, endpointGains: source.request.endpointGains,
+            playheadSamples: source.playheadSamples,
+          },
+        });
+        void this.recordGainCheckpoint(source, 'room_audio.source_gain_chain', 'Room audio gain chain updated.');
+      }
       if (source.playheadSamples < source.lastObservedPlayhead && source.request.playbackMode !== 'loop') {
         void this.diagnostics.record({
           category: 'error', level: 'error', event: 'room_audio.unexpected_playhead_reset',
@@ -243,6 +294,18 @@ export class RoomAudioSession {
         const assetOffset = source.playheadSamples * 2;
         const left = source.asset.samples[assetOffset] ?? 0;
         const right = source.asset.samples[assetOffset + 1] ?? left;
+        if (!source.firstAudibleFrameRecorded && (left !== 0 || right !== 0)) {
+          source.firstAudibleFrameRecorded = true;
+          void this.diagnostics.record({
+            category: 'audio', level: 'info', event: 'room_audio.source_first_audio_frame',
+            message: 'First source audio entered the Room mixer.', correlationId: source.request.correlationId,
+            details: {
+              playbackId: source.playbackId, frameIndex: this.clock.currentFrameIndex,
+              playheadSamples: source.playheadSamples, endpointTelemetry: this.endpointTelemetry(),
+              acousticPlaybackTimeKnown: false,
+            },
+          });
+        }
         const fadeInSamples = Math.max(1, Math.round(ROOM_AUDIO_FORMAT.sampleRate * source.request.fadeInMs / 1000));
         const fadeInGain = source.request.fadeInEnabled ? Math.min(1, source.renderedSamples / fadeInSamples) : 1;
         const fadeOutGain = source.fadeOutSamplesRemaining > 0
@@ -256,8 +319,14 @@ export class RoomAudioSession {
           if (!bus) continue;
           const gain = base * (source.request.endpointGains[endpoint.speakerId] ?? 0)
             * dbToLinear(endpoint.trimDb);
-          bus[frameSample * 2] += left * gain;
-          bus[frameSample * 2 + 1] += right * gain;
+          const mixedLeft = left * gain; const mixedRight = right * gain;
+          bus[frameSample * 2] += mixedLeft;
+          bus[frameSample * 2 + 1] += mixedRight;
+          source.peakMixed = Math.max(source.peakMixed, Math.abs(mixedLeft), Math.abs(mixedRight));
+          source.sumSquaresMixed += mixedLeft * mixedLeft + mixedRight * mixedRight;
+          source.mixedSampleCount += 2;
+          if (Math.abs(mixedLeft) > 1) source.clippingCount += 1;
+          if (Math.abs(mixedRight) > 1) source.clippingCount += 1;
         }
         source.playheadSamples += 1;
         source.renderedSamples += 1;
@@ -312,7 +381,47 @@ export class RoomAudioSession {
     await this.diagnostics.record({
       category: 'playback', level: 'info', event: 'room_audio.source_completed',
       message: 'Spatial playback completed.', correlationId: source.request.correlationId,
-      details: { playbackId: source.playbackId, sessionId: this.sessionId, assetId: source.request.assetId, playheadSamples: source.playheadSamples, startCount: source.startCount, completionReason: reason, sourceInstancesCreated: 1, sharesSourceTimeline: true },
+      details: {
+        playbackId: source.playbackId, sessionId: this.sessionId, assetId: source.request.assetId,
+        playheadSamples: source.playheadSamples, startCount: source.startCount, completionReason: reason,
+        sourceInstancesCreated: 1, sharesSourceTimeline: true, mixedPeak: source.peakMixed,
+        mixedRms: source.mixedSampleCount ? Math.sqrt(source.sumSquaresMixed / source.mixedSampleCount) : 0,
+        clippingCount: source.clippingCount, endpointTelemetry: this.endpointTelemetry(),
+        clock: this.clock.telemetry(),
+      },
+    });
+  }
+
+  private endpointTelemetry() {
+    return this.readyConnections().map(({ endpoint, connection }) => ({
+      endpointId: endpoint.endpointId, speakerId: endpoint.speakerId,
+      ...(connection.getTelemetry?.() ?? { pcmFramesSubmitted: 0, pcmBytesSubmitted: 0 }),
+    }));
+  }
+
+  private async recordGainCheckpoint(source: ActiveSource, event: string, message: string): Promise<void> {
+    const sceneTransitionGain = (source.request.sceneTransitionGain ?? 1) * this.sceneGain(source.request.sceneInstanceId);
+    const fadeInSamples = Math.max(1, Math.round(ROOM_AUDIO_FORMAT.sampleRate * source.request.fadeInMs / 1000));
+    const fadeInGain = source.request.fadeInEnabled ? Math.min(1, source.renderedSamples / fadeInSamples) : 1;
+    const fadeOutGain = source.fadeOutSamplesRemaining > 0
+      ? source.fadeOutSamplesRemaining / Math.max(1, source.fadeOutTotalSamples) : 1;
+    const fadeGain = fadeInGain * fadeOutGain;
+    const nodeGainLinear = source.request.muted ? 0 : dbToLinear(source.request.nodeGainDb);
+    await this.diagnostics.record({
+      category: 'audio', level: 'info', event, message, correlationId: source.request.correlationId,
+      details: {
+        playbackId: source.playbackId, assetPeak: source.asset.peak, assetRms: source.asset.rms,
+        nodeGainLinear, muted: source.request.muted,
+        typeVolume: source.request.typeVolume, sceneMasterVolume: source.request.sceneMasterVolume,
+        sceneTransitionGain, fadeGain,
+        endpoints: this.readyConnections().map(({ endpoint }) => {
+          const spatialGain = source.request.endpointGains[endpoint.speakerId] ?? 0;
+          const trimGain = dbToLinear(endpoint.trimDb);
+          return { endpointId: endpoint.endpointId, speakerId: endpoint.speakerId, spatialGain, trimDb: endpoint.trimDb, trimGain,
+            finalEffectiveGain: nodeGainLinear * source.request.typeVolume * source.request.sceneMasterVolume * sceneTransitionGain * fadeGain * spatialGain * trimGain };
+        }),
+        endpointTelemetry: this.endpointTelemetry(), clock: this.clock.telemetry(),
+      },
     });
   }
 }

@@ -66,6 +66,18 @@ export interface RoomAudioSourceRequest {
   sceneMasterVolume: number;
   sceneTransitionGain?: number;
   endpointGains: Record<string, number>;
+  updateCorrelationId?: string;
+  frontendRequestInitiatedAt?: string;
+}
+
+export interface RoomAudioEndpointTelemetry {
+  pcmFramesSubmitted: number;
+  pcmBytesSubmitted: number;
+  encodedBytesProduced?: number;
+  httpBytesDelivered?: number;
+  httpWritableLength?: number;
+  estimatedQueuedAudioMs?: number;
+  estimatedEncodedDeliveryLeadMs?: number;
 }
 
 export interface RoomAudioSourceSnapshot extends RoomAudioSourceRequest {

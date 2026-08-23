@@ -5,7 +5,9 @@ import type { SoundAsset } from '../models/SoundAsset';
 import type { SpeakerMap } from '../models/SpeakerMap';
 import type { SpeakerMix } from '../utils/spatialMixMath';
 import { apiUrl } from '../config/api';
+import { recordDiagnostic } from '../services/diagnostics/DiagnosticClient';
 import { playbackEngine, type PlaybackRouting, type StereoMix } from './PlaybackEngine';
+import { requireSuccessfulRoomAudioResponse, roomAudioErrorMessage as errorMessage } from './RoomAudioHttp';
 
 type EngineState = 'idle' | 'connecting' | 'ready' | 'degraded' | 'error';
 
@@ -22,10 +24,6 @@ interface PlayIntent {
   onComplete?: () => void;
 }
 
-async function errorMessage(response: Response): Promise<string> {
-  try { return (await response.json() as { message?: string }).message ?? `Room audio request failed (${response.status}).`; }
-  catch { return `Room audio request failed (${response.status}).`; }
-}
 
 class RoomAudioEngine {
   private state: EngineState = 'idle';
@@ -41,7 +39,8 @@ class RoomAudioEngine {
   private readonly assetSyncRequests = new Map<string, Promise<void>>();
   private readonly positionUpdates = new Map<string, {
     inFlight: boolean;
-    pending: { position: { x: number; y: number }; speakerMix: SpeakerMix[] } | null;
+    pending: { position: { x: number; y: number }; speakerMix: SpeakerMix[]; correlationId: string } | null;
+    runner?: Promise<void>;
   }>();
   private version = 0;
   private configurationPromise: Promise<void> = Promise.resolve();
@@ -84,16 +83,15 @@ class RoomAudioEngine {
     this.remotePlaybackIds.clear();
     this.positionUpdates.clear();
     if (oldRoomId && (!wasLocal && (oldRoomId !== this.roomId || local))) {
-      await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(oldRoomId)}/session`), { method: 'DELETE' }).catch(() => undefined);
+      await requireSuccessfulRoomAudioResponse(await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(oldRoomId)}/session`), { method: 'DELETE' })).catch(() => undefined);
     }
     if (!room || local) { this.state = room ? 'ready' : 'idle'; this.stateMessage = local ? 'Browser audio ready.' : ''; this.emit(); return; }
     this.state = 'connecting'; this.stateMessage = 'Connecting persistent Room audio outputs…'; this.emit();
     try {
-      const response = await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(room.id)}/session`), {
+      const response = await requireSuccessfulRoomAudioResponse(await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(room.id)}/session`), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ roomId: room.id, roomName: room.name, endpoints }),
-      });
-      if (!response.ok) throw new Error(await errorMessage(response));
+      }));
       const snapshot = await response.json() as RoomAudioSessionSnapshot;
       this.state = snapshot.state === 'degraded' ? 'degraded' : snapshot.state === 'ready' ? 'ready' : 'error';
       this.stateMessage = snapshot.state === 'degraded' ? 'Some Room audio endpoints are unavailable.' : 'Room audio ready.';
@@ -102,6 +100,7 @@ class RoomAudioEngine {
   }
 
   async play(intent: PlayIntent): Promise<void> {
+    const synchronizationStartedAt = performance.now();
     await this.configurationPromise;
     if (this.localMode) {
       await playbackEngine.start(intent.node, intent.asset, intent.stereoMix, intent.routing, intent.onComplete);
@@ -109,6 +108,11 @@ class RoomAudioEngine {
     }
     if (!intent.room || (this.state !== 'ready' && this.state !== 'degraded')) throw new Error(this.stateMessage || 'Room audio is not ready.');
     await this.synchronizeAsset(intent.asset);
+    void recordDiagnostic({
+      category: 'audio', level: 'info', event: 'room_audio.asset_synchronization_completed',
+      message: 'Room audio asset synchronization completed.', correlationId: intent.correlationId,
+      details: { assetId: intent.asset.id, durationMs: Math.round((performance.now() - synchronizationStartedAt) * 100) / 100 },
+    });
     const request: RoomAudioSourceRequest = {
       correlationId: intent.correlationId, sceneInstanceId: intent.routing.sceneInstanceId,
       sceneName: intent.sceneName, sourceNodeId: intent.routing.sourceNodeId,
@@ -121,11 +125,11 @@ class RoomAudioEngine {
       randomStart: intent.node.randomStart ?? false,
       typeVolume: intent.routing.volume[intent.routing.type], sceneMasterVolume: intent.routing.volume.master,
       endpointGains: Object.fromEntries(intent.speakerMix.map((speaker) => [speaker.speakerId, speaker.gain])),
+      frontendRequestInitiatedAt: new Date(Date.now() - (performance.now() - synchronizationStartedAt)).toISOString(),
     };
-    const response = await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(intent.room.id)}/sources`), {
+    const response = await requireSuccessfulRoomAudioResponse(await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(intent.room.id)}/sources`), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
-    });
-    if (!response.ok) throw new Error(await errorMessage(response));
+    }));
     const source = await response.json() as RoomAudioSourceSnapshot;
     this.remotePlaybackIds.set(intent.node.instanceId, {
       playbackId: source.playbackId, sceneId: intent.routing.sceneInstanceId,
@@ -134,30 +138,34 @@ class RoomAudioEngine {
     if (intent.node.playbackMode === 'oneShot') {
       window.setTimeout(() => {
         if (this.remotePlaybackIds.get(intent.node.instanceId)?.playbackId === source.playbackId) {
-          this.remotePlaybackIds.delete(intent.node.instanceId); this.emit(); intent.onComplete?.();
+          // UI deployment lifetime is approximate. The authoritative backend source
+          // remains addressable until it reports completion or rejects a mutation.
+          intent.onComplete?.();
         }
       }, Math.max(250, intent.asset.durationMs ?? 1000));
     }
   }
 
-  async updatePosition(objectInstanceId: string, position: { x: number; y: number }, speakerMix: SpeakerMix[]): Promise<void> {
+  async updatePosition(objectInstanceId: string, position: { x: number; y: number }, speakerMix: SpeakerMix[], correlationId = `position-${crypto.randomUUID()}`): Promise<void> {
     if (this.localMode) return;
     const state = this.positionUpdates.get(objectInstanceId) ?? { inFlight: false, pending: null };
-    state.pending = { position, speakerMix };
+    state.pending = { position, speakerMix, correlationId };
     this.positionUpdates.set(objectInstanceId, state);
-    if (state.inFlight) return;
+    if (state.inFlight) return state.runner;
     state.inFlight = true;
-    try {
+    state.runner = (async () => { try {
       while (state.pending) {
         const update = state.pending; state.pending = null;
         const playback = this.remotePlaybackIds.get(objectInstanceId);
-        if (!playback || !this.roomId) return;
+        if (!playback || !this.roomId) throw new Error('Active Room audio playback could not be resolved for this node.');
         await this.patchRemoteSource(playback.playbackId, {
           position: update.position,
           endpointGains: Object.fromEntries(update.speakerMix.map((item) => [item.speakerId, item.gain])),
+          updateCorrelationId: update.correlationId,
         });
       }
-    } finally { state.inFlight = false; if (!state.pending) this.positionUpdates.delete(objectInstanceId); }
+    } finally { state.inFlight = false; if (!state.pending) this.positionUpdates.delete(objectInstanceId); } })();
+    return state.runner;
   }
 
   isPlaying(instanceId: string): boolean { return this.localMode ? playbackEngine.isPlaying(instanceId) : this.remotePlaybackIds.has(instanceId); }
@@ -166,23 +174,23 @@ class RoomAudioEngine {
     const playback = this.remotePlaybackIds.get(instanceId); if (!playback || !this.roomId) return;
     this.remotePlaybackIds.delete(instanceId); this.emit();
     this.positionUpdates.delete(instanceId);
-    void fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/sources/${encodeURIComponent(playback.playbackId)}`), { method: 'DELETE' });
+    this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/sources/${encodeURIComponent(playback.playbackId)}`), { method: 'DELETE' })), 'room_audio.source_stop_failed');
   }
   async stopNode(node: SceneObjectInstance): Promise<void> { if (this.localMode) await playbackEngine.stopNode(node); else this.stop(node.instanceId); }
   async pause(node: SceneObjectInstance): Promise<void> { if (this.localMode) await playbackEngine.pause(node); else this.stop(node.instanceId); }
   setSceneVolume(sceneId: string, volume: PlaybackRouting['volume']): void {
     if (this.localMode) { playbackEngine.setSceneVolume(sceneId, volume); return; }
     for (const playback of this.remotePlaybackIds.values()) {
-      if (playback.sceneId === sceneId) void this.patchRemoteSource(playback.playbackId, {
+      if (playback.sceneId === sceneId) this.observeMutation(this.patchRemoteSource(playback.playbackId, {
         typeVolume: volume[playback.volumeType], sceneMasterVolume: volume.master,
-      });
+      }), 'room_audio.volume_update_failed');
     }
   }
   updateNodeGain(sceneId: string, nodeId: string, gainDb: number, muted: boolean): void {
     if (this.localMode) { playbackEngine.updateNodeGain(sceneId, nodeId, gainDb, muted); return; }
     for (const playback of this.remotePlaybackIds.values()) {
       if (playback.sceneId === sceneId && playback.sourceNodeId === nodeId) {
-        void this.patchRemoteSource(playback.playbackId, { nodeGainDb: gainDb, muted });
+        this.observeMutation(this.patchRemoteSource(playback.playbackId, { nodeGainDb: gainDb, muted }), 'room_audio.node_gain_update_failed');
       }
     }
   }
@@ -194,7 +202,7 @@ class RoomAudioEngine {
       if (playback.sceneId === sceneId) this.remotePlaybackIds.delete(objectId);
     }
     this.emit();
-    void fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/scenes/${encodeURIComponent(sceneId)}/sources`), { method: 'DELETE' });
+    this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/scenes/${encodeURIComponent(sceneId)}/sources`), { method: 'DELETE' })), 'room_audio.scene_stop_failed');
   }
   setSceneTransitionGain(sceneId: string, gain: number): void {
     if (this.localMode) { playbackEngine.setSceneTransitionGain(sceneId, gain); return; }
@@ -216,7 +224,7 @@ class RoomAudioEngine {
     this.roomId = null; this.configuredKey = ''; this.remotePlaybackIds.clear();
     this.positionUpdates.clear();
     this.state = 'idle'; this.stateMessage = ''; this.emit();
-    void fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(roomId)}/session`), { method: 'DELETE' });
+    this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(roomId)}/session`), { method: 'DELETE' })), 'room_audio.session_stop_failed');
   }
 
   private async synchronizeAsset(asset: SoundAsset): Promise<void> {
@@ -248,8 +256,27 @@ class RoomAudioEngine {
 
   private async patchRemoteSource(playbackId: string, update: Record<string, unknown>): Promise<void> {
     if (!this.roomId) return;
-    await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/sources/${encodeURIComponent(playbackId)}`), {
+    const response = await fetch(apiUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/sources/${encodeURIComponent(playbackId)}`), {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(update),
+    });
+    if (!response.ok) {
+      const message = await errorMessage(response);
+      this.state = 'error'; this.stateMessage = message; this.emit();
+      void recordDiagnostic({
+        category: 'error', level: 'error', event: 'room_audio.source_update_failed',
+        message: 'Room audio source update failed.',
+        correlationId: typeof update.updateCorrelationId === 'string' ? update.updateCorrelationId : undefined,
+        details: { playbackId, status: response.status, error: message },
+      });
+      throw new Error(message);
+    }
+  }
+
+  private observeMutation(request: Promise<unknown>, event: string): void {
+    void request.catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : 'Room audio operation failed.';
+      this.state = 'error'; this.stateMessage = message; this.emit();
+      void recordDiagnostic({ category: 'error', level: 'error', event, message, details: { error: message } });
     });
   }
 

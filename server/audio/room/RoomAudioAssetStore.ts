@@ -12,7 +12,11 @@ export interface DecodedRoomAudioAsset {
   sampleRate: 48_000;
   channels: 2;
   durationSamples: number;
+  peak: number;
+  rms: number;
 }
+
+export interface RoomAudioDecodeResult { asset: DecodedRoomAudioAsset; cacheHit: boolean; durationMs: number; }
 
 function dataDirectory(): string {
   const root = process.env.SACSCAPE_DATA_DIR?.trim() || 'C:\\SACscapeData';
@@ -53,6 +57,13 @@ export class RoomAudioAssetStore {
     return request;
   }
 
+  async decodeWithTelemetry(assetId: string): Promise<RoomAudioDecodeResult> {
+    const cacheHit = this.decoded.has(assetId);
+    const startedAt = performance.now();
+    const asset = await this.decode(assetId);
+    return { asset, cacheHit, durationMs: Math.round((performance.now() - startedAt) * 100) / 100 };
+  }
+
   private pathFor(assetId: string): string { return path.join(this.root, `${safeAssetId(assetId)}.media`); }
 
   private async decodeFile(assetId: string): Promise<DecodedRoomAudioAsset> {
@@ -76,7 +87,12 @@ export class RoomAudioAssetStore {
     const pcm = Buffer.concat(chunks);
     const aligned = pcm.subarray(0, pcm.length - (pcm.length % 4));
     const samples = new Float32Array(aligned.buffer.slice(aligned.byteOffset, aligned.byteOffset + aligned.byteLength));
-    return { assetId, samples, sampleRate: 48_000, channels: 2, durationSamples: samples.length / 2 };
+    let peak = 0; let sumSquares = 0;
+    for (const sample of samples) { const absolute = Math.abs(sample); peak = Math.max(peak, absolute); sumSquares += sample * sample; }
+    return {
+      assetId, samples, sampleRate: 48_000, channels: 2, durationSamples: samples.length / 2,
+      peak, rms: samples.length ? Math.sqrt(sumSquares / samples.length) : 0,
+    };
   }
 }
 

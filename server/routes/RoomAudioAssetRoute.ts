@@ -11,9 +11,10 @@ export function registerRoomAudioAssetRoute(app: Express, store: RoomAudioAssetS
   });
   app.post('/api/audio/assets/:assetId', upload.single('file'), async (request, response) => {
     if (!request.file) { response.status(400).json({ message: 'Audio file is required.' }); return; }
+    const assetId = Array.isArray(request.params.assetId) ? request.params.assetId[0] : request.params.assetId;
     try {
-      await store.put(request.params.assetId, request.file.buffer);
-      response.status(201).json({ ok: true, assetId: request.params.assetId });
+      await store.put(assetId, request.file.buffer);
+      response.status(201).json({ ok: true, assetId });
     } catch (error) {
       response.status(500).json({ message: error instanceof Error ? error.message : 'Unable to synchronize audio asset.' });
     }

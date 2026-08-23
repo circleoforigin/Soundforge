@@ -73,6 +73,21 @@ export class SonosAudioOutputProvider implements AudioOutputProvider {
       endpoint,
       encoderId: streamId,
       getEncoderPid: () => stream.getSnapshot().encoder.pid,
+      getTelemetry: () => {
+        const snapshot = stream.getSnapshot();
+        const queuedBytes = snapshot.httpClient.writableLength;
+        return {
+          pcmFramesSubmitted: snapshot.encoder.framesGenerated,
+          pcmBytesSubmitted: snapshot.encoder.pcmBytesGenerated,
+          encodedBytesProduced: snapshot.encoder.encodedBytesProduced,
+          httpBytesDelivered: snapshot.httpClient.deliveredBytes,
+          httpWritableLength: queuedBytes,
+          estimatedQueuedAudioMs: Math.round(queuedBytes * 8 / Math.max(1, snapshot.encoder.bitrate) * 1000),
+          estimatedEncodedDeliveryLeadMs: Math.round(Math.max(0,
+            snapshot.encoder.encodedBytesProduced - snapshot.httpClient.deliveredBytes
+          ) * 8 / Math.max(1, snapshot.encoder.bitrate) * 1000),
+        };
+      },
       pushPcm: (frame, logicalTime) => {
         if (prewarming) { clearInterval(prewarm); prewarming = false; }
         return stream.writeExternalPcmFrame(frame, logicalTime);

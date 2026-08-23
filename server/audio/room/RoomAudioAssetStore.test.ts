@@ -28,4 +28,14 @@ test('Room Audio asset store atomically retains original bytes and decodes once 
   assert.equal(first.sampleRate, 48_000);
   assert.equal(first.channels, 2);
   assert.ok(first.durationSamples > 4_700);
+  assert.ok(first.peak > 0);
+  assert.ok(first.rms > 0);
+});
+
+test('Room Audio asset decode telemetry distinguishes miss from cache hit', async (t) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'room-audio-cache-'));
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const store = new RoomAudioAssetStore(root); await store.put('wolf', pcmWav());
+  const first = await store.decodeWithTelemetry('wolf'); const second = await store.decodeWithTelemetry('wolf');
+  assert.equal(first.cacheHit, false); assert.equal(second.cacheHit, true); assert.equal(first.asset, second.asset);
 });

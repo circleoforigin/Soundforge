@@ -26,6 +26,7 @@ class CapturingProvider implements AudioOutputProvider {
 const decodedAsset = {
   assetId: 'wolf', samples: new Float32Array(48_000 * 2).fill(0.75),
   sampleRate: 48_000 as const, channels: 2 as const, durationSamples: 48_000,
+  peak: 0.75, rms: 0.75,
 };
 const assetStore = { async decode() { return decodedAsset; } };
 const diagnostics = { async record() { return null; } };
@@ -83,6 +84,34 @@ test('position update preserves playback, connections, encoders, and advancing p
   assert.ok(after.playheadSamples > before.playheadSamples);
   assert.deepEqual(session.snapshot().endpoints.map((item) => item.connectionId), connectionIds);
   assert.equal(provider.connections.length, 2);
+  await session.stop();
+});
+
+test('position update emits authoritative update and next-frame applied diagnostics', async () => {
+  const registry = new AudioOutputProviderRegistry();
+  const provider = new CapturingProvider('fake'); registry.register(provider);
+  const events: Array<{ event: string; details?: Record<string, unknown> }> = [];
+  const session = new RoomAudioSession({ roomId: 'room', roomName: 'Room', endpoints: [endpoint('a', 'fake')] }, registry, assetStore as never, {
+    async record(entry: { event: string; details?: Record<string, unknown> }) { events.push(entry); return null; },
+  } as never);
+  await session.start();
+  const created = await session.addSource(source({ a: 1 }));
+  session.updateSource(created.playbackId, { position: { x: 0.8, y: 0 }, endpointGains: { a: 0.2 }, updateCorrelationId: 'move-1' } as never);
+  await wait(30);
+  assert.equal(events.filter((entry) => entry.event === 'room_audio.source_position_updated').length, 1);
+  const applied = events.find((entry) => entry.event === 'room_audio.source_gain_applied');
+  assert.ok(applied);
+  assert.deepEqual(applied.details?.endpointGains, { a: 0.2 });
+  await session.stop();
+});
+
+test('endpoint gain lookup uses speakerId when endpointId differs', async () => {
+  const registry = new AudioOutputProviderRegistry(); const provider = new CapturingProvider('fake'); registry.register(provider);
+  const mapped = { ...endpoint('speaker-left', 'fake'), endpointId: 'connection-left' };
+  const session = new RoomAudioSession({ roomId: 'room', roomName: 'Room', endpoints: [mapped] }, registry, assetStore as never, diagnostics as never);
+  await session.start(); await session.addSource(source({ 'speaker-left': 0.5 })); await wait(30);
+  assert.ok(provider.connections[0].frames[0].readInt16LE(0) > 10_000);
+  assert.ok(provider.connections[0].frames[0].readInt16LE(0) < 14_000);
   await session.stop();
 });
 

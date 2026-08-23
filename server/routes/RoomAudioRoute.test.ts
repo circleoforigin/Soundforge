@@ -26,3 +26,17 @@ test('Room Audio route forwards provider-neutral session and source intent', asy
     assert.deepEqual(calls, ['start:room', 'source:room', 'update:playback-1', 'stop-source:playback-1', 'stop:room']);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
+
+test('Room Audio PATCH returns 404 and preserves the manager error message', async () => {
+  const manager = { updateSource() { throw new Error('Room audio source not found.'); } };
+  const app = express(); registerRoomAudioRoute(app, manager as never);
+  const server = app.listen(0, '127.0.0.1'); await new Promise<void>((resolve) => server.once('listening', resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${port}/api/audio/rooms/room/sources/missing`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { message: 'Room audio source not found.' });
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
