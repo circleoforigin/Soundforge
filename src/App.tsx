@@ -23,6 +23,10 @@ import NewRoomDialog, {
 } from './components/NewRoomDialog';
 import RoomManagerDialog from './components/RoomManagerDialog';
 import ResearchLabDialog from './components/ResearchLabDialog';
+import SettingsDialog from './components/SettingsDialog';
+import DiagnosticLogDialog from './components/DiagnosticLogDialog';
+import { DEFAULT_APP_SETTINGS, type AppSettings } from './models/AppSettings';
+import { apiUrl } from './config/api';
 import { speakerMapRepository } from './speakers/SpeakerMapRepository';
 import { projectRepository } from './projects/ProjectRepository';
 
@@ -78,6 +82,10 @@ function App() {
     useState(false);
   const [showResearchLab, setShowResearchLab] =
     useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showDiagnosticLog, setShowDiagnosticLog] = useState(false);
+  const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
+  const [savingSettings, setSavingSettings] = useState(false);
   const [speakerMaps, setSpeakerMaps] = useState<SpeakerMap[]>([]);
   const activeSpeakerMap: SpeakerMap =
     speakerMaps.find((speakerMap) => speakerMap.id === activeRoom?.speakerMapId) ??
@@ -104,6 +112,29 @@ useEffect(() => {
 
   loadSoundLibrary();
 }, []);
+
+useEffect(() => {
+  void fetch(apiUrl('/api/settings'))
+    .then((response) => response.ok ? response.json() as Promise<AppSettings> : Promise.reject())
+    .then(setAppSettings)
+    .catch(() => undefined);
+}, []);
+
+async function handleSettingsChange(settings: AppSettings) {
+  const previous = appSettings;
+  setAppSettings(settings);
+  setSavingSettings(true);
+  try {
+    const response = await fetch(apiUrl('/api/settings'), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings),
+    });
+    if (!response.ok) throw new Error();
+    setAppSettings(await response.json() as AppSettings);
+  } catch {
+    setAppSettings(previous);
+    setNotification('Unable to save application settings.');
+  } finally { setSavingSettings(false); }
+}
 
 useEffect(() => {
   setCustomRooms(
@@ -759,6 +790,7 @@ useEffect(() => {
         onImportSound={handleImportSound}
         onNewRoom={handleNewRoom}
         onManageRooms={handleManageRooms}
+        onOpenSettings={() => setShowSettings(true)}
         onOpenResearchLab={() => setShowResearchLab(true)}
 
         rooms={availableRooms}
@@ -1030,6 +1062,18 @@ useEffect(() => {
       {showResearchLab && (
         <ResearchLabDialog onClose={() => setShowResearchLab(false)} />
       )}
+
+      {showSettings && (
+        <SettingsDialog
+          settings={appSettings}
+          saving={savingSettings}
+          onChange={(settings) => void handleSettingsChange(settings)}
+          onViewLog={() => setShowDiagnosticLog(true)}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      {showDiagnosticLog && <DiagnosticLogDialog onClose={() => setShowDiagnosticLog(false)} />}
 
       {notification && (
         <div className="notification-toast">

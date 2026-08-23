@@ -26,6 +26,7 @@ import type { SoundAsset } from '../models/SoundAsset';
 import type { DeployedSceneObjectInstance } from '../models/DeployedSceneObjectInstance';
 import { useOutsidePointerDown } from '../hooks/useOutsidePointerDown';
 import { getBalancedFieldPositionalMix } from '../utils/balancedFieldRouting';
+import { recordDiagnostic } from '../services/diagnostics/DiagnosticClient';
 
 interface SoundStageProps {
   scene: SceneInstance;
@@ -90,6 +91,14 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
     useState<DeployedSceneObjectInstance[]>([]);
   const [fieldMessage, setFieldMessage] = useState<string | null>(null);
   const fieldMessageTimerRef = useRef<number | null>(null);
+  const playbackDiagnosticsRef = useRef(new Map<string, {
+    correlationId: string;
+    assetId: string;
+    startedAt: number;
+    sourceInstances: number;
+    targetSpeakers: string[];
+  }>());
+  const lastPositionDiagnosticRef = useRef(new Map<string, number>());
 
   useEffect(() => () => {
     if (fieldMessageTimerRef.current !== null) {
@@ -309,6 +318,8 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
     )?.node;
 
     if (deployedNode) {
+      const oldPosition = deployedNode.position;
+      const oldMix = getRoomSpeakerMixForNode(deployedNode);
       playbackEngine.updateSpatialMix(
         instanceId,
         getStereoMixForNode({
@@ -316,6 +327,22 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
           position: clampedPosition,
         })
       );
+      const diagnostic = playbackDiagnosticsRef.current.get(instanceId);
+      const now = performance.now();
+      if (diagnostic && now - (lastPositionDiagnosticRef.current.get(instanceId) ?? 0) >= 500) {
+        lastPositionDiagnosticRef.current.set(instanceId, now);
+        void recordDiagnostic({
+          category: 'spatial', level: 'info', event: 'spatial.gains_updated',
+          message: 'Spatial playback gains updated.', correlationId: diagnostic.correlationId,
+          details: {
+            oldPosition, newPosition: clampedPosition,
+            oldGains: oldMix,
+            newGains: getRoomSpeakerMixForNode({ ...deployedNode, position: clampedPosition }),
+            gainRoutingUpdatedLive: !isSonosRoom,
+            playbackReconstructed: false,
+          },
+        });
+      }
     }
 
     const temporaryDeployment = temporaryDeployments.find(
@@ -567,6 +594,72 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       return;
     }
 
+    const correlationId = `playback-${crypto.randomUUID()}`;
+    const startedAt = performance.now();
+    const roomMix = getRoomSpeakerMixForNode(node);
+    const actualMix = isSonosRoom ? getSonosSpeakerMixForNode(node) : roomMix;
+    const speakerDetails = actualMix.map((mix) => {
+      const geometry = speakerGeometry.find((item) => item.speakerId === mix.speakerId);
+      const mapped = activeSpeakerMap.speakers.find((item) => item.speakerId === mix.speakerId);
+      const roomSpeaker = activeRoom?.speakers.find((item) => item.speakerId === mix.speakerId);
+      const dx = (geometry?.position.x ?? 0) - (node.position?.x ?? 0);
+      const dy = (geometry?.position.y ?? 0) - (node.position?.y ?? 0);
+      return {
+        speakerId: mix.speakerId,
+        deviceId: mapped?.deviceId,
+        speakerName: roomSpeaker?.name ?? mapped?.displayName,
+        directionDegrees: geometry?.angleDegrees,
+        distance: Math.hypot(dx, dy),
+        calculatedGain: mix.gain,
+        enabled: mapped?.enabled,
+        trimDb: mapped?.trim,
+      };
+    });
+    const routeMode = isSonosRoom ? 'sonos' : 'browser';
+    playbackDiagnosticsRef.current.set(node.instanceId, {
+      correlationId, assetId: asset.id, startedAt, sourceInstances: 1, targetSpeakers: [],
+    });
+    void recordDiagnostic({
+      category: 'playback', level: 'info', event: 'spatial.playback_requested',
+      message: 'Spatial playback requested.', correlationId,
+      details: {
+        sceneId: scene.instanceId, sceneName: scene.instanceName,
+        objectInstanceId: node.instanceId, sourceNodeId: getPlaybackRouting(node).sourceNodeId,
+        assetId: asset.id, assetName: asset.name, playbackMode: node.playbackMode,
+        roomId: activeRoom?.id, roomName: activeRoom?.name, position: node.position,
+        requestedAt: new Date().toISOString(),
+      },
+    });
+    void recordDiagnostic({
+      category: 'audio', level: 'info', event: 'spatial.asset_resolved',
+      message: 'Playback asset resolved.', correlationId,
+      details: { assetId: asset.id, assetName: asset.name, sourceType: asset.source.type, durationMs: asset.durationMs, mimeType: asset.mimeType },
+    });
+    void recordDiagnostic({
+      category: 'spatial', level: 'info', event: 'spatial.gains_calculated',
+      message: 'Spatial speaker gains calculated.', correlationId,
+      details: {
+        position: node.position, centerCircle: node.position ? getDistanceFromCenter(node.position) <= centerRadius : false,
+        fullVolumeDirectionalArea: node.position ? getDistanceFromCenter(node.position) <= fullVolumeRadius : false,
+        speakers: speakerDetails,
+      },
+    });
+
+    const completeDiagnostic = () => {
+      const state = playbackDiagnosticsRef.current.get(node.instanceId);
+      if (state?.correlationId === correlationId) playbackDiagnosticsRef.current.delete(node.instanceId);
+      void recordDiagnostic({
+        category: 'playback', level: 'info', event: 'spatial.playback_completed',
+        message: 'Spatial playback completed.', correlationId,
+        details: {
+          assetId: asset.id, assetName: asset.name, expectedDurationMs: asset.durationMs,
+          actualElapsedMs: Math.round(performance.now() - startedAt),
+          targetSpeakers: state?.targetSpeakers ?? [], sourceInstancesCreated: state?.sourceInstances ?? 1,
+        },
+      });
+      onComplete?.();
+    };
+
     if (isSonosRoom) {
       if (node.playbackMode !== 'oneShot') {
         showFieldMessage('Sonos looping/ambience playback not implemented yet.');
@@ -590,7 +683,39 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
           roomSpeakerNames: new Map(
             activeRoom?.speakers.map((speaker) => [speaker.speakerId, speaker.name]) ?? []
           ),
+          correlationId,
         });
+
+        const state = playbackDiagnosticsRef.current.get(node.instanceId);
+        if (state) {
+          state.sourceInstances = results.length;
+          state.targetSpeakers = results.map((result) => result.playerId);
+        }
+        void recordDiagnostic({
+          category: 'spatial', level: 'info', event: 'spatial.routing_resolved',
+          message: 'Spatial playback routing resolved.', correlationId,
+          details: {
+            targetSpeakerCount: results.length,
+            targetSpeakerIds: results.map((result) => result.playerId),
+            transports: results.map((result) => ({ speakerId: result.playerId, transport: 'sonos-audio-clip', volume: result.volume, routingKind: result.routingKind })),
+            sharesSourceTimeline: results.length <= 1,
+            sourceInstancesCreated: results.length,
+          },
+        });
+        for (const result of results) {
+          void recordDiagnostic({
+            category: 'playback', level: result.accepted ? 'info' : 'error', event: 'spatial.speaker_playback_started',
+            message: result.accepted ? 'Speaker playback started.' : 'Spatial playback failed.', correlationId,
+            details: { speakerId: result.speakerId, playerId: result.playerId, speakerName: result.label, gain: result.volume / 100, transport: 'sonos-audio-clip', httpStatus: result.httpStatus, response: result.message },
+          });
+        }
+        if (results.length > 1) {
+          void recordDiagnostic({
+            category: 'playback', level: 'warning', event: 'spatial.additional_source_created',
+            message: 'Additional playback source created for active spatial event.', correlationId,
+            details: { assetId: asset.id, sourceInstancesCreated: results.length, targetSpeakerIds: results.map((result) => result.playerId) },
+          });
+        }
 
         if (results.length > 0) {
           showFieldMessage(
@@ -603,13 +728,35 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
           );
         }
 
+        const failedResults = results.filter((result) => !result.accepted);
+        if (failedResults.length > 0 || results.length === 0) {
+          playbackDiagnosticsRef.current.delete(node.instanceId);
+          void recordDiagnostic({
+            category: 'error', level: 'error', event: 'spatial.playback_failed',
+            message: 'Spatial playback failed.', correlationId,
+            details: {
+              assetId: asset.id,
+              reason: results.length === 0 ? 'No eligible target speakers.' : 'One or more Sonos targets rejected the request.',
+              targets: failedResults,
+            },
+          });
+        }
+
         if (
           onComplete &&
-          (results.length === 0 || results.every((result) => result.accepted))
+          results.length > 0 && results.every((result) => result.accepted)
         ) {
-          window.setTimeout(onComplete, Math.max(250, asset.durationMs ?? 1000));
+          window.setTimeout(completeDiagnostic, Math.max(250, asset.durationMs ?? 1000));
+        } else if (!onComplete && results.length > 0 && results.every((result) => result.accepted)) {
+          window.setTimeout(completeDiagnostic, Math.max(250, asset.durationMs ?? 1000));
         }
       } catch (error) {
+        playbackDiagnosticsRef.current.delete(node.instanceId);
+        void recordDiagnostic({
+          category: 'error', level: 'error', event: 'spatial.playback_failed',
+          message: 'Spatial playback failed.', correlationId,
+          details: { assetId: asset.id, assetName: asset.name, error: error instanceof Error ? error.message : String(error) },
+        });
         showFieldMessage(
           error instanceof Error ? error.message : 'Unable to play this One Shot through Sonos.'
         );
@@ -623,8 +770,18 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       asset,
       getStereoMixForNode(node),
       getPlaybackRouting(node),
-      onComplete
+      completeDiagnostic
     );
+    void recordDiagnostic({
+      category: 'spatial', level: 'info', event: 'spatial.routing_resolved',
+      message: 'Spatial playback routing resolved.', correlationId,
+      details: { targetSpeakerCount: 2, targetSpeakerIds: ['browser-left', 'browser-right'], transports: ['browser-web-audio'], sharesSourceTimeline: true, sourceInstancesCreated: 1 },
+    });
+    void recordDiagnostic({
+      category: 'playback', level: 'info', event: 'spatial.speaker_playback_started',
+      message: 'Speaker playback started.', correlationId,
+      details: { speaker: 'browser stereo output', sourcePlaybackInstanceId: node.instanceId, transport: routeMode, scheduledSourceStart: startedAt, stereoMix: getStereoMixForNode(node) },
+    });
   }
 
   function despawnTemporaryDeployment(instanceId: string) {

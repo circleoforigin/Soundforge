@@ -13,6 +13,7 @@ interface SonosOneShotRequest {
   sceneMasterVolume: number;
   roomSpeakerNames: ReadonlyMap<string, string>;
   balancedFieldRoute?: 'center' | 'directional';
+  correlationId?: string;
 }
 
 export interface SonosOneShotTargetResult {
@@ -22,6 +23,8 @@ export interface SonosOneShotTargetResult {
   accepted: boolean;
   httpStatus?: number;
   message: string;
+  volume: number;
+  routingKind?: 'logical-player center' | 'physical-device directional';
 }
 
 const synchronizedStreamUrls = new Map<string, string>();
@@ -165,6 +168,7 @@ export async function playSonosOneShot({
   sceneMasterVolume,
   roomSpeakerNames,
   balancedFieldRoute,
+  correlationId,
 }: SonosOneShotRequest): Promise<SonosOneShotTargetResult[]> {
   if (node.muted) {
     return [];
@@ -239,6 +243,7 @@ export async function playSonosOneShot({
               assetId: asset.id,
               assetName: asset.name,
               routingKind,
+              correlationId,
             }),
           }
         );
@@ -251,6 +256,8 @@ export async function playSonosOneShot({
             accepted: true,
             httpStatus: response.status,
             message: 'accepted',
+            volume,
+            routingKind,
           };
         }
 
@@ -261,6 +268,8 @@ export async function playSonosOneShot({
           accepted: false,
           httpStatus: response.status,
           message: await getErrorMessage(response, `Sonos ${response.status}`),
+          volume,
+          routingKind,
         };
       } catch (error) {
         return {
@@ -269,6 +278,8 @@ export async function playSonosOneShot({
           label,
           accepted: false,
           message: error instanceof Error ? error.message : 'Request failed',
+          volume,
+          routingKind,
         };
       }
     })

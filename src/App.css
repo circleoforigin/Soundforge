@@ -476,6 +476,23 @@ body,
   gap: 8px;
 }
 
+.settings-dialog section { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.settings-dialog h3 { margin: 0; color: #b9bbc1; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+.settings-checkbox { display: flex; align-items: center; gap: 8px; }
+.diagnostic-log-backdrop { z-index: 1120; }
+.diagnostic-log-dialog { width: min(820px, 92vw); height: min(720px, 86vh); min-height: 0; }
+.diagnostic-log-dialog > header { display: flex; justify-content: space-between; align-items: flex-start; }
+.diagnostic-log-dialog header small { color: #9b9da3; }
+.diagnostic-entry-list { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+.diagnostic-entry { border: 1px solid #45474e; border-radius: 5px; background: #202124; }
+.diagnostic-entry summary { cursor: pointer; display: grid; grid-template-columns: 90px 90px minmax(0, 1fr); gap: 8px; padding: 8px; }
+.diagnostic-entry summary strong { font-size: 11px; color: #aeb0b6; }
+.diagnostic-warning { border-color: #8b6b2f; }
+.diagnostic-error { color: #ff8d8d; }
+.diagnostic-entry-detail { padding: 0 10px 10px; color: #b9bbc1; }
+.diagnostic-entry-detail pre { max-height: 220px; overflow: auto; white-space: pre-wrap; background: #18191c; padding: 8px; }
+.diagnostic-log-actions { margin-top: auto; }
+
 .unsaved-changes-backdrop {
   z-index: 1100;
 }

@@ -57,6 +57,8 @@ import { registerResearchLabDeviceRoute } from './routes/ResearchLabDeviceRoute.
 import { registerResearchLabStreamRoute } from './routes/ResearchLabStreamRoute.ts';
 import { registerResearchLabMultiSpeakerRoute } from './routes/ResearchLabMultiSpeakerRoute.ts';
 import { initializeSonosTokenStore } from './sonos/SonosTokenStore.ts';
+import { registerAppSettingsRoute } from './routes/AppSettingsRoute.ts';
+import { registerDiagnosticLogRoute } from './routes/DiagnosticLogRoute.ts';
 
 const app = express();
 
@@ -174,6 +176,8 @@ registerSonosEventRoute(app);
 registerResearchLabDeviceRoute(app);
 registerResearchLabStreamRoute(app);
 registerResearchLabMultiSpeakerRoute(app);
+registerAppSettingsRoute(app);
+registerDiagnosticLogRoute(app);
 
 const server = app.listen(nativeStartupSmokeTest ? 0 : PORT, () => {
   if (nativeStartupSmokeTest) {

@@ -15,6 +15,7 @@ interface MenuBarProps {
   onImportSound: () => void;
   onNewRoom: () => void;
   onManageRooms: () => void;
+  onOpenSettings: () => void;
   onOpenResearchLab: () => void;
 
   rooms: Room[];
@@ -34,6 +35,7 @@ function MenuBar({
   onImportSound,
   onNewRoom,
   onManageRooms,
+  onOpenSettings,
   onOpenResearchLab,
   rooms,
   activeRoomId,
@@ -367,6 +369,10 @@ function MenuBar({
 
         {settingsMenuOpen && (
           <div className="dropdown-menu">
+            <button className="dropdown-item" onClick={() => { closeAllMenus(); onOpenSettings(); }}>
+              Settings...
+            </button>
+            <div className="dropdown-separator" />
             <button
               className="dropdown-item"
               onClick={() => {
