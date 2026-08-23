@@ -1,4 +1,5 @@
 import type { SpeakerMap } from '../models/SpeakerMap';
+import { normalizeSpeakerMap } from './SpeakerMapNormalization';
 
 import {
   localStorageService,
@@ -6,15 +7,6 @@ import {
 
 const SPEAKER_MAPS_KEY =
   'speakerMaps';
-
-function normalizeSpeakerMap(map: SpeakerMap): SpeakerMap {
-  return {
-    ...map,
-    spatialOutputMode:
-      map.spatialOutputMode ??
-      (map.adapterType === 'sonos' ? 'balanced' : 'fullSpatial'),
-  };
-}
 
 export class SpeakerMapRepository {
   loadSpeakerMaps(): SpeakerMap[] {

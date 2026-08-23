@@ -1051,6 +1051,10 @@ body,
   border-radius: 3px;
 }
 
+.room-audio-status { position: absolute; top: 8px; right: 10px; z-index: var(--z-node-overlay); font-size: 11px; color: #aeb0b6; }
+.room-audio-error { color: #ff8d8d; }
+.room-audio-degraded { color: #e5bf75; }
+
 .soundstage-field {
   position: relative;
   

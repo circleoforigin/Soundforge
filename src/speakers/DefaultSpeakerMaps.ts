@@ -15,6 +15,7 @@ export const headphonesSpeakerMap: SpeakerMap = {
   speakers: [
     {
       speakerId: 'headphones-left',
+      providerId: 'browser-stereo',
       deviceId: 'channel-0',
       displayName: 'Left',
       enabled: true,
@@ -22,6 +23,7 @@ export const headphonesSpeakerMap: SpeakerMap = {
     },
     {
       speakerId: 'headphones-right',
+      providerId: 'browser-stereo',
       deviceId: 'channel-1',
       displayName: 'Right',
       enabled: true,

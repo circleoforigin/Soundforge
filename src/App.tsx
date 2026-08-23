@@ -34,7 +34,7 @@ import ImportSoundDialog, {
   type ImportSoundData,
 } from './components/ImportSoundDialog';
 import { localSoundLibrary } from './services/library/browser/LocalSoundLibraryService';
-import { playbackEngine } from './audio/PlaybackEngine';
+import { roomAudioEngine } from './audio/RoomAudioEngine';
 
 function App() {
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
@@ -240,9 +240,10 @@ useEffect(() => {
   }
 
   function teardownProjectRuntime(project: Project) {
+    roomAudioEngine.shutdown();
     for (const scene of project.scenes) {
-      playbackEngine.stopScene(scene.instanceId);
-      playbackEngine.setSceneTransitionGain(scene.instanceId, 1);
+      roomAudioEngine.stopScene(scene.instanceId);
+      roomAudioEngine.setSceneTransitionGain(scene.instanceId, 1);
     }
 
     transitionRunIdRef.current += 1;
@@ -616,15 +617,15 @@ useEffect(() => {
 
     try {
       if (transitionMode === 'immediate') {
-        playbackEngine.stopScene(outgoingScene.instanceId);
-        playbackEngine.setSceneTransitionGain(incomingScene.instanceId, 1);
+        roomAudioEngine.stopScene(outgoingScene.instanceId);
+        roomAudioEngine.setSceneTransitionGain(incomingScene.instanceId, 1);
         activateIncomingScene();
         clearTransitionSelection();
         return;
       }
 
       if (transitionMode === 'sequential') {
-        await playbackEngine.fadeOutAndStopScene(
+        await roomAudioEngine.fadeOutAndStopScene(
           outgoingScene.instanceId,
           outgoingScene.fadeOutMs
         );
@@ -633,10 +634,10 @@ useEffect(() => {
           return;
         }
 
-        playbackEngine.setSceneTransitionGain(incomingScene.instanceId, 0);
+        roomAudioEngine.setSceneTransitionGain(incomingScene.instanceId, 0);
         activateIncomingScene();
 
-        const incomingFade = playbackEngine.fadeSceneTransitionGain(
+        const incomingFade = roomAudioEngine.fadeSceneTransitionGain(
           incomingScene.instanceId,
           1,
           incomingScene.fadeInMs
@@ -647,15 +648,15 @@ useEffect(() => {
         return;
       }
 
-      playbackEngine.setSceneTransitionGain(incomingScene.instanceId, 0);
+      roomAudioEngine.setSceneTransitionGain(incomingScene.instanceId, 0);
       activateIncomingScene();
 
       const transitionFades = [
-        playbackEngine.fadeOutAndStopScene(
+        roomAudioEngine.fadeOutAndStopScene(
           outgoingScene.instanceId,
           outgoingScene.fadeOutMs
         ),
-        playbackEngine.fadeSceneTransitionGain(
+        roomAudioEngine.fadeSceneTransitionGain(
           incomingScene.instanceId,
           1,
           incomingScene.fadeInMs

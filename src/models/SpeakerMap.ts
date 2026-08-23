@@ -11,6 +11,8 @@ export interface SpeakerMap extends PersistentEntity {
 
 export interface MappedSpeaker {
   speakerId: string;
+  /** Provider identity for this endpoint. Falls back to SpeakerMap.adapterType for old saves. */
+  providerId?: string;
   deviceId: string;
   displayName: string;
 

@@ -371,6 +371,15 @@ export async function resolveSonosAudioDevice(
   return snapshot.resolvedByDeviceId.get(genericDeviceId);
 }
 
+export async function resolveSonosPhysicalDevice(
+  physicalDeviceId: string
+): Promise<ResolvedSonosAudioDevice | undefined> {
+  const snapshot = await sonosTopologyService.getSnapshot();
+  return [...snapshot.resolvedByDeviceId.values()].find(
+    (resolved) => resolved.physicalDeviceId === physicalDeviceId
+  );
+}
+
 export async function identifySonosAudioDevice(
   genericDeviceId: string,
   client?: SonosIdentificationClient

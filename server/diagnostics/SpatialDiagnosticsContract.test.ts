@@ -9,12 +9,12 @@ test('normal SoundStage playback emits the correlated spatial diagnostic lifecyc
     'spatial.asset_resolved',
     'spatial.gains_calculated',
     'spatial.routing_resolved',
-    'spatial.speaker_playback_started',
     'spatial.gains_updated',
     'spatial.playback_completed',
     'spatial.playback_failed',
-    'spatial.additional_source_created',
   ]) assert.match(source, new RegExp(event.replace('.', '\\.')));
   assert.match(source, /`playback-\$\{crypto\.randomUUID\(\)\}`/);
   assert.match(source, /now - .* >= 500/s);
+  assert.doesNotMatch(source, /SonosOneShotOutput|playSonosOneShot|adapterType === 'sonos'/);
+  assert.match(source, /roomAudioEngine\.play/);
 });

@@ -245,6 +245,8 @@ export interface ContinuousAudioStreamOptions {
   encodingProfileId?: ContinuousAudioEncodingProfileId;
   clientReconnectGraceMs?: number;
   minimumConnectionsForTone?: number;
+  /** PCM frames are supplied by an external authoritative clock instead of the Research Lab generator. */
+  externalPcmSource?: boolean;
   onEvent?: (event: AudioStreamDiagnosticEvent) => void;
   onClientDisconnected?: (reason: string) => void;
   onEncoderExit?: (details: { code: number | null; signal: NodeJS.Signals | null }) => void;
@@ -421,11 +423,28 @@ export class ContinuousAudioStream {
     encoder.on('error', (error) => this.recordError('encoder-start-error', error));
     encoder.on('exit', (code, signal) => this.handleEncoderExit(encoder, code, signal));
 
-    this.startFrameTimer(encoder);
+    if (!this.options.externalPcmSource) {
+      this.startFrameTimer(encoder);
+    }
     this.startTelemetryTimer();
-    this.record('lifecycle', 'pcm-clock-started', 'PCM generation clock started.', {
+    this.record('lifecycle', this.options.externalPcmSource ? 'external-pcm-ready' : 'pcm-clock-started',
+      this.options.externalPcmSource ? 'Encoder is ready for externally clocked PCM frames.' : 'PCM generation clock started.', {
       frameDurationMs: this.format.frameDurationMs,
     });
+  }
+
+  writeExternalPcmFrame(frame: Buffer, logicalFrameStartMonotonicTime: number): boolean {
+    if (!this.options.externalPcmSource) {
+      throw new Error('This continuous stream does not accept external PCM frames.');
+    }
+    const expectedBytes = this.format.sampleRate * this.format.frameDurationMs / 1000
+      * this.format.channelCount * 2;
+    if (frame.length !== expectedBytes) {
+      throw new Error(`Expected ${expectedBytes} PCM bytes, received ${frame.length}.`);
+    }
+    const encoder = this.encoder;
+    if (!encoder || this.pcmPausedForReady || this.stdinBackpressured) return false;
+    return this.writePcmBuffer(encoder, frame, logicalFrameStartMonotonicTime);
   }
 
   async waitUntilReadyForClient(timeoutMilliseconds = 15_000): Promise<void> {
@@ -1071,8 +1090,6 @@ export class ContinuousAudioStream {
       frame.writeInt16LE(sample, offset + 2);
     }
 
-    this.pcmFramesGenerated += 1;
-    this.pcmBytesGenerated += frame.length;
     const scheduledCompleted = this.activeScheduledEvent
       ? logicalFrameStartMonotonicTime + samplesPerFrame * 1_000 / this.format.sampleRate
         >= this.activeScheduledEvent.targetMonotonicTime + this.activeScheduledEvent.durationMs
@@ -1096,6 +1113,17 @@ export class ContinuousAudioStream {
         this.activeScheduledEvent = null;
       }
     }
+    this.writePcmBuffer(encoder, frame, logicalFrameStartMonotonicTime);
+  }
+
+  private writePcmBuffer(
+    encoder: ChildProcessWithoutNullStreams,
+    frame: Buffer,
+    logicalFrameStartMonotonicTime: number
+  ): boolean {
+    if (encoder !== this.encoder || !encoder.stdin.writable) return false;
+    this.pcmFramesGenerated += 1;
+    this.pcmBytesGenerated += frame.length;
     const accepted = encoder.stdin.write(frame);
     if (!accepted && !this.stdinBackpressured) {
       this.stdinBackpressured = true;
@@ -1114,11 +1142,17 @@ export class ContinuousAudioStream {
         this.record('backpressure', 'stdin-drain', 'FFmpeg input drained.', {
           writableLength: encoder.stdin.writableLength,
         });
-        if (!this.pcmPausedForReady) {
+        if (!this.pcmPausedForReady && !this.options.externalPcmSource) {
           this.startFrameTimer(encoder);
         }
       });
     }
+    if (!accepted) {
+      this.record('backpressure', 'external-frame-backpressured', 'PCM frame reached an encoder with backpressure.', {
+        logicalFrameStartMonotonicTime,
+      });
+    }
+    return accepted;
   }
 
   private startFrameTimer(encoder: ChildProcessWithoutNullStreams): void {
@@ -1183,7 +1217,7 @@ export class ContinuousAudioStream {
         encoderPid: this.encoder?.pid ?? null,
       }
     );
-    if (this.encoder && !this.stdinBackpressured) {
+    if (this.encoder && !this.stdinBackpressured && !this.options.externalPcmSource) {
       this.startFrameTimer(this.encoder);
     }
   }
@@ -1196,7 +1230,7 @@ export class ContinuousAudioStream {
       connectionOrdinal: this.currentConnection?.ordinal ?? null,
       encoderPid: this.encoder?.pid ?? null,
     });
-    if (this.encoder && !this.stdinBackpressured) this.startFrameTimer(this.encoder);
+    if (this.encoder && !this.stdinBackpressured && !this.options.externalPcmSource) this.startFrameTimer(this.encoder);
   }
 
   private scheduleDeliveryDiagnostic(windowMilliseconds: 100 | 1_000): void {

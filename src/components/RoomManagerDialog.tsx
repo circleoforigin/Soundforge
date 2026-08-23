@@ -647,6 +647,7 @@ function RoomManagerDialog({
         speaker.speakerId === speakerId
           ? {
               ...speaker,
+              providerId: 'sonos',
               deviceId,
               displayName: device ? getSonosDeviceLabel(device) : '',
             }
