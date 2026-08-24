@@ -12,7 +12,11 @@ test('local AVTransport sends escaped SetAVTransportURI followed by Play', async
   const server = http.createServer((request, response) => {
     let body = '';
     request.setEncoding('utf8'); request.on('data', (chunk) => { body += chunk; });
-    request.on('end', () => { requests.push({ action: request.headers.soapaction, body }); response.end('<ok/>'); });
+    request.on('end', () => {
+      const soapAction = request.headers.soapaction;
+      requests.push({ action: Array.isArray(soapAction) ? soapAction[0] : soapAction, body });
+      response.end('<ok/>');
+    });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
@@ -33,6 +37,27 @@ test('local AVTransport sends escaped SetAVTransportURI followed by Play', async
     assert.deepEqual(diagnostics.map((entry) => entry.action), ['SetAVTransportURI', 'Play']);
     assert.ok(diagnostics.every((entry) => !entry.timedOut && entry.httpStatus === 200));
     assert.ok(diagnostics.every((entry) => entry.requestStartedAt && entry.responseReceivedAt));
+  } finally { server.close(); }
+});
+
+test('local AVTransport can make one targeted player a standalone coordinator', async () => {
+  let action = '';
+  let body = '';
+  const server = http.createServer((request, response) => {
+    action = String(request.headers.soapaction ?? '');
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => response.end('<ok/>'));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    await new SonosLocalAvTransportClient().becomeCoordinatorOfStandaloneGroup(
+      `http://127.0.0.1:${address.port}/control`
+    );
+    assert.match(action, /#BecomeCoordinatorOfStandaloneGroup/);
+    assert.match(body, /<InstanceID>0<\/InstanceID>/);
   } finally { server.close(); }
 });
 

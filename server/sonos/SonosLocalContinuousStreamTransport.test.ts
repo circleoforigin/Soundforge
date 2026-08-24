@@ -171,6 +171,40 @@ test('latency broadcast profiles change the actual URI, MIME, and AVTransport me
   }
 });
 
+test('production physical-device preparation makes only its target standalone before URI assignment', async () => {
+  const actions: string[] = [];
+  const transport = new SonosLocalContinuousStreamTransport(
+    async () => undefined,
+    async (id) => ({
+      physicalDeviceId: id, address: '127.0.0.1', descriptionUrl: 'http://127.0.0.1/device.xml',
+      avTransportControlUrl: `http://127.0.0.1:1400/${id}/av`,
+    }),
+    {
+      async becomeCoordinatorOfStandaloneGroup(url) { actions.push(`standalone:${url}`); },
+      async setStreamUri(url) { actions.push(`set:${url}`); },
+      async play(url) { actions.push(`play:${url}`); },
+      async stop() {},
+    }
+  );
+  const resolved = fixture();
+  const context = {
+    device: resolved.device, transport: resolved.device.transports[0], streamId: 'production-room-endpoint', streamUrl: '',
+    latencyProfile: getSonosLatencyExperimentProfile('aac-radio'),
+    bindHttpClient: () => undefined, updateTransport: () => undefined,
+    addDiagnostic: () => undefined, terminate: () => undefined,
+  };
+  const binding = await transport.startPhysicalDevice(
+    context, 'RINCON_TARGET', 'Target', { ensureStandalone: true }
+  );
+  assert.deepEqual(actions.slice(0, 3), [
+    'standalone:http://127.0.0.1:1400/RINCON_TARGET/av',
+    'set:http://127.0.0.1:1400/RINCON_TARGET/av',
+    'play:http://127.0.0.1:1400/RINCON_TARGET/av',
+  ]);
+  assert(actions.every((entry) => !entry.includes('RINCON_UNRELATED')));
+  await transport.stop(binding);
+});
+
 test('fast WAV URI assignment waits for the configured settle delay exactly once', async () => {
   const resolved = fixture();
   const calls: string[] = [];

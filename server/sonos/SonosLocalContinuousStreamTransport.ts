@@ -50,6 +50,15 @@ interface LocalBindingData {
   server: SonosLocalHttpStreamServer;
 }
 
+interface PhysicalDeviceStartOptions {
+  ensureStandalone?: boolean;
+}
+
+type LocalAvTransport = Pick<
+  SonosLocalAvTransportClient,
+  'setStreamUri' | 'play' | 'stop'
+> & Partial<Pick<SonosLocalAvTransportClient, 'becomeCoordinatorOfStandaloneGroup'>>;
+
 async function routeAddress(targetAddress: string): Promise<string> {
   const socket = dgram.createSocket('udp4');
   try {
@@ -73,13 +82,13 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
 
   private readonly resolveDevice: (id: string) => Promise<ResolvedSonosAudioDevice | undefined>;
   private readonly discoverLocal: (id: string) => Promise<SonosLocalDevice | undefined>;
-  private readonly avTransport: SonosLocalAvTransportClient;
+  private readonly avTransport: LocalAvTransport;
   private readonly contexts = new Map<string, ContinuousStreamTransportContext>();
 
   constructor(
     resolveDevice = resolveSonosAudioDevice,
     discoverLocal = discoverLocalSonosDevice,
-    avTransport = new SonosLocalAvTransportClient()
+    avTransport: LocalAvTransport = new SonosLocalAvTransportClient()
   ) {
     this.resolveDevice = resolveDevice;
     this.discoverLocal = discoverLocal;
@@ -106,7 +115,8 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
   async startPhysicalDevice(
     context: ContinuousStreamTransportContext,
     physicalDeviceId: string,
-    targetDescription: string
+    targetDescription: string,
+    options: PhysicalDeviceStartOptions = {}
   ): Promise<ContinuousStreamTransportBinding> {
     this.contexts.set(context.streamId, context);
     if (context.latencyProfile?.id === 'wav-broadcast') {
@@ -153,6 +163,20 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
           streamId: context.streamId,
           ...diagnostic,
         }, 'sonos_local_avtransport_request');
+      if (options.ensureStandalone) {
+        if (!this.avTransport.becomeCoordinatorOfStandaloneGroup) {
+          throw new Error('Sonos standalone-group preparation is unavailable.');
+        }
+        await this.avTransport.becomeCoordinatorOfStandaloneGroup(
+          local.avTransportControlUrl,
+          { onDiagnostic: recordAvDiagnostic }
+        );
+        context.addDiagnostic(
+          'Targeted Room Sonos player was prepared as a standalone coordinator.',
+          { streamId: context.streamId, physicalDeviceIdSuffix: physicalDeviceId.slice(-10) },
+          'sonos_local_standalone_ready'
+        );
+      }
       let setUriElapsedMs = 0;
       let playElapsedMs: number | null = null;
       let playTimedOut = false;

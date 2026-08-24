@@ -22,6 +22,10 @@ interface MenuBarProps {
   rooms: Room[];
   activeRoomId: string | null;
   onSelectRoom: (roomId: string | null) => void;
+  roomSpeakerVolume: number | null;
+  roomSpeakerVolumeEnabled: boolean;
+  roomSpeakerVolumeMessage: string;
+  onRoomSpeakerVolumeChange: (volume: number) => void;
 
   projectName?: string;
   roomName?: string;
@@ -42,6 +46,10 @@ function MenuBar({
   rooms,
   activeRoomId,
   onSelectRoom,
+  roomSpeakerVolume,
+  roomSpeakerVolumeEnabled,
+  roomSpeakerVolumeMessage,
+  onRoomSpeakerVolumeChange,
 
   projectName,
   roomName,
@@ -355,6 +363,32 @@ function MenuBar({
             >
               Manage Rooms...
             </button>
+
+            <div className="dropdown-separator" />
+
+            <label
+              className="dropdown-room-volume-control"
+              title={roomSpeakerVolumeMessage || undefined}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <span>Speaker Volume</span>
+              <div className="dropdown-room-volume-input">
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={roomSpeakerVolume ?? 0}
+                  disabled={!roomSpeakerVolumeEnabled}
+                  onChange={(event) => onRoomSpeakerVolumeChange(Number(event.target.value))}
+                />
+                <output>{roomSpeakerVolume ?? '—'}</output>
+              </div>
+              {roomSpeakerVolumeMessage && (
+                <span className="dropdown-room-volume-message">{roomSpeakerVolumeMessage}</span>
+              )}
+            </label>
           </div>
         )}
       </div>

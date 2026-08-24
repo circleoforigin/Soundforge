@@ -10,7 +10,7 @@ import type {
   ContinuousStreamTransportBinding,
   ContinuousStreamTransportContext,
 } from '../transports/ContinuousStreamTransport.ts';
-import { SonosAudioOutputProvider, isSonosWavEndpointStable } from './SonosAudioOutputProvider.ts';
+import { SonosAudioOutputProvider, isSonosRadioEndpointReady } from './SonosAudioOutputProvider.ts';
 
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -36,16 +36,19 @@ class FakeSonosTransport {
   context?: ContinuousStreamTransportContext;
   startCount = 0;
   stopCount = 0;
+  ensuredStandalone = false;
 
   async startPhysicalDevice(
     context: ContinuousStreamTransportContext,
     physicalDeviceId: string,
-    targetDescription: string
+    targetDescription: string,
+    options: { ensureStandalone?: boolean } = {}
   ): Promise<ContinuousStreamTransportBinding> {
     void physicalDeviceId;
     void targetDescription;
     this.context = context;
     this.startCount += 1;
+    this.ensuredStandalone = options.ensureStandalone === true;
     return {
       transportId: this.id,
       targetScope: 'physical-device',
@@ -64,7 +67,7 @@ class FakeSonosTransport {
     if (event.code === 'first-live-bytes') {
       this.context?.updateTransport(
         { state: 'active', providerPlaybackState: 'STREAMING' },
-        'Fake Sonos consumer is receiving WAV data.'
+        'Fake Sonos consumer is receiving AAC data.'
       );
     }
   }
@@ -87,7 +90,7 @@ const endpoint: RoomAudioEndpoint = {
   timingOffsetMs: 0,
 };
 
-test('Room Audio Sonos WAV endpoint waits for the stable reconnect consumer', async () => {
+test('Room Audio Sonos endpoint uses the proven AAC/Radio stream and first usable active delivery', async () => {
   const manager = new CapturingManager();
   const transport = new FakeSonosTransport();
   const diagnosticEvents: string[] = [];
@@ -105,10 +108,11 @@ test('Room Audio Sonos WAV endpoint waits for the stable reconnect consumer', as
   });
 
   await waitFor(() => Boolean(transport.context));
-  assert.equal(manager.createdOptions?.encodingProfileId, 'wav-pcm');
+  assert.equal(manager.createdOptions?.encodingProfileId, 'aac-adts');
   assert.equal(manager.createdOptions?.externalPcmSource, true);
-  assert.equal(transport.context?.latencyProfile?.id, 'wav-broadcast');
+  assert.equal(transport.context?.latencyProfile?.id, 'aac-radio');
   assert.equal(transport.startCount, 1);
+  assert.equal(transport.ensuredStandalone, true);
 
   const streamId = transport.context!.streamId;
   const stream = manager.getActive(streamId);
@@ -122,41 +126,30 @@ test('Room Audio Sonos WAV endpoint waits for the stable reconnect consumer', as
   assert.equal(initialSnapshot.httpClient.connectionCount, 1);
   assert.equal(initialSnapshot.httpClient.connected, true);
   assert.equal(initialSnapshot.transport?.state, 'active');
-  assert.equal(isSonosWavEndpointStable(initialSnapshot), false);
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal(resolved, false, 'initial WAV delivery must not resolve openEndpoint');
-
-  firstConsumer.destroy();
-  await waitFor(() => stream.getSnapshot().httpClient.awaitingReconnect);
-  assert.equal(resolved, false, 'startup reconnect window must remain pending');
-
-  const stableConsumer = new PassThrough();
-  stableConsumer.resume();
-  transport.context!.bindHttpClient(stableConsumer, { role: 'startup-reconnect' });
   const connection = await opening;
   const stableSnapshot = stream.getSnapshot();
-  assert.equal(isSonosWavEndpointStable(stableSnapshot), true);
-  assert.equal(stableSnapshot.httpClient.currentConnectionOrdinal, 2);
+  assert.equal(resolved, true);
+  assert.equal(isSonosRadioEndpointReady(stableSnapshot), true);
+  assert.equal(stableSnapshot.httpClient.currentConnectionOrdinal, 1);
   assert.equal(stableSnapshot.encoder.pid, encoderPid);
   assert.equal(connection.encoderId, streamId);
   assert.equal(transport.startCount, 1);
   assert.deepEqual(diagnosticEvents, [
-    'room_audio.sonos_wav_connecting',
-    'room_audio.sonos_wav_stabilizing',
-    'room_audio.sonos_wav_ready',
+    'room_audio.sonos_radio_connecting',
+    'room_audio.sonos_radio_ready',
   ]);
 
   const beforePush = stream.getSnapshot().encoder.pcmBytesGenerated;
   assert.equal(connection.pushPcm(Buffer.alloc(48_000 * 20 / 1_000 * 2 * 2), performance.now()), true);
   assert.ok(stream.getSnapshot().encoder.pcmBytesGenerated > beforePush);
   assert.equal(stream.getSnapshot().encoder.pid, encoderPid);
-  assert.equal(stream.getSnapshot().httpClient.currentConnectionOrdinal, 2);
+  assert.equal(stream.getSnapshot().httpClient.currentConnectionOrdinal, 1);
   assert.equal(transport.startCount, 1);
   assert.equal(failures.length, 0);
 
-  stableConsumer.destroy();
+  firstConsumer.destroy();
   await waitFor(() => failures.length === 1);
-  assert.match(failures[0].message, /remote client disconnected/i);
+  assert.match(failures[0].message, /remote client disconnected|startup reconnect timed out/i);
   await connection.close();
   assert.equal(transport.stopCount, 1);
 });

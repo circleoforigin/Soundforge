@@ -44,6 +44,14 @@ export interface RoomAudioSessionSnapshot {
   endpoints: RoomAudioEndpointSnapshot[];
 }
 
+export interface RoomSpeakerVolumeResult {
+  volume: number;
+  targetedSpeakerCount: number;
+  updatedSpeakerCount: number;
+  failures: Array<{ endpointId: string; displayName: string; operation: 'discover' | 'get' | 'set'; message: string }>;
+  message?: string;
+}
+
 export interface RoomAudioSourceRequest {
   correlationId: string;
   sceneInstanceId: string;

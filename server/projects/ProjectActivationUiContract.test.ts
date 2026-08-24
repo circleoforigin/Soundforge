@@ -2,44 +2,45 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
-const appSource = fs.readFileSync('src/App.tsx', 'utf8');
-const dialogSource = fs.readFileSync('src/components/RoomSelectorDialog.tsx', 'utf8');
+const source = fs.readFileSync('src/App.tsx', 'utf8');
 
 test('Project load always opens Room selection without restoring or configuring a Room', () => {
-  const loadProject = appSource.slice(
-    appSource.indexOf('function loadProject('),
-    appSource.indexOf('function handleLoadProject(')
+  const loadProject = source.slice(
+    source.indexOf('function loadProject('),
+    source.indexOf('function handleLoadProject(')
   );
   assert.match(loadProject, /setActiveProject\(project\)/);
   assert.match(loadProject, /setCurrentSceneInstanceId\(null\)/);
   assert.match(loadProject, /setActiveRoom\(null\)/);
   assert.match(loadProject, /setShowRoomSelectionDialog\(true\)/);
-  assert.doesNotMatch(loadProject, /beginRoomActivation|roomAudioEngine\.configure|restoredRoom/);
+  assert.match(loadProject, /setShowSceneSelectionDialog\(false\)/);
+  assert.doesNotMatch(loadProject, /roomAudioEngine\.configure|activeRoomId/);
 });
 
-test('Room selection configures immediately and keeps the selector open', () => {
-  const selectRoom = appSource.slice(
-    appSource.indexOf('function handleSelectRoom('),
-    appSource.indexOf('function beginRoomActivation(')
+test('Room selection configures in background and opens Scene selection immediately', () => {
+  const selectRoom = source.slice(
+    source.indexOf('function handleSelectRoom('),
+    source.indexOf('function handleActivateScene(')
   );
   assert.match(selectRoom, /handleActiveRoomChange\(room\)/);
   assert.match(selectRoom, /setCurrentSceneInstanceId\(null\)/);
-  assert.match(selectRoom, /setShowRoomSelectionDialog\(true\)/);
-  assert.match(selectRoom, /beginRoomActivation\(room, selectedSpeakerMap\)/);
+  assert.match(selectRoom, /setShowRoomSelectionDialog\(false\)/);
+  assert.match(selectRoom, /setShowSceneSelectionDialog\(activeProject\.scenes\.length > 0\)/);
+  assert.match(selectRoom, /setShowNewSceneDialog\(activeProject\.scenes\.length === 0\)/);
+  assert.match(selectRoom, /roomAudioEngine\.configure\(room, selectedSpeakerMap\)/);
+  assert.doesNotMatch(selectRoom, /roomAudioStatus\.state/);
 });
 
-test('Continue is gated by selected Room and authoritative ready state', () => {
-  assert.match(dialogSource, /selectedRoomId !== null && state === 'ready'/);
-  assert.match(dialogSource, /disabled=\{!canContinue\}/);
-  assert.match(appSource, /if \(!activeRoom \|\| roomAudioStatus\.state !== 'ready'\) return;/);
-});
-
-test('Continue closes only the Room selector and does not activate a Scene', () => {
-  const continueHandler = appSource.slice(
-    appSource.indexOf('function handleContinueAfterRoomConnection('),
-    appSource.indexOf('return (', appSource.indexOf('function handleContinueAfterRoomConnection('))
+test('Scene selection does not reconfigure Room Audio', () => {
+  const handler = source.slice(
+    source.indexOf('function handleActivateScene('),
+    source.indexOf('return (', source.indexOf('function handleActivateScene('))
   );
-  assert.match(continueHandler, /setShowRoomSelectionDialog\(false\)/);
-  assert.doesNotMatch(continueHandler, /setCurrentSceneInstanceId|setShowNewSceneDialog|configure/);
-  assert.doesNotMatch(appSource, /shouldShowSceneSelection/);
+  assert.match(handler, /setCurrentSceneInstanceId\(instanceId\)/);
+  assert.match(handler, /setShowSceneSelectionDialog\(false\)/);
+  assert.doesNotMatch(handler, /roomAudioEngine\.configure/);
+});
+
+test('Production Project activation does not reference Sonos2', () => {
+  assert.doesNotMatch(source, /Sonos2|sonos2/);
 });

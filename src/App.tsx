@@ -54,6 +54,7 @@ function App() {
   const [currentSceneInstanceId, setCurrentSceneInstanceId] =
     useState<string | null>(null);
   const [showRoomSelectionDialog, setShowRoomSelectionDialog] = useState(false);
+  const [showSceneSelectionDialog, setShowSceneSelectionDialog] = useState(false);
   const [importingSound, setImportingSound] = useState(false);
   const [libraryFolderConfigured, setLibraryFolderConfigured] =
     useState(false);
@@ -97,6 +98,7 @@ function App() {
     headphonesSpeakerMap;
   useSyncExternalStore(roomAudioEngine.subscribe, roomAudioEngine.getVersion);
   const roomAudioStatus = roomAudioEngine.getStatus();
+  const roomSpeakerVolumeStatus = roomAudioEngine.getRoomSpeakerVolumeStatus();
   
 useEffect(() => {
   async function loadSoundLibrary() {
@@ -248,6 +250,7 @@ async function handleSettingsChange(settings: AppSettings) {
     setDirtySceneIds(new Set());
     setShowNewSceneDialog(false);
     setShowRoomSelectionDialog(false);
+    setShowSceneSelectionDialog(false);
     setProjectRuntimeKey((current) => current + 1);
   }
 
@@ -292,6 +295,7 @@ async function handleSettingsChange(settings: AppSettings) {
     setDirtySceneIds(new Set());
     setShowProjectPicker(false);
     setShowRoomSelectionDialog(true);
+    setShowSceneSelectionDialog(false);
   }
 
   function handleLoadProject(
@@ -746,6 +750,7 @@ async function handleSettingsChange(settings: AppSettings) {
       if (activeProject) {
         setCurrentSceneInstanceId(null);
         setShowRoomSelectionDialog(true);
+        setShowSceneSelectionDialog(false);
       }
       return;
     }
@@ -766,30 +771,26 @@ async function handleSettingsChange(settings: AppSettings) {
     handleActiveRoomChange(room);
     if (activeProject) {
       setCurrentSceneInstanceId(null);
-      setShowRoomSelectionDialog(true);
+      setShowRoomSelectionDialog(false);
+      setShowSceneSelectionDialog(activeProject.scenes.length > 0);
+      setShowNewSceneDialog(activeProject.scenes.length === 0);
       setTransitionTargetInstanceId(null);
       setPreviewingTarget(false);
-      const selectedSpeakerMap =
-        speakerMaps.find((speakerMap) => speakerMap.id === room.speakerMapId) ??
-        speakerMapRepository.loadSpeakerMaps().find(
-          (speakerMap) => speakerMap.id === room.speakerMapId
-        ) ?? headphonesSpeakerMap;
-      beginRoomActivation(room, selectedSpeakerMap);
+      const selectedSpeakerMap = speakerMaps.find(
+        (speakerMap) => speakerMap.id === room.speakerMapId
+      ) ?? speakerMapRepository.loadSpeakerMaps().find(
+        (speakerMap) => speakerMap.id === room.speakerMapId
+      ) ?? headphonesSpeakerMap;
+      void roomAudioEngine.configure(room, selectedSpeakerMap).catch((error: unknown) => {
+        console.error('Room activation failed.', error);
+      });
     }
   }
 
-  function beginRoomActivation(
-    room: Room,
-    speakerMap: SpeakerMap
-  ) {
-    void roomAudioEngine.configure(room, speakerMap).catch((error: unknown) => {
-      console.error('Room activation failed.', error);
-    });
-  }
-
-  function handleContinueAfterRoomConnection() {
-    if (!activeRoom || roomAudioStatus.state !== 'ready') return;
-    setShowRoomSelectionDialog(false);
+  function handleActivateScene(instanceId: string) {
+    if (!activeProject?.scenes.some((scene) => scene.instanceId === instanceId)) return;
+    setCurrentSceneInstanceId(instanceId);
+    setShowSceneSelectionDialog(false);
   }
 
   return (
@@ -815,6 +816,18 @@ async function handleSettingsChange(settings: AppSettings) {
         rooms={availableRooms}
         activeRoomId={activeRoom?.id ?? null}
         onSelectRoom={handleSelectRoom}
+        roomSpeakerVolume={roomSpeakerVolumeStatus.volume}
+        roomSpeakerVolumeEnabled={
+          Boolean(activeRoom) &&
+          roomAudioEngine.usesBackendRoomAudio() &&
+          roomSpeakerVolumeStatus.volume !== null
+        }
+        roomSpeakerVolumeMessage={
+          roomSpeakerVolumeStatus.state === 'error'
+            ? roomSpeakerVolumeStatus.message
+            : ''
+        }
+        onRoomSpeakerVolumeChange={(volume) => roomAudioEngine.setRoomSpeakerVolume(volume)}
 
         projectName={activeProject?.name}
         roomName={
@@ -939,10 +952,27 @@ async function handleSettingsChange(settings: AppSettings) {
         <RoomSelectorDialog
           rooms={availableRooms}
           selectedRoomId={activeRoom?.id ?? null}
-          roomAudioStatus={roomAudioStatus}
           onSelectRoom={(roomId) => handleSelectRoom(roomId)}
-          onContinue={handleContinueAfterRoomConnection}
         />
+      )}
+
+      {activeProject && showSceneSelectionDialog && (
+        <div className="dialog-backdrop">
+          <div className="dialog">
+            <h2>Select Scene</h2>
+            <div className="project-picker-list">
+              {activeProject.scenes.map((scene) => (
+                <button
+                  key={scene.instanceId}
+                  className="project-picker-item"
+                  onClick={() => handleActivateScene(scene.instanceId)}
+                >
+                  {scene.instanceName}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
       )}
 
       {showUnsavedChangesDialog && (

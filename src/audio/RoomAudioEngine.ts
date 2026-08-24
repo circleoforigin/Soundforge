@@ -1,5 +1,5 @@
 import type { Room } from '../models/Room';
-import type { RoomAudioSessionSnapshot, RoomAudioSourceRequest, RoomAudioSourceSnapshot } from '../models/RoomAudio';
+import type { RoomAudioSessionSnapshot, RoomAudioSourceRequest, RoomAudioSourceSnapshot, RoomSpeakerVolumeResult } from '../models/RoomAudio';
 import type { SceneObjectInstance } from '../models/SceneObjectInstance';
 import type { SoundAsset } from '../models/SoundAsset';
 import type { SpeakerMap } from '../models/SpeakerMap';
@@ -16,6 +16,7 @@ import {
 } from './RoomAudioControlPlane';
 
 type EngineState = 'idle' | 'connecting' | 'ready' | 'degraded' | 'error';
+type RoomSpeakerVolumeState = 'idle' | 'loading' | 'ready' | 'error';
 
 interface PlayIntent {
   correlationId: string;
@@ -68,11 +69,19 @@ class RoomAudioEngine {
   private stateBeforeControlFailure: EngineState | null = null;
   private version = 0;
   private configurationPromise: Promise<void> = Promise.resolve();
+  private speakerVolumeState: RoomSpeakerVolumeState = 'idle';
+  private speakerVolume: number | null = null;
+  private speakerVolumeMessage = '';
+  private speakerVolumeTimer: number | null = null;
+  private speakerVolumeGeneration = 0;
 
   constructor() { playbackEngine.subscribe(() => this.emit()); }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
   getVersion = () => this.version;
   getStatus = () => ({ state: this.state, message: this.stateMessage });
+  getRoomSpeakerVolumeStatus = () => ({
+    state: this.speakerVolumeState, volume: this.speakerVolume, message: this.speakerVolumeMessage,
+  });
   usesBackendRoomAudio = (): boolean => !this.localMode;
 
   configure(room: Room | null, speakerMap: SpeakerMap): Promise<void> {
@@ -104,6 +113,7 @@ class RoomAudioEngine {
     const wasLocal = this.localMode;
     this.roomId = room?.id ?? null;
     this.localMode = local;
+    this.resetSpeakerVolume();
     this.remotePlaybackIds.clear();
     this.positionUpdates.clear();
     this.sceneVolumeStates.clear(); this.nodeGainStates.clear();
@@ -120,6 +130,7 @@ class RoomAudioEngine {
       const snapshot = await response.json() as RoomAudioSessionSnapshot;
       this.state = snapshot.state === 'degraded' ? 'degraded' : snapshot.state === 'ready' ? 'ready' : 'error';
       this.stateMessage = snapshot.state === 'degraded' ? 'Some Room audio endpoints are unavailable.' : 'Room audio ready.';
+      if (this.state === 'ready' || this.state === 'degraded') void this.initializeSpeakerVolume(room.id);
     } catch (error) { this.state = 'error'; this.stateMessage = error instanceof Error ? error.message : 'Unable to start Room audio.'; }
     this.emit();
   }
@@ -275,13 +286,71 @@ class RoomAudioEngine {
     if (this.localMode) { await playbackEngine.fadeOutAndStopScene(sceneId, durationMs); return; }
     await this.fadeSceneTransitionGain(sceneId, 0, durationMs); this.stopScene(sceneId);
   }
+  setRoomSpeakerVolume(volume: number): void {
+    if (this.localMode || !this.roomId || !Number.isFinite(volume)) return;
+    const normalized = Math.max(0, Math.min(100, Math.round(volume)));
+    this.speakerVolume = normalized;
+    this.speakerVolumeState = 'ready';
+    this.speakerVolumeMessage = '';
+    this.emit();
+    if (this.speakerVolumeTimer !== null) window.clearTimeout(this.speakerVolumeTimer);
+    const roomId = this.roomId;
+    const generation = this.speakerVolumeGeneration;
+    this.speakerVolumeTimer = window.setTimeout(() => {
+      this.speakerVolumeTimer = null;
+      void this.writeSpeakerVolume(roomId, generation, normalized);
+    }, 150);
+  }
   shutdown(): void {
     if (this.localMode || !this.roomId) return;
     const roomId = this.roomId;
     this.roomId = null; this.configuredKey = ''; this.remotePlaybackIds.clear();
+    this.resetSpeakerVolume();
     this.positionUpdates.clear();
     this.state = 'idle'; this.stateMessage = ''; this.emit();
     this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(roomId)}/session`), { method: 'DELETE' })), 'room_audio.session_stop_failed');
+  }
+
+  private resetSpeakerVolume(): void {
+    this.speakerVolumeGeneration += 1;
+    if (this.speakerVolumeTimer !== null) window.clearTimeout(this.speakerVolumeTimer);
+    this.speakerVolumeTimer = null;
+    this.speakerVolumeState = 'idle'; this.speakerVolume = null; this.speakerVolumeMessage = '';
+  }
+
+  private async initializeSpeakerVolume(roomId: string): Promise<void> {
+    const generation = this.speakerVolumeGeneration;
+    this.speakerVolumeState = 'loading'; this.speakerVolumeMessage = 'Reading physical speaker volume…'; this.emit();
+    try {
+      const response = await fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(roomId)}/volume`));
+      const result = await response.json() as RoomSpeakerVolumeResult;
+      if (generation !== this.speakerVolumeGeneration || roomId !== this.roomId) return;
+      if (Number.isFinite(result.volume)) this.speakerVolume = result.volume;
+      if (!response.ok) throw new Error(result.message ?? 'Unable to initialize Room speaker volume.');
+      this.speakerVolumeState = 'ready'; this.speakerVolumeMessage = '';
+    } catch (error) {
+      if (generation !== this.speakerVolumeGeneration || roomId !== this.roomId) return;
+      this.speakerVolumeState = 'error';
+      this.speakerVolumeMessage = error instanceof Error ? error.message : 'Unable to initialize Room speaker volume.';
+    }
+    this.emit();
+  }
+
+  private async writeSpeakerVolume(roomId: string, generation: number, volume: number): Promise<void> {
+    try {
+      const response = await fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(roomId)}/volume`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ volume }),
+      });
+      const result = await response.json() as RoomSpeakerVolumeResult;
+      if (generation !== this.speakerVolumeGeneration || roomId !== this.roomId) return;
+      if (!response.ok) throw new Error(result.message ?? 'Unable to update every Room speaker.');
+      this.speakerVolume = result.volume; this.speakerVolumeState = 'ready'; this.speakerVolumeMessage = '';
+    } catch (error) {
+      if (generation !== this.speakerVolumeGeneration || roomId !== this.roomId) return;
+      this.speakerVolumeState = 'error';
+      this.speakerVolumeMessage = error instanceof Error ? error.message : 'Unable to update Room speaker volume.';
+    }
+    this.emit();
   }
 
   private async synchronizeAsset(asset: SoundAsset): Promise<AssetSynchronizationResult> {

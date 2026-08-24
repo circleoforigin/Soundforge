@@ -10,7 +10,6 @@ import type { AudioDevice, AudioTransportOption } from '../../../src/models/Rese
 import type { AudioEndpointConnection, AudioOutputProvider } from './AudioOutputProvider.ts';
 import { diagnosticLogService, type DiagnosticLogService } from '../../diagnostics/DiagnosticLogService.ts';
 
-const sonosWavStartupTimeoutMs = 20_000;
 type SonosRoomAudioTransport = Pick<
   typeof sonosLocalContinuousStreamTransport,
   | 'id'
@@ -21,17 +20,13 @@ type SonosRoomAudioTransport = Pick<
   | 'stop'
 >;
 
-export function isSonosWavEndpointStable(snapshot: AudioStreamSnapshot): boolean {
-  const currentConnection = snapshot.httpClient.connections.find(
-    (connection) => connection.ordinal === snapshot.httpClient.currentConnectionOrdinal
-  );
+export function isSonosRadioEndpointReady(snapshot: AudioStreamSnapshot): boolean {
   return snapshot.lifecycle === 'running'
     && snapshot.encoder.state === 'running'
-    && snapshot.encoder.container === 'wav'
+    && snapshot.encoder.codec === 'aac-lc'
+    && snapshot.encoder.container === 'adts'
     && snapshot.httpClient.connected
-    && snapshot.httpClient.connectionCount >= 2
-    && (snapshot.httpClient.currentConnectionOrdinal ?? 0) >= 2
-    && (currentConnection?.bytesDelivered ?? 0) > 0
+    && snapshot.httpClient.deliveredBytes > 0
     && !snapshot.httpClient.awaitingReconnect
     && snapshot.transport?.state === 'active'
     && snapshot.transport.providerPlaybackState === 'STREAMING';
@@ -72,24 +67,46 @@ export class SonosAudioOutputProvider implements AudioOutputProvider {
     };
     let streamId = '';
     let binding: ContinuousStreamTransportBinding | undefined;
+    let resolveReady!: () => void;
+    let rejectReady!: (error: Error) => void;
+    let readySettled = false;
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    const settleReady = (snapshot: AudioStreamSnapshot) => {
+      if (!readySettled && isSonosRadioEndpointReady(snapshot)) {
+        readySettled = true;
+        resolveReady();
+      }
+    };
+    const failReady = (error: Error) => {
+      if (!readySettled) {
+        readySettled = true;
+        rejectReady(error);
+      }
+      callbacks.onFailure?.(error);
+    };
     const stream = this.manager.create({
       deviceId: localDevice.id,
       transportId: this.transport.id,
-      encodingProfileId: 'wav-pcm',
+      encodingProfileId: 'aac-adts',
       externalPcmSource: true,
       clientReconnectGraceMs: this.transport.clientReconnectGraceMs,
       minimumConnectionsForTone: this.transport.minimumConnectionsForTone,
-      onEvent: (event) => this.transport.handleRuntimeEvent?.(
-        streamId, event, this.manager.getSnapshot(streamId)
-      ),
-      onClientDisconnected: (reason) => callbacks.onFailure?.(new Error(reason)),
-      onEncoderExit: () => callbacks.onFailure?.(new Error('Sonos endpoint encoder exited.')),
+      onEvent: (event) => {
+        this.transport.handleRuntimeEvent?.(streamId, event, this.manager.getSnapshot(streamId));
+        const snapshot = this.manager.getSnapshot(streamId);
+        if (snapshot) settleReady(snapshot);
+      },
+      onClientDisconnected: (reason) => failReady(new Error(reason)),
+      onEncoderExit: () => failReady(new Error('Sonos endpoint encoder exited.')),
     });
     streamId = stream.id;
     const startupStartedAt = performance.now();
     await this.diagnostics.record({
-      category: 'transport', level: 'info', event: 'room_audio.sonos_wav_connecting',
-      message: 'Sonos WAV Room Audio endpoint connecting.',
+      category: 'transport', level: 'info', event: 'room_audio.sonos_radio_connecting',
+      message: 'Sonos AAC/Radio Room Audio endpoint connecting.',
       details: {
         streamId,
         endpointId: endpoint.endpointId,
@@ -106,33 +123,28 @@ export class SonosAudioOutputProvider implements AudioOutputProvider {
         transport: transportOption,
         streamId,
         streamUrl: '',
-        latencyProfile: getSonosLatencyExperimentProfile('wav-broadcast'),
+        latencyProfile: getSonosLatencyExperimentProfile('aac-radio'),
         bindHttpClient: (client, metadata) => stream.bindHttpClient(client, metadata),
         updateTransport: (update, message) => stream.updateTransport(update, message),
         addDiagnostic: (message, details) => stream.addDiagnosticEvent('lifecycle', message, details),
         getSnapshot: () => stream.getSnapshot(),
-        terminate: (reason) => callbacks.onFailure?.(new Error(reason)),
+        terminate: (reason) => failReady(new Error(reason)),
       };
       binding = await this.transport.startPhysicalDevice(
-        context, endpoint.deviceId, endpoint.displayName
+        context, endpoint.deviceId, endpoint.displayName, { ensureStandalone: true }
       );
-      stream.updateTransport({ state: 'bound', bound: true, hasBinding: true }, 'Room Audio endpoint transport bound.');
-      await this.diagnostics.record({
-        category: 'transport', level: 'info', event: 'room_audio.sonos_wav_stabilizing',
-        message: 'Sonos WAV Room Audio endpoint is awaiting its stable playback consumer.',
-        details: { streamId, endpointId: endpoint.endpointId },
-      });
-      const deadline = Date.now() + sonosWavStartupTimeoutMs;
-      while (!isSonosWavEndpointStable(stream.getSnapshot()) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
+      if (stream.getSnapshot().transport?.state !== 'active') {
+        stream.updateTransport(
+          { state: 'bound', bound: true, hasBinding: true },
+          'Room Audio endpoint transport bound.'
+        );
       }
+      settleReady(stream.getSnapshot());
+      await ready;
       const readySnapshot = stream.getSnapshot();
-      if (!isSonosWavEndpointStable(readySnapshot)) {
-        throw new Error('Sonos WAV endpoint did not establish its stable playback stream in time.');
-      }
       await this.diagnostics.record({
-        category: 'transport', level: 'info', event: 'room_audio.sonos_wav_ready',
-        message: 'Sonos WAV Room Audio endpoint is stable and ready.',
+        category: 'transport', level: 'info', event: 'room_audio.sonos_radio_ready',
+        message: 'Sonos AAC/Radio Room Audio endpoint is ready.',
         details: {
           streamId,
           encoderPid: readySnapshot.encoder.pid,

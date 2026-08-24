@@ -11,7 +11,7 @@ export class SonosLocalAvTransportError extends Error {
 }
 
 export interface SonosLocalAvTransportRequestDiagnostic {
-  action: 'SetAVTransportURI' | 'Play' | 'Stop';
+  action: 'BecomeCoordinatorOfStandaloneGroup' | 'SetAVTransportURI' | 'Play' | 'Stop';
   requestStartedAt: string;
   responseReceivedAt: string | null;
   timeoutAt: string | null;
@@ -25,6 +25,18 @@ interface SonosLocalAvTransportRequestOptions {
 }
 
 export class SonosLocalAvTransportClient {
+  async becomeCoordinatorOfStandaloneGroup(
+    controlUrl: string,
+    options: SonosLocalAvTransportRequestOptions = {}
+  ): Promise<void> {
+    await this.action(
+      controlUrl,
+      'BecomeCoordinatorOfStandaloneGroup',
+      '<InstanceID>0</InstanceID>',
+      options
+    );
+  }
+
   async setStreamUri(
     controlUrl: string,
     streamUri: string,

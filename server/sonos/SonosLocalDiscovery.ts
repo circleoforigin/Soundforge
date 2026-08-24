@@ -6,6 +6,7 @@ export interface SonosLocalDevice {
   address: string;
   descriptionUrl: string;
   avTransportControlUrl: string;
+  renderingControlUrl?: string;
   name?: string;
   model?: string;
   modelNumber?: string;
@@ -18,10 +19,11 @@ function xmlValue(xml: string, name: string): string | undefined {
 
 export function parseSonosDeviceDescription(xml: string, descriptionUrl: string): SonosLocalDevice | undefined {
   const udn = xmlValue(xml, 'UDN')?.replace(/^uuid:/i, '');
-  const service = [...xml.matchAll(/<service>([\s\S]*?)<\/service>/gi)]
-    .map((match) => match[1])
-    .find((value) => xmlValue(value, 'serviceType') === 'urn:schemas-upnp-org:service:AVTransport:1');
+  const services = [...xml.matchAll(/<service>([\s\S]*?)<\/service>/gi)].map((match) => match[1]);
+  const service = services.find((value) => xmlValue(value, 'serviceType') === 'urn:schemas-upnp-org:service:AVTransport:1');
+  const renderingService = services.find((value) => xmlValue(value, 'serviceType') === 'urn:schemas-upnp-org:service:RenderingControl:1');
   const controlUrl = service ? xmlValue(service, 'controlURL') : undefined;
+  const renderingControlUrl = renderingService ? xmlValue(renderingService, 'controlURL') : undefined;
   if (!udn || !controlUrl) return undefined;
   const base = new URL(descriptionUrl);
   return {
@@ -29,6 +31,7 @@ export function parseSonosDeviceDescription(xml: string, descriptionUrl: string)
     address: base.hostname,
     descriptionUrl,
     avTransportControlUrl: new URL(controlUrl, base).toString(),
+    ...(renderingControlUrl ? { renderingControlUrl: new URL(renderingControlUrl, base).toString() } : {}),
     ...(xmlValue(xml, 'roomName') || xmlValue(xml, 'friendlyName') ? { name: xmlValue(xml, 'roomName') ?? xmlValue(xml, 'friendlyName') } : {}),
     ...(xmlValue(xml, 'modelName') ? { model: xmlValue(xml, 'modelName') } : {}),
     ...(xmlValue(xml, 'modelNumber') ? { modelNumber: xmlValue(xml, 'modelNumber') } : {}),
