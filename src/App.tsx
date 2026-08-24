@@ -53,7 +53,6 @@ function App() {
   const [currentSceneInstanceId, setCurrentSceneInstanceId] =
     useState<string | null>(null);
   const [showRoomSelectionDialog, setShowRoomSelectionDialog] = useState(false);
-  const [showSceneSelectionDialog, setShowSceneSelectionDialog] = useState(false);
   const [preferredSceneInstanceId, setPreferredSceneInstanceId] =
     useState<string | null>(null);
   const [importingSound, setImportingSound] = useState(false);
@@ -149,6 +148,13 @@ async function handleSettingsChange(settings: AppSettings) {
     activeProject?.scenes.find(
       (scene) => scene.instanceId === currentSceneInstanceId
     ) ?? null;
+
+  const shouldShowSceneSelection =
+    activeProject !== null &&
+    activeRoom !== null &&
+    currentScene === null &&
+    roomAudioStatus.state === 'ready' &&
+    activeProject.scenes.length > 0;
 
   const transitionTarget =
     activeProject?.scenes.find(
@@ -251,7 +257,6 @@ async function handleSettingsChange(settings: AppSettings) {
     setPreferredSceneInstanceId(null);
     setShowNewSceneDialog(false);
     setShowRoomSelectionDialog(false);
-    setShowSceneSelectionDialog(false);
     setProjectRuntimeKey((current) => current + 1);
   }
 
@@ -321,7 +326,6 @@ async function handleSettingsChange(settings: AppSettings) {
     setShowProjectPicker(false);
     if (restoredRoom) {
       setShowRoomSelectionDialog(false);
-      setShowSceneSelectionDialog(false);
       const restoredSpeakerMap =
         speakerMapRepository.loadSpeakerMaps().find(
           (speakerMap) => speakerMap.id === restoredRoom.speakerMapId
@@ -329,7 +333,6 @@ async function handleSettingsChange(settings: AppSettings) {
       beginRoomActivation(restoredRoom, restoredSpeakerMap);
     } else {
       setShowRoomSelectionDialog(true);
-      setShowSceneSelectionDialog(false);
     }
   }
 
@@ -443,7 +446,6 @@ async function handleSettingsChange(settings: AppSettings) {
     setCurrentSceneInstanceId(null);
     setPreferredSceneInstanceId(null);
     setShowRoomSelectionDialog(true);
-    setShowSceneSelectionDialog(false);
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
     setActiveRoom(null);
@@ -536,7 +538,6 @@ async function handleSettingsChange(settings: AppSettings) {
     setCurrentSceneInstanceId(
       newInstance.instanceId
     );
-    setShowSceneSelectionDialog(false);
 
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
@@ -787,7 +788,6 @@ async function handleSettingsChange(settings: AppSettings) {
       handleActiveRoomChange(null);
       if (activeProject) {
         setCurrentSceneInstanceId(null);
-        setShowSceneSelectionDialog(false);
         setShowRoomSelectionDialog(true);
       }
       return;
@@ -810,7 +810,6 @@ async function handleSettingsChange(settings: AppSettings) {
     if (activeProject) {
       setCurrentSceneInstanceId(null);
       setShowRoomSelectionDialog(false);
-      setShowSceneSelectionDialog(false);
       setTransitionTargetInstanceId(null);
       setPreviewingTarget(false);
       const selectedSpeakerMap =
@@ -827,37 +826,30 @@ async function handleSettingsChange(settings: AppSettings) {
     speakerMap: SpeakerMap
   ) {
     setShowRoomSelectionDialog(false);
-    setShowSceneSelectionDialog(false);
     void roomAudioEngine.configure(room, speakerMap).catch((error: unknown) => {
       console.error('Room activation failed.', error);
     });
   }
 
   /* eslint-disable react-hooks/set-state-in-effect -- Room readiness opens the
-     next required Project dialog; RoomAudioEngine remains the authority. */
+     required New Scene dialog only for an empty Project. */
   useEffect(() => {
     if (!activeProject) return;
     if (!activeRoom) return;
-    if (currentSceneInstanceId !== null) return;
+    if (currentScene !== null) return;
     if (roomAudioStatus.state !== 'ready') return;
-
-    if (activeProject.scenes.length === 0) {
-      setShowNewSceneDialog(true);
-      return;
-    }
-
-    setShowSceneSelectionDialog(true);
+    if (activeProject.scenes.length !== 0) return;
+    setShowNewSceneDialog(true);
   }, [
     activeProject,
     activeRoom,
-    currentSceneInstanceId,
+    currentScene,
     roomAudioStatus.state,
   ]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   function handleActivateScene(instanceId: string) {
     if (
-      !showSceneSelectionDialog ||
       roomAudioStatus.state !== 'ready' ||
       !activeProject?.scenes.some((scene) => scene.instanceId === instanceId)
     ) {
@@ -866,7 +858,6 @@ async function handleSettingsChange(settings: AppSettings) {
 
     setCurrentSceneInstanceId(instanceId);
     setPreferredSceneInstanceId(instanceId);
-    setShowSceneSelectionDialog(false);
   }
 
   return (
@@ -886,7 +877,7 @@ async function handleSettingsChange(settings: AppSettings) {
           Boolean(activeProject) &&
           roomAudioStatus.state === 'ready' &&
           !showRoomSelectionDialog &&
-          !showSceneSelectionDialog
+          !shouldShowSceneSelection
         }
 
         rooms={availableRooms}
@@ -907,13 +898,12 @@ async function handleSettingsChange(settings: AppSettings) {
             {roomAudioStatus.state === 'error' || roomAudioStatus.state === 'degraded'
               ? roomAudioStatus.message || 'Unable to activate Room.'
               : roomAudioStatus.state === 'ready'
-                ? 'Room Ready'
+                ? 'ROOM READY — FRONTEND CHECK 823'
                 : 'Connecting Room audio…'}
           </span>
           {(roomAudioStatus.state === 'error' || roomAudioStatus.state === 'degraded') && (
             <button onClick={() => {
               handleActiveRoomChange(null);
-              setShowSceneSelectionDialog(false);
               setShowRoomSelectionDialog(true);
             }}>
               Choose Another Room
@@ -1034,7 +1024,7 @@ async function handleSettingsChange(settings: AppSettings) {
         </div>
       )}
 
-      {activeProject && activeRoom === null && currentSceneInstanceId === null && showRoomSelectionDialog && (
+      {activeProject && activeRoom === null && currentScene === null && showRoomSelectionDialog && (
         <div className="dialog-backdrop">
           <div className="dialog">
             <h2>Select Room</h2>
@@ -1054,7 +1044,7 @@ async function handleSettingsChange(settings: AppSettings) {
         </div>
       )}
 
-      {activeProject && showSceneSelectionDialog && (
+      {shouldShowSceneSelection && activeProject && (
         <div className="dialog-backdrop">
           <div className="dialog">
             <h2>Select Scene</h2>
