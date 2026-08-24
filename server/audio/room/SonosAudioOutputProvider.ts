@@ -1,22 +1,64 @@
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { RoomAudioEndpoint } from '../../../src/models/RoomAudio.ts';
+import type { AudioStreamSnapshot } from '../../../src/models/ResearchLab.ts';
+import { getSonosLatencyExperimentProfile } from '../../../src/models/SonosLatencyLab.ts';
 import { ContinuousAudioStreamManager } from '../ContinuousAudioStreamManager.ts';
 import type { ContinuousStreamTransportBinding, ContinuousStreamTransportContext } from '../transports/ContinuousStreamTransport.ts';
 import { sonosLocalContinuousStreamTransport } from '../../sonos/SonosLocalContinuousStreamTransport.ts';
 import type { AudioDevice, AudioTransportOption } from '../../../src/models/ResearchLab.ts';
 import type { AudioEndpointConnection, AudioOutputProvider } from './AudioOutputProvider.ts';
+import { diagnosticLogService, type DiagnosticLogService } from '../../diagnostics/DiagnosticLogService.ts';
+
+const sonosWavStartupTimeoutMs = 20_000;
+type SonosRoomAudioTransport = Pick<
+  typeof sonosLocalContinuousStreamTransport,
+  | 'id'
+  | 'clientReconnectGraceMs'
+  | 'minimumConnectionsForTone'
+  | 'handleRuntimeEvent'
+  | 'startPhysicalDevice'
+  | 'stop'
+>;
+
+export function isSonosWavEndpointStable(snapshot: AudioStreamSnapshot): boolean {
+  const currentConnection = snapshot.httpClient.connections.find(
+    (connection) => connection.ordinal === snapshot.httpClient.currentConnectionOrdinal
+  );
+  return snapshot.lifecycle === 'running'
+    && snapshot.encoder.state === 'running'
+    && snapshot.encoder.container === 'wav'
+    && snapshot.httpClient.connected
+    && snapshot.httpClient.connectionCount >= 2
+    && (snapshot.httpClient.currentConnectionOrdinal ?? 0) >= 2
+    && (currentConnection?.bytesDelivered ?? 0) > 0
+    && !snapshot.httpClient.awaitingReconnect
+    && snapshot.transport?.state === 'active'
+    && snapshot.transport.providerPlaybackState === 'STREAMING';
+}
 
 export class SonosAudioOutputProvider implements AudioOutputProvider {
   readonly id = 'sonos';
-  private readonly manager = new ContinuousAudioStreamManager();
+  private readonly manager: ContinuousAudioStreamManager;
+  private readonly transport: SonosRoomAudioTransport;
+  private readonly diagnostics: Pick<DiagnosticLogService, 'record'>;
+
+  constructor(
+    manager = new ContinuousAudioStreamManager(),
+    transport: SonosRoomAudioTransport = sonosLocalContinuousStreamTransport,
+    diagnostics: Pick<DiagnosticLogService, 'record'> = diagnosticLogService
+  ) {
+    this.manager = manager;
+    this.transport = transport;
+    this.diagnostics = diagnostics;
+  }
 
   async openEndpoint(
     endpoint: RoomAudioEndpoint,
     callbacks: { onFailure?: (error: Error) => void } = {}
   ): Promise<AudioEndpointConnection> {
     const transportOption: AudioTransportOption = {
-      id: sonosLocalContinuousStreamTransport.id, name: 'Sonos local continuous stream',
+      id: this.transport.id, name: 'Sonos local continuous stream',
       operation: 'persistent-stream', scope: 'physical-device', independentlyTargetable: true,
       availability: 'experimental', limitation: 'Direct LAN AVTransport stream.',
     };
@@ -29,21 +71,31 @@ export class SonosAudioOutputProvider implements AudioOutputProvider {
       capabilities: ['continuous-stream'], diagnosticActions: [], topology: [], transports: [transportOption],
     };
     let streamId = '';
-    let binding: ContinuousStreamTransportBinding;
+    let binding: ContinuousStreamTransportBinding | undefined;
     const stream = this.manager.create({
       deviceId: localDevice.id,
-      transportId: sonosLocalContinuousStreamTransport.id,
-      encodingProfileId: 'aac-adts',
+      transportId: this.transport.id,
+      encodingProfileId: 'wav-pcm',
       externalPcmSource: true,
-      clientReconnectGraceMs: sonosLocalContinuousStreamTransport.clientReconnectGraceMs,
-      minimumConnectionsForTone: sonosLocalContinuousStreamTransport.minimumConnectionsForTone,
-      onEvent: (event) => sonosLocalContinuousStreamTransport.handleRuntimeEvent?.(
+      clientReconnectGraceMs: this.transport.clientReconnectGraceMs,
+      minimumConnectionsForTone: this.transport.minimumConnectionsForTone,
+      onEvent: (event) => this.transport.handleRuntimeEvent?.(
         streamId, event, this.manager.getSnapshot(streamId)
       ),
       onClientDisconnected: (reason) => callbacks.onFailure?.(new Error(reason)),
       onEncoderExit: () => callbacks.onFailure?.(new Error('Sonos endpoint encoder exited.')),
     });
     streamId = stream.id;
+    const startupStartedAt = performance.now();
+    await this.diagnostics.record({
+      category: 'transport', level: 'info', event: 'room_audio.sonos_wav_connecting',
+      message: 'Sonos WAV Room Audio endpoint connecting.',
+      details: {
+        streamId,
+        endpointId: endpoint.endpointId,
+        deviceIdSuffix: endpoint.deviceId.slice(-10),
+      },
+    });
     stream.start();
     const silence = Buffer.alloc(48_000 * 20 / 1_000 * 2 * 2);
     const prewarm = setInterval(() => stream.writeExternalPcmFrame(silence, performance.now()), 20);
@@ -54,23 +106,49 @@ export class SonosAudioOutputProvider implements AudioOutputProvider {
         transport: transportOption,
         streamId,
         streamUrl: '',
+        latencyProfile: getSonosLatencyExperimentProfile('wav-broadcast'),
         bindHttpClient: (client, metadata) => stream.bindHttpClient(client, metadata),
         updateTransport: (update, message) => stream.updateTransport(update, message),
         addDiagnostic: (message, details) => stream.addDiagnosticEvent('lifecycle', message, details),
+        getSnapshot: () => stream.getSnapshot(),
         terminate: (reason) => callbacks.onFailure?.(new Error(reason)),
       };
-      binding = await sonosLocalContinuousStreamTransport.startPhysicalDevice(
+      binding = await this.transport.startPhysicalDevice(
         context, endpoint.deviceId, endpoint.displayName
       );
       stream.updateTransport({ state: 'bound', bound: true, hasBinding: true }, 'Room Audio endpoint transport bound.');
-      const deadline = Date.now() + 20_000;
-      while (!stream.isReadyForTone() && Date.now() < deadline) {
+      await this.diagnostics.record({
+        category: 'transport', level: 'info', event: 'room_audio.sonos_wav_stabilizing',
+        message: 'Sonos WAV Room Audio endpoint is awaiting its stable playback consumer.',
+        details: { streamId, endpointId: endpoint.endpointId },
+      });
+      const deadline = Date.now() + sonosWavStartupTimeoutMs;
+      while (!isSonosWavEndpointStable(stream.getSnapshot()) && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      if (!stream.isReadyForTone()) throw new Error('Sonos endpoint did not establish its playback stream in time.');
+      const readySnapshot = stream.getSnapshot();
+      if (!isSonosWavEndpointStable(readySnapshot)) {
+        throw new Error('Sonos WAV endpoint did not establish its stable playback stream in time.');
+      }
+      await this.diagnostics.record({
+        category: 'transport', level: 'info', event: 'room_audio.sonos_wav_ready',
+        message: 'Sonos WAV Room Audio endpoint is stable and ready.',
+        details: {
+          streamId,
+          encoderPid: readySnapshot.encoder.pid,
+          currentConsumerOrdinal: readySnapshot.httpClient.currentConnectionOrdinal,
+          connectionCount: readySnapshot.httpClient.connectionCount,
+          deliveredBytes: readySnapshot.httpClient.deliveredBytes,
+          transportState: readySnapshot.transport?.state ?? null,
+          providerPlaybackState: readySnapshot.transport?.providerPlaybackState ?? null,
+          awaitingReconnect: readySnapshot.httpClient.awaitingReconnect,
+          elapsedStartupMs: Math.round((performance.now() - startupStartedAt) * 100) / 100,
+        },
+      });
     } catch (error) {
       clearInterval(prewarm);
       this.manager.stop(streamId, 'Room Audio endpoint startup failed');
+      if (binding) await this.transport.stop(binding).catch(() => undefined);
       throw error;
     }
 
@@ -107,7 +185,7 @@ export class SonosAudioOutputProvider implements AudioOutputProvider {
         closed = true;
         if (prewarming) { clearInterval(prewarm); prewarming = false; }
         this.manager.stop(streamId, 'Room Audio endpoint closed');
-        await sonosLocalContinuousStreamTransport.stop(establishedBinding);
+        await this.transport.stop(establishedBinding);
       },
     };
   }

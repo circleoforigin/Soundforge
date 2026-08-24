@@ -331,7 +331,7 @@ async function handleSettingsChange(settings: AppSettings) {
         speakerMapRepository.loadSpeakerMaps().find(
           (speakerMap) => speakerMap.id === restoredRoom.speakerMapId
         ) ?? headphonesSpeakerMap;
-      beginRoomActivation(project, restoredRoom, restoredSpeakerMap);
+      beginRoomActivation(restoredRoom, restoredSpeakerMap);
     } else {
       setProjectActivationPhase('selecting-room');
     }
@@ -815,33 +815,48 @@ async function handleSettingsChange(settings: AppSettings) {
         speakerMapRepository.loadSpeakerMaps().find(
           (speakerMap) => speakerMap.id === room.speakerMapId
         ) ?? headphonesSpeakerMap;
-      beginRoomActivation(activeProject, room, selectedSpeakerMap);
+      beginRoomActivation(room, selectedSpeakerMap);
     }
   }
 
   function beginRoomActivation(
-    project: Project,
     room: Room,
     speakerMap: SpeakerMap
   ) {
     const runId = ++roomActivationRunIdRef.current;
     setProjectActivationPhase('connecting-room');
-    void roomAudioEngine.configure(room, speakerMap).then(() => {
-      if (
-        runId !== roomActivationRunIdRef.current ||
-        roomAudioEngine.getStatus().state !== 'ready'
-      ) {
-        return;
-      }
-
-      if (project.scenes.length === 0) {
-        setProjectActivationPhase('creating-scene');
-        setShowNewSceneDialog(true);
-      } else {
-        setProjectActivationPhase('selecting-scene');
+    void roomAudioEngine.configure(room, speakerMap).catch((error: unknown) => {
+      if (runId === roomActivationRunIdRef.current) {
+        console.error('Room activation failed.', error);
       }
     });
   }
+
+  /* eslint-disable react-hooks/set-state-in-effect -- This effect advances the
+     project activation state machine from the subscribed RoomAudioEngine state. */
+  useEffect(() => {
+    if (
+      !activeProject ||
+      !activeRoom ||
+      projectActivationPhase !== 'connecting-room' ||
+      roomAudioStatus.state !== 'ready'
+    ) {
+      return;
+    }
+
+    if (activeProject.scenes.length === 0) {
+      setProjectActivationPhase('creating-scene');
+      setShowNewSceneDialog(true);
+    } else {
+      setProjectActivationPhase('selecting-scene');
+    }
+  }, [
+    activeProject,
+    activeRoom,
+    projectActivationPhase,
+    roomAudioStatus.state,
+  ]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   function handleActivateScene(instanceId: string) {
     if (
