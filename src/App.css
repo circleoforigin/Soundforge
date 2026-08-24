@@ -2948,6 +2948,16 @@ body,
   background: #3a3c41;
 }
 
+.project-picker-item.selected {
+  border-color: #7889a8;
+  background: #343842;
+}
+
+.room-selector-status {
+  min-height: 20px;
+  color: #b9bbc1;
+}
+
 .project-picker-empty {
   margin: 0;
   color: #a9abb2;

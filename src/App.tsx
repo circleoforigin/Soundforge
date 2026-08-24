@@ -26,6 +26,7 @@ import RoomManagerDialog from './components/RoomManagerDialog';
 import ResearchLabDialog from './components/ResearchLabDialog';
 import SettingsDialog from './components/SettingsDialog';
 import DiagnosticLogDialog from './components/DiagnosticLogDialog';
+import RoomSelectorDialog from './components/RoomSelectorDialog';
 import { DEFAULT_APP_SETTINGS, type AppSettings } from './models/AppSettings';
 import { runtimeUrl } from './config/runtime';
 import { speakerMapRepository } from './speakers/SpeakerMapRepository';
@@ -53,8 +54,6 @@ function App() {
   const [currentSceneInstanceId, setCurrentSceneInstanceId] =
     useState<string | null>(null);
   const [showRoomSelectionDialog, setShowRoomSelectionDialog] = useState(false);
-  const [preferredSceneInstanceId, setPreferredSceneInstanceId] =
-    useState<string | null>(null);
   const [importingSound, setImportingSound] = useState(false);
   const [libraryFolderConfigured, setLibraryFolderConfigured] =
     useState(false);
@@ -148,13 +147,6 @@ async function handleSettingsChange(settings: AppSettings) {
     activeProject?.scenes.find(
       (scene) => scene.instanceId === currentSceneInstanceId
     ) ?? null;
-
-  const shouldShowSceneSelection =
-    activeProject !== null &&
-    activeRoom !== null &&
-    currentScene === null &&
-    roomAudioStatus.state === 'ready' &&
-    activeProject.scenes.length > 0;
 
   const transitionTarget =
     activeProject?.scenes.find(
@@ -254,7 +246,6 @@ async function handleSettingsChange(settings: AppSettings) {
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
     setDirtySceneIds(new Set());
-    setPreferredSceneInstanceId(null);
     setShowNewSceneDialog(false);
     setShowRoomSelectionDialog(false);
     setProjectRuntimeKey((current) => current + 1);
@@ -293,47 +284,14 @@ async function handleSettingsChange(settings: AppSettings) {
       teardownProjectRuntime(activeProject);
     }
 
-    const storedRooms =
-      roomRepository.loadRooms();
-
-    const restoredRoom = [
-      headphonesRoom,
-      ...storedRooms,
-    ].find((room) =>
-      room.id === project.activeRoomId
-    ) ?? null;
-
-    const preferredSceneId =
-      project.scenes.some(
-        (scene) =>
-          scene.instanceId ===
-          project.activeSceneInstanceId
-      )
-        ? project.activeSceneInstanceId ?? null
-        : null;
-
-    setActiveProject({
-      ...project,
-      activeRoomId:
-        restoredRoom?.id,
-    });
+    setActiveProject(project);
     setCurrentSceneInstanceId(null);
-    setPreferredSceneInstanceId(preferredSceneId);
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
-    setActiveRoom(restoredRoom);
+    setActiveRoom(null);
     setDirtySceneIds(new Set());
     setShowProjectPicker(false);
-    if (restoredRoom) {
-      setShowRoomSelectionDialog(false);
-      const restoredSpeakerMap =
-        speakerMapRepository.loadSpeakerMaps().find(
-          (speakerMap) => speakerMap.id === restoredRoom.speakerMapId
-        ) ?? headphonesSpeakerMap;
-      beginRoomActivation(restoredRoom, restoredSpeakerMap);
-    } else {
-      setShowRoomSelectionDialog(true);
-    }
+    setShowRoomSelectionDialog(true);
   }
 
   function handleLoadProject(
@@ -444,7 +402,6 @@ async function handleSettingsChange(settings: AppSettings) {
 
     setActiveProject(newProject);
     setCurrentSceneInstanceId(null);
-    setPreferredSceneInstanceId(null);
     setShowRoomSelectionDialog(true);
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
@@ -809,7 +766,7 @@ async function handleSettingsChange(settings: AppSettings) {
     handleActiveRoomChange(room);
     if (activeProject) {
       setCurrentSceneInstanceId(null);
-      setShowRoomSelectionDialog(false);
+      setShowRoomSelectionDialog(true);
       setTransitionTargetInstanceId(null);
       setPreviewingTarget(false);
       const selectedSpeakerMap =
@@ -825,39 +782,14 @@ async function handleSettingsChange(settings: AppSettings) {
     room: Room,
     speakerMap: SpeakerMap
   ) {
-    setShowRoomSelectionDialog(false);
     void roomAudioEngine.configure(room, speakerMap).catch((error: unknown) => {
       console.error('Room activation failed.', error);
     });
   }
 
-  /* eslint-disable react-hooks/set-state-in-effect -- Room readiness opens the
-     required New Scene dialog only for an empty Project. */
-  useEffect(() => {
-    if (!activeProject) return;
-    if (!activeRoom) return;
-    if (currentScene !== null) return;
-    if (roomAudioStatus.state !== 'ready') return;
-    if (activeProject.scenes.length !== 0) return;
-    setShowNewSceneDialog(true);
-  }, [
-    activeProject,
-    activeRoom,
-    currentScene,
-    roomAudioStatus.state,
-  ]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  function handleActivateScene(instanceId: string) {
-    if (
-      roomAudioStatus.state !== 'ready' ||
-      !activeProject?.scenes.some((scene) => scene.instanceId === instanceId)
-    ) {
-      return;
-    }
-
-    setCurrentSceneInstanceId(instanceId);
-    setPreferredSceneInstanceId(instanceId);
+  function handleContinueAfterRoomConnection() {
+    if (!activeRoom || roomAudioStatus.state !== 'ready') return;
+    setShowRoomSelectionDialog(false);
   }
 
   return (
@@ -877,7 +809,7 @@ async function handleSettingsChange(settings: AppSettings) {
           Boolean(activeProject) &&
           roomAudioStatus.state === 'ready' &&
           !showRoomSelectionDialog &&
-          !shouldShowSceneSelection
+          currentScene !== null
         }
 
         rooms={availableRooms}
@@ -890,27 +822,6 @@ async function handleSettingsChange(settings: AppSettings) {
           'No Room Selected'
         }
       />
-
-      {activeProject && activeRoom && !currentScene && !showRoomSelectionDialog && (
-        <div className="project-activation-status" role="status">
-          <strong>{activeRoom?.name ?? 'Room'}</strong>
-          <span>
-            {roomAudioStatus.state === 'error' || roomAudioStatus.state === 'degraded'
-              ? roomAudioStatus.message || 'Unable to activate Room.'
-              : roomAudioStatus.state === 'ready'
-                ? 'ROOM READY — FRONTEND CHECK 823'
-                : 'Connecting Room audio…'}
-          </span>
-          {(roomAudioStatus.state === 'error' || roomAudioStatus.state === 'degraded') && (
-            <button onClick={() => {
-              handleActiveRoomChange(null);
-              setShowRoomSelectionDialog(true);
-            }}>
-              Choose Another Room
-            </button>
-          )}
-        </div>
-      )}
 
       {displayedScene && (
         <SceneWorkspace
@@ -1024,45 +935,14 @@ async function handleSettingsChange(settings: AppSettings) {
         </div>
       )}
 
-      {activeProject && activeRoom === null && currentScene === null && showRoomSelectionDialog && (
-        <div className="dialog-backdrop">
-          <div className="dialog">
-            <h2>Select Room</h2>
-            <p>Choose a Room before opening a Scene.</p>
-            <div className="project-picker-list">
-              {availableRooms.map((room) => (
-                <button
-                  key={room.id}
-                  className="project-picker-item"
-                  onClick={() => handleSelectRoom(room.id)}
-                >
-                  {room.name}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {shouldShowSceneSelection && activeProject && (
-        <div className="dialog-backdrop">
-          <div className="dialog">
-            <h2>Select Scene</h2>
-            <p>Room Ready. Choose a Scene to open.</p>
-            <div className="project-picker-list">
-              {activeProject.scenes.map((scene) => (
-                <button
-                  key={scene.instanceId}
-                  className={`project-picker-item${scene.instanceId === preferredSceneInstanceId ? ' preferred' : ''}`}
-                  onClick={() => handleActivateScene(scene.instanceId)}
-                >
-                  {scene.instanceName}
-                  {scene.instanceId === preferredSceneInstanceId ? ' — Last active' : ''}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
+      {activeProject && currentScene === null && showRoomSelectionDialog && (
+        <RoomSelectorDialog
+          rooms={availableRooms}
+          selectedRoomId={activeRoom?.id ?? null}
+          roomAudioStatus={roomAudioStatus}
+          onSelectRoom={(roomId) => handleSelectRoom(roomId)}
+          onContinue={handleContinueAfterRoomConnection}
+        />
       )}
 
       {showUnsavedChangesDialog && (
