@@ -527,6 +527,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
   const [estimatedTimingSkew, setEstimatedTimingSkew] = useState('');
   const [latencyDeviceId, setLatencyDeviceId] = useState('');
   const [latencyProfileId, setLatencyProfileId] = useState<SonosLatencyProfileId>('aac-radio');
+  const [wavSettleDelayMs, setWavSettleDelayMs] = useState(1_000);
   const [latencyStreamId, setLatencyStreamId] = useState<string | null>(null);
   const [latencyBusy, setLatencyBusy] = useState<'start' | 'tone' | 'stop' | null>(null);
   const [latencyError, setLatencyError] = useState<string | null>(null);
@@ -885,6 +886,7 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
             deviceId: latencyDeviceId,
             transportId: 'sonos-local-continuous',
             latencyProfileId,
+            ...(latencyProfileId === 'wav-broadcast' ? { wavSettleDelayMs } : {}),
           }),
         } : action === 'tone' ? {
           headers: { 'Content-Type': 'application/json' },
@@ -1074,6 +1076,9 @@ function ResearchLabDialogContent({ onClose }: ResearchLabDialogProps) {
               <label>Profile<select value={latencyProfileId} disabled={latencyStreamActive} onChange={(event) => setLatencyProfileId(event.target.value as SonosLatencyProfileId)}>
                 {sonosLatencyExperimentProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
               </select></label>
+              {latencyProfileId === 'wav-broadcast' && <label>Settle Delay<select value={wavSettleDelayMs} disabled={latencyStreamActive} onChange={(event) => setWavSettleDelayMs(Number(event.target.value))}>
+                {[0, 250, 500, 1_000, 2_000, 3_000].map((delay) => <option key={delay} value={delay}>{delay} ms</option>)}
+              </select></label>}
               <div className="research-stream-actions">
                 <button disabled={!latencyDeviceId || latencyStreamActive || Boolean(latencyBusy)} onClick={() => void runLatencyAction('start')}>{latencyBusy === 'start' ? 'Starting…' : 'Start Stream'}</button>
                 <button disabled={!latencyStreamActive || Boolean(latencyBusy)} onClick={() => void runLatencyAction('stop')}>Stop Stream</button>

@@ -17,6 +17,7 @@ interface MenuBarProps {
   onManageRooms: () => void;
   onOpenSettings: () => void;
   onOpenResearchLab: () => void;
+  sceneActionsEnabled: boolean;
 
   rooms: Room[];
   activeRoomId: string | null;
@@ -37,6 +38,7 @@ function MenuBar({
   onManageRooms,
   onOpenSettings,
   onOpenResearchLab,
+  sceneActionsEnabled,
   rooms,
   activeRoomId,
   onSelectRoom,
@@ -209,6 +211,7 @@ function MenuBar({
       <div className="menu-group">
         <button
           className="menu-item"
+          disabled={!sceneActionsEnabled}
           onClick={() => {
             const opening =
               !sceneMenuOpen;
@@ -226,6 +229,7 @@ function MenuBar({
             <button
               className="dropdown-item"
               onClick={handleNewScene}
+              disabled={!sceneActionsEnabled}
             >
               New Scene
             </button>

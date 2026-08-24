@@ -90,7 +90,8 @@ export class ResearchLabStreamService {
     transportId: string,
     createStreamUrl: (streamId: string) => string,
     httpFramingMode: ContinuousHttpFramingMode = 'chunked',
-    latencyProfileId?: string
+    latencyProfileId?: string,
+    wavSettleDelayMs?: number
   ): Promise<AudioStreamSnapshot> {
     const device = (await this.discoverDevices()).find((candidate) => candidate.id === deviceId);
     if (!device) {
@@ -209,10 +210,14 @@ export class ResearchLabStreamService {
         streamId: stream.id,
         streamUrl,
         ...(latencyProfile && !latencyProfile.useTransportDefaults ? { latencyProfile } : {}),
+        ...(latencyProfile?.id === 'wav-broadcast' && wavSettleDelayMs !== undefined
+          ? { wavSettleDelayMs }
+          : {}),
         bindHttpClient: (client) => stream.bindHttpClient(client),
         updateTransport: (update, message) => stream.updateTransport(update, message),
         addDiagnostic: (message, details, code) =>
           stream.addDiagnosticEvent('lifecycle', message, details, code),
+        getSnapshot: () => stream.getSnapshot(),
         terminate: (reason) => void this.terminateRuntime(stream.id, reason),
       });
       if (!this.manager.getActive(stream.id)) {

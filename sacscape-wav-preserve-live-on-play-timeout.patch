@@ -1,0 +1,60 @@
+diff --git a/server/sonos/SonosLocalContinuousStreamTransport.ts b/server/sonos/SonosLocalContinuousStreamTransport.ts
+--- a/server/sonos/SonosLocalContinuousStreamTransport.ts
++++ b/server/sonos/SonosLocalContinuousStreamTransport.ts
+@@ -51,6 +51,7 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
+   private readonly discoverLocal: (id: string) => Promise<SonosLocalDevice | undefined>;
+   private readonly avTransport: SonosLocalAvTransportClient;
+   private readonly contexts = new Map<string, ContinuousStreamTransportContext>();
++  private readonly wavLiveDelivery = new Set<string>();
+
+   constructor(
+     resolveDevice = resolveSonosAudioDevice,
+@@ -125,7 +126,20 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
+         metadataMode: profile?.metadataMode ?? 'empty',
+       });
+       await this.avTransport.setStreamUri(local.avTransportControlUrl, sonosUri, metadata);
+-      await this.avTransport.play(local.avTransportControlUrl);
++      try {
++        await this.avTransport.play(local.avTransportControlUrl);
++      } catch (error) {
++        const timeout = error instanceof Error
++          && (error.name === 'TimeoutError'
++            || error.message.toLowerCase().includes('aborted due to timeout'));
++        if (!(profile?.id === 'wav-broadcast'
++          && timeout
++          && this.wavLiveDelivery.has(context.streamId))) {
++          throw error;
++        }
++        context.addDiagnostic(
++          'Sonos Play response timed out after WAV live delivery was already established; preserving the active media stream.',
++          { streamId: context.streamId },
++          'wav_play_timeout_ignored_after_live_delivery'
++        );
++      }
+       context.updateTransport({
+         state: 'bound',
+         targetScope: 'physical-device',
+@@ -146,6 +160,7 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
+       };
+     } catch (error) {
+       this.contexts.delete(context.streamId);
++      this.wavLiveDelivery.delete(context.streamId);
+       await server?.close().catch(() => undefined);
+       throw error;
+     }
+@@ -158,6 +173,7 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
+     try { await this.avTransport.stop(data.controlUrl); } catch (error) { stopError = error; }
+     await data.server.close();
+     this.contexts.delete(data.streamId);
++    this.wavLiveDelivery.delete(data.streamId);
+     if (stopError) throw stopError;
+   }
+
+@@ -197,6 +213,7 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
+       && ((snapshot?.httpClient.connectionCount ?? 0) >= 2 || wav)) {
+       context.updateTransport({ state: 'active', providerPlaybackState: 'STREAMING' }, 'Local Sonos reconnect consumer is receiving aligned AAC audio.');
+       if (wav) {
++        this.wavLiveDelivery.add(streamId);
+         context.addDiagnostic('WAV Sonos stream reached stable live delivery.', {
+           streamId,
+           connectionOrdinal: snapshot?.httpClient.currentConnectionOrdinal ?? null,

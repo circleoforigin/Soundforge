@@ -1,0 +1,129 @@
+diff --git a/server/sonos/SonosLocalAvTransportClient.ts b/server/sonos/SonosLocalAvTransportClient.ts
+--- a/server/sonos/SonosLocalAvTransportClient.ts
++++ b/server/sonos/SonosLocalAvTransportClient.ts
+@@ -17,8 +17,8 @@ export class SonosLocalAvTransportClient {
+       `<InstanceID>0</InstanceID><CurrentURI>${escapeXml(streamUri)}</CurrentURI><CurrentURIMetaData>${escapeXml(metadata)}</CurrentURIMetaData>`);
+   }
+
+-  async play(controlUrl: string): Promise<void> {
+-    await this.action(controlUrl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>');
++  async play(controlUrl: string, options: SonosLocalAvTransportRequestOptions = {}): Promise<void> {
++    await this.action(controlUrl, 'Play', '<InstanceID>0</InstanceID><Speed>1</Speed>', options);
+   }
+
+   async stop(controlUrl: string): Promise<void> {
+@@ -26,17 +26,44 @@ export class SonosLocalAvTransportClient {
+     await this.action(controlUrl, 'Stop', '<InstanceID>0</InstanceID>');
+   }
+
+-  private async action(controlUrl: string, action: string, body: string): Promise<void> {
++  private async action(
++    controlUrl: string,
++    action: string,
++    body: string,
++    options: SonosLocalAvTransportRequestOptions = {}
++  ): Promise<void> {
+     const service = 'urn:schemas-upnp-org:service:AVTransport:1';
+     const envelope = `<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:${action} xmlns:u="${service}">${body}</u:${action}></s:Body></s:Envelope>`;
+-    const response = await fetch(controlUrl, {
+-      method: 'POST', signal: AbortSignal.timeout(5_000),
+-      headers: { 'Content-Type': 'text/xml; charset="utf-8"', SOAPAction: `"${service}#${action}"` },
+-      body: envelope,
+-    });
++    const controller = new AbortController();
++    const timeout = setTimeout(() => controller.abort(), 5_000);
++    let response: Response | null;
++    try {
++      const request = fetch(controlUrl, {
++        method: 'POST',
++        signal: controller.signal,
++        headers: { 'Content-Type': 'text/xml; charset="utf-8"', SOAPAction: `"${service}#${action}"` },
++        body: envelope,
++      });
++      response = options.acceptWhen
++        ? await Promise.race([request, options.acceptWhen.then(() => null)])
++        : await request;
++      if (response === null) {
++        // For WAV, live stream delivery is stronger evidence of successful playback
++        // than waiting for Sonos to finish the SOAP Play response.
++        controller.abort();
++        void request.catch(() => undefined);
++        return;
++      }
++    } finally {
++      clearTimeout(timeout);
++    }
+     if (!response.ok) {
+       const fault = (await response.text()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
+       throw new SonosLocalAvTransportError(response.status, `Sonos local ${action} failed (${response.status})${fault ? `: ${fault}` : ''}`);
+     }
+   }
+ }
++
++interface SonosLocalAvTransportRequestOptions {
++  acceptWhen?: Promise<void>;
++}
+diff --git a/server/sonos/SonosLocalContinuousStreamTransport.ts b/server/sonos/SonosLocalContinuousStreamTransport.ts
+--- a/server/sonos/SonosLocalContinuousStreamTransport.ts
++++ b/server/sonos/SonosLocalContinuousStreamTransport.ts
+@@ -51,6 +51,8 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
+   private readonly discoverLocal: (id: string) => Promise<SonosLocalDevice | undefined>;
+   private readonly avTransport: SonosLocalAvTransportClient;
+   private readonly contexts = new Map<string, ContinuousStreamTransportContext>();
++  private readonly wavStableResolvers = new Map<string, () => void>();
++  private readonly wavStablePromises = new Map<string, Promise<void>>();
+
+   constructor(
+     resolveDevice = resolveSonosAudioDevice,
+@@ -86,6 +88,10 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
+   ): Promise<ContinuousStreamTransportBinding> {
+     this.contexts.set(context.streamId, context);
+     if (context.latencyProfile?.id === 'wav-broadcast') {
++      const stablePromise = new Promise<void>((resolve) => {
++        this.wavStableResolvers.set(context.streamId, resolve);
++      });
++      this.wavStablePromises.set(context.streamId, stablePromise);
+       context.addDiagnostic('WAV Sonos startup attempt began.', {
+         streamId: context.streamId,
+         physicalDeviceIdSuffix: physicalDeviceId.slice(-10),
+@@ -125,7 +131,11 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
+         metadataMode: profile?.metadataMode ?? 'empty',
+       });
+       await this.avTransport.setStreamUri(local.avTransportControlUrl, sonosUri, metadata);
+-      await this.avTransport.play(local.avTransportControlUrl);
++      const stablePromise = this.wavStablePromises.get(context.streamId);
++      await this.avTransport.play(local.avTransportControlUrl,
++        stablePromise ? { acceptWhen: stablePromise } : {});
++      this.wavStableResolvers.delete(context.streamId);
++      this.wavStablePromises.delete(context.streamId);
+       context.updateTransport({
+         state: 'bound',
+         targetScope: 'physical-device',
+@@ -146,6 +155,8 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
+       };
+     } catch (error) {
+       this.contexts.delete(context.streamId);
++      this.wavStableResolvers.delete(context.streamId);
++      this.wavStablePromises.delete(context.streamId);
+       await server?.close().catch(() => undefined);
+       throw error;
+     }
+@@ -158,6 +169,8 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
+     try { await this.avTransport.stop(data.controlUrl); } catch (error) { stopError = error; }
+     await data.server.close();
+     this.contexts.delete(data.streamId);
++    this.wavStableResolvers.delete(data.streamId);
++    this.wavStablePromises.delete(data.streamId);
+     if (stopError) throw stopError;
+   }
+
+@@ -197,6 +210,9 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
+       && ((snapshot?.httpClient.connectionCount ?? 0) >= 2 || wav)) {
+       context.updateTransport({ state: 'active', providerPlaybackState: 'STREAMING' }, 'Local Sonos reconnect consumer is receiving aligned AAC audio.');
+       if (wav) {
++        this.wavStableResolvers.get(streamId)?.();
++        this.wavStableResolvers.delete(streamId);
++        this.wavStablePromises.delete(streamId);
+         context.addDiagnostic('WAV Sonos stream reached stable live delivery.', {
+           streamId,
+           connectionOrdinal: snapshot?.httpClient.currentConnectionOrdinal ?? null,

@@ -11,12 +11,37 @@ import type {
 } from '../audio/transports/ContinuousStreamTransport.ts';
 import { resolveSonosAudioDevice, type ResolvedSonosAudioDevice } from '../research-lab/SonosAudioDeviceDiscovery.ts';
 import { SonosLocalAvTransportClient } from './SonosLocalAvTransportClient.ts';
+import type { SonosLocalAvTransportRequestDiagnostic } from './SonosLocalAvTransportClient.ts';
 import { discoverLocalSonosDevice, type SonosLocalDevice } from './SonosLocalDiscovery.ts';
 import { SonosLocalHttpStreamServer } from './SonosLocalHttpStreamServer.ts';
 import { resolveSonosLocalResearchDevice } from '../research-lab/SonosLocalAudioDeviceDiscovery.ts';
 
 function broadcastMetadata(streamUrl: string, mimeType: string): string {
   return `<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="0" restricted="1"><dc:title>SACscape Latency Lab</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><res protocolInfo="http-get:*:${mimeType}:*">${streamUrl}</res></item></DIDL-Lite>`;
+}
+
+function isTimeoutError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const candidate = error as { name?: unknown; message?: unknown };
+  return candidate.name === 'TimeoutError'
+    || (typeof candidate.message === 'string'
+      && /aborted due to timeout/i.test(candidate.message));
+}
+
+function hasProvenWavLiveDelivery(snapshot: AudioStreamSnapshot | undefined): snapshot is AudioStreamSnapshot {
+  return Boolean(
+    snapshot?.httpClient.connected
+    && snapshot.httpClient.deliveredBytes > 0
+    && snapshot.transport?.state === 'active'
+    && snapshot.transport.providerPlaybackState === 'STREAMING'
+    && snapshot.recentEvents.some((event) => event.code === 'first-live-bytes')
+  );
+}
+
+export const wavUriSettleFastThresholdMs = 500;
+
+export function wavUriSettleDelayMs(setUriElapsedMs: number, configuredDelayMs: number): number {
+  return setUriElapsedMs < wavUriSettleFastThresholdMs ? configuredDelayMs : 0;
 }
 
 interface LocalBindingData {
@@ -123,18 +148,125 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
         uriScheme: profile?.uriScheme ?? 'x-rincon-mp3radio',
         metadataMode: profile?.metadataMode ?? 'empty',
       });
-      await this.avTransport.setStreamUri(local.avTransportControlUrl, sonosUri, metadata);
-      await this.avTransport.play(local.avTransportControlUrl);
+      const recordAvDiagnostic = (diagnostic: SonosLocalAvTransportRequestDiagnostic) =>
+        context.addDiagnostic('Sonos local AVTransport request completed.', {
+          streamId: context.streamId,
+          ...diagnostic,
+        }, 'sonos_local_avtransport_request');
+      let setUriElapsedMs = 0;
+      let playElapsedMs: number | null = null;
+      let playTimedOut = false;
+      let actualDelayBeforePlayMs = 0;
+      const configuredSettleDelayMs = profile?.id === 'wav-broadcast'
+        ? context.wavSettleDelayMs ?? 0
+        : 0;
+      const setUriStartedAt = performance.now();
+      let ignoredSetUriTimeout = false;
+      try {
+        await this.avTransport.setStreamUri(local.avTransportControlUrl, sonosUri, metadata, {
+          onDiagnostic: (diagnostic) => {
+            setUriElapsedMs = diagnostic.elapsedMs;
+            recordAvDiagnostic(diagnostic);
+          },
+        });
+        if (setUriElapsedMs === 0) setUriElapsedMs = performance.now() - setUriStartedAt;
+      } catch (error) {
+        if (setUriElapsedMs === 0) setUriElapsedMs = performance.now() - setUriStartedAt;
+        const snapshot = context.getSnapshot?.();
+        if (profile?.id !== 'wav-broadcast' || !isTimeoutError(error)
+          || !hasProvenWavLiveDelivery(snapshot)) {
+          throw error;
+        }
+        ignoredSetUriTimeout = true;
+        context.addDiagnostic(
+          'Sonos SetAVTransportURI timed out after the WAV media plane had already reached stable live delivery.',
+          {
+            streamId: context.streamId,
+            connectionOrdinal: snapshot.httpClient.currentConnectionOrdinal,
+            deliveredBytes: snapshot.httpClient.deliveredBytes,
+            transportState: snapshot.transport?.state ?? null,
+            providerPlaybackState: snapshot.transport?.providerPlaybackState ?? null,
+          },
+          'wav_set_uri_timeout_ignored_after_live_delivery'
+        );
+      }
+      if (!ignoredSetUriTimeout) {
+        const requestedDelayMs = wavUriSettleDelayMs(setUriElapsedMs, configuredSettleDelayMs);
+        if (requestedDelayMs > 0) {
+          const delayStartedAt = performance.now();
+          await new Promise((resolve) => setTimeout(resolve, requestedDelayMs));
+          actualDelayBeforePlayMs = performance.now() - delayStartedAt;
+        }
+        const beforePlay = context.getSnapshot?.();
+        const playStartedAt = performance.now();
+        try {
+          await this.avTransport.play(local.avTransportControlUrl, {
+            onDiagnostic: (diagnostic) => {
+              playElapsedMs = diagnostic.elapsedMs;
+              playTimedOut = diagnostic.timedOut;
+              recordAvDiagnostic(diagnostic);
+            },
+          });
+          if (playElapsedMs === null) playElapsedMs = performance.now() - playStartedAt;
+        } catch (error) {
+          if (playElapsedMs === null) playElapsedMs = performance.now() - playStartedAt;
+          playTimedOut = isTimeoutError(error);
+          if (profile?.id === 'wav-broadcast') {
+            context.addDiagnostic('WAV URI settle-delay experiment completed.', {
+              streamId: context.streamId, setUriElapsedMs,
+              fastThresholdMs: wavUriSettleFastThresholdMs,
+              classifiedFast: setUriElapsedMs < wavUriSettleFastThresholdMs,
+              configuredSettleDelayMs, actualDelayBeforePlayMs,
+              playElapsedMs, playTimedOut,
+              httpConsumerConnectedBeforePlay: beforePlay?.httpClient.connected ?? false,
+              firstLiveBytesBeforePlay: beforePlay?.recentEvents.some(
+                (event) => event.code === 'first-live-bytes') ?? false,
+            }, 'wav_uri_settle_experiment');
+          }
+          throw error;
+        }
+        if (profile?.id === 'wav-broadcast') {
+          context.addDiagnostic('WAV URI settle-delay experiment completed.', {
+            streamId: context.streamId, setUriElapsedMs,
+            fastThresholdMs: wavUriSettleFastThresholdMs,
+            classifiedFast: setUriElapsedMs < wavUriSettleFastThresholdMs,
+            configuredSettleDelayMs, actualDelayBeforePlayMs,
+            playElapsedMs, playTimedOut,
+            httpConsumerConnectedBeforePlay: beforePlay?.httpClient.connected ?? false,
+            firstLiveBytesBeforePlay: beforePlay?.recentEvents.some(
+              (event) => event.code === 'first-live-bytes') ?? false,
+          }, 'wav_uri_settle_experiment');
+        }
+      }
+      if (ignoredSetUriTimeout) {
+        const snapshot = context.getSnapshot?.();
+        context.addDiagnostic('WAV URI settle-delay experiment completed without Play.', {
+          streamId: context.streamId, setUriElapsedMs,
+          fastThresholdMs: wavUriSettleFastThresholdMs,
+          classifiedFast: setUriElapsedMs < wavUriSettleFastThresholdMs,
+          configuredSettleDelayMs, actualDelayBeforePlayMs,
+          playElapsedMs, playTimedOut,
+          httpConsumerConnectedBeforePlay: snapshot?.httpClient.connected ?? false,
+          firstLiveBytesBeforePlay: snapshot?.recentEvents.some(
+            (event) => event.code === 'first-live-bytes') ?? false,
+        }, 'wav_uri_settle_experiment');
+      }
+      const ignoredControlTimeout = ignoredSetUriTimeout;
+      const provenSnapshot = ignoredControlTimeout ? context.getSnapshot?.() : undefined;
       context.updateTransport({
-        state: 'bound',
+        state: provenSnapshot?.transport?.state === 'active' ? 'active' : 'bound',
         targetScope: 'physical-device',
         targetDescription,
         independentlyTargetable: true,
         bound: true,
         hasBinding: true,
-        providerPlaybackState: 'PLAY_REQUESTED',
+        providerPlaybackState: ignoredControlTimeout
+          ? provenSnapshot?.transport?.providerPlaybackState ?? 'STREAMING'
+          : 'PLAY_REQUESTED',
         lastError: null,
-      }, 'Sonos local AVTransport accepted the stream URI and Play command.');
+      }, ignoredControlTimeout
+        ? `WAV media delivery remained active after a nonfatal Sonos ${ignoredSetUriTimeout ? 'SetAVTransportURI' : 'Play'} timeout.`
+        : 'Sonos local AVTransport accepted the stream URI and Play command.');
       return {
         transportId: this.id,
         targetScope: 'physical-device',
@@ -151,8 +283,17 @@ export class SonosLocalContinuousStreamTransport implements ContinuousStreamTran
 
   async stop(binding: ContinuousStreamTransportBinding): Promise<void> {
     const data = binding.providerBinding as LocalBindingData;
+    const context = this.contexts.get(data.streamId);
     let stopError: unknown;
-    try { await this.avTransport.stop(data.controlUrl); } catch (error) { stopError = error; }
+    try {
+      await this.avTransport.stop(data.controlUrl, {
+        onDiagnostic: context ? (diagnostic) => context.addDiagnostic(
+          'Sonos local AVTransport request completed.',
+          { streamId: data.streamId, ...diagnostic },
+          'sonos_local_avtransport_request'
+        ) : undefined,
+      });
+    } catch (error) { stopError = error; }
     await data.server.close();
     this.contexts.delete(data.streamId);
     if (stopError) throw stopError;

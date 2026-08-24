@@ -2952,3 +2952,17 @@ body,
   margin: 0;
   color: #a9abb2;
 }
+
+.project-activation-status {
+  align-items: center;
+  color: #c8cad0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: center;
+  min-height: 180px;
+}
+
+.project-picker-item.preferred {
+  border-color: #7889a8;
+}

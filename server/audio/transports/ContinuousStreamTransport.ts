@@ -16,12 +16,14 @@ export interface ContinuousStreamTransportContext {
   streamId: string;
   streamUrl: string;
   latencyProfile?: SonosLatencyExperimentProfile;
+  wavSettleDelayMs?: number;
   bindHttpClient(
     client: Writable & { destroyed: boolean; writableEnded: boolean; writableLength: number },
     metadata?: HttpStreamConnectionMetadata
   ): void;
   updateTransport(update: Partial<AudioStreamTransportSnapshot>, message?: string): void;
   addDiagnostic(message: string, details?: Record<string, unknown>, code?: string): void;
+  getSnapshot?(): AudioStreamSnapshot | undefined;
   terminate(reason: string): void;
 }
 

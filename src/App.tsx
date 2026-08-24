@@ -2,6 +2,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react';
 import type { SoundAsset } from './models/SoundAsset';
 import './App.css';
@@ -37,6 +38,12 @@ import { localSoundLibrary } from './services/library/browser/LocalSoundLibraryS
 import { roomAudioEngine } from './audio/RoomAudioEngine';
 
 function App() {
+  type ProjectActivationPhase =
+    | 'idle'
+    | 'selecting-room'
+    | 'connecting-room'
+    | 'selecting-scene'
+    | 'creating-scene';
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [savedProjects, setSavedProjects] = useState<Project[]>([]);
@@ -51,6 +58,10 @@ function App() {
   const [notification, setNotification] = useState<string | null>(null);
   const [currentSceneInstanceId, setCurrentSceneInstanceId] =
     useState<string | null>(null);
+  const [projectActivationPhase, setProjectActivationPhase] =
+    useState<ProjectActivationPhase>('idle');
+  const [preferredSceneInstanceId, setPreferredSceneInstanceId] =
+    useState<string | null>(null);
   const [importingSound, setImportingSound] = useState(false);
   const [libraryFolderConfigured, setLibraryFolderConfigured] =
     useState(false);
@@ -60,6 +71,7 @@ function App() {
   const [transitionInProgress, setTransitionInProgress] = useState(false);
   const transitionInProgressRef = useRef(false);
   const transitionRunIdRef = useRef(0);
+  const roomActivationRunIdRef = useRef(0);
   const [projectRuntimeKey, setProjectRuntimeKey] = useState(0);
   const [newProjectName, setNewProjectName] = useState('');
   const [showNewSceneDialog, setShowNewSceneDialog] = useState(false);
@@ -71,7 +83,7 @@ function App() {
   const [soundObjectTemplates] =
     useState<SoundObjectTemplate[]>([]);
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
-  const [customRooms, setCustomRooms] =  useState<Room[]>([]);
+  const [customRooms, setCustomRooms] = useState<Room[]>(() => roomRepository.loadRooms());
   const availableRooms: Room[] = [
     headphonesRoom,
     ...customRooms,
@@ -86,10 +98,14 @@ function App() {
   const [showDiagnosticLog, setShowDiagnosticLog] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [speakerMaps, setSpeakerMaps] = useState<SpeakerMap[]>([]);
+  const [speakerMaps, setSpeakerMaps] = useState<SpeakerMap[]>(
+    () => speakerMapRepository.loadSpeakerMaps()
+  );
   const activeSpeakerMap: SpeakerMap =
     speakerMaps.find((speakerMap) => speakerMap.id === activeRoom?.speakerMapId) ??
     headphonesSpeakerMap;
+  useSyncExternalStore(roomAudioEngine.subscribe, roomAudioEngine.getVersion);
+  const roomAudioStatus = roomAudioEngine.getStatus();
   
 useEffect(() => {
   async function loadSoundLibrary() {
@@ -135,19 +151,6 @@ async function handleSettingsChange(settings: AppSettings) {
     setNotification('Unable to save application settings.');
   } finally { setSavingSettings(false); }
 }
-
-useEffect(() => {
-  setCustomRooms(
-    roomRepository.loadRooms()
-  );
-}, []);
-
-useEffect(() => {
-  setSpeakerMaps(
-    speakerMapRepository
-      .loadSpeakerMaps()
-  );
-}, []);
 
   const currentScene =
     activeProject?.scenes.find(
@@ -247,11 +250,15 @@ useEffect(() => {
     }
 
     transitionRunIdRef.current += 1;
+    roomActivationRunIdRef.current += 1;
     transitionInProgressRef.current = false;
     setTransitionInProgress(false);
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
     setDirtySceneIds(new Set());
+    setProjectActivationPhase('idle');
+    setPreferredSceneInstanceId(null);
+    setShowNewSceneDialog(false);
     setProjectRuntimeKey((current) => current + 1);
   }
 
@@ -298,26 +305,36 @@ useEffect(() => {
       room.id === project.activeRoomId
     ) ?? null;
 
-    const activeSceneId =
+    const preferredSceneId =
       project.scenes.some(
         (scene) =>
           scene.instanceId ===
           project.activeSceneInstanceId
       )
         ? project.activeSceneInstanceId ?? null
-        : project.scenes[0]?.instanceId ?? null;
+        : null;
 
     setActiveProject({
       ...project,
       activeRoomId:
         restoredRoom?.id,
     });
-    setCurrentSceneInstanceId(activeSceneId);
+    setCurrentSceneInstanceId(null);
+    setPreferredSceneInstanceId(preferredSceneId);
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
     setActiveRoom(restoredRoom);
     setDirtySceneIds(new Set());
     setShowProjectPicker(false);
+    if (restoredRoom) {
+      const restoredSpeakerMap =
+        speakerMapRepository.loadSpeakerMaps().find(
+          (speakerMap) => speakerMap.id === restoredRoom.speakerMapId
+        ) ?? headphonesSpeakerMap;
+      beginRoomActivation(project, restoredRoom, restoredSpeakerMap);
+    } else {
+      setProjectActivationPhase('selecting-room');
+    }
   }
 
   function handleLoadProject(
@@ -329,7 +346,11 @@ useEffect(() => {
   }
 
   function handleNewScene() {
-    if (!activeProject) {
+    if (
+      !activeProject ||
+      roomAudioStatus.state !== 'ready' ||
+      projectActivationPhase !== 'idle'
+    ) {
       return;
     }
 
@@ -425,6 +446,8 @@ useEffect(() => {
 
     setActiveProject(newProject);
     setCurrentSceneInstanceId(null);
+    setPreferredSceneInstanceId(null);
+    setProjectActivationPhase('selecting-room');
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
     setActiveRoom(null);
@@ -517,6 +540,7 @@ useEffect(() => {
     setCurrentSceneInstanceId(
       newInstance.instanceId
     );
+    setProjectActivationPhase('idle');
 
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
@@ -764,6 +788,10 @@ useEffect(() => {
   ) {
     if (roomId === null) {
       handleActiveRoomChange(null);
+      if (activeProject) {
+        setCurrentSceneInstanceId(null);
+        setProjectActivationPhase('selecting-room');
+      }
       return;
     }
 
@@ -778,6 +806,55 @@ useEffect(() => {
     }
 
     handleActiveRoomChange(room);
+    if (activeProject) {
+      setCurrentSceneInstanceId(null);
+      setTransitionTargetInstanceId(null);
+      setPreviewingTarget(false);
+      const selectedSpeakerMap =
+        speakerMaps.find((speakerMap) => speakerMap.id === room.speakerMapId) ??
+        speakerMapRepository.loadSpeakerMaps().find(
+          (speakerMap) => speakerMap.id === room.speakerMapId
+        ) ?? headphonesSpeakerMap;
+      beginRoomActivation(activeProject, room, selectedSpeakerMap);
+    }
+  }
+
+  function beginRoomActivation(
+    project: Project,
+    room: Room,
+    speakerMap: SpeakerMap
+  ) {
+    const runId = ++roomActivationRunIdRef.current;
+    setProjectActivationPhase('connecting-room');
+    void roomAudioEngine.configure(room, speakerMap).then(() => {
+      if (
+        runId !== roomActivationRunIdRef.current ||
+        roomAudioEngine.getStatus().state !== 'ready'
+      ) {
+        return;
+      }
+
+      if (project.scenes.length === 0) {
+        setProjectActivationPhase('creating-scene');
+        setShowNewSceneDialog(true);
+      } else {
+        setProjectActivationPhase('selecting-scene');
+      }
+    });
+  }
+
+  function handleActivateScene(instanceId: string) {
+    if (
+      projectActivationPhase !== 'selecting-scene' ||
+      roomAudioStatus.state !== 'ready' ||
+      !activeProject?.scenes.some((scene) => scene.instanceId === instanceId)
+    ) {
+      return;
+    }
+
+    setCurrentSceneInstanceId(instanceId);
+    setPreferredSceneInstanceId(instanceId);
+    setProjectActivationPhase('idle');
   }
 
   return (
@@ -793,6 +870,11 @@ useEffect(() => {
         onManageRooms={handleManageRooms}
         onOpenSettings={() => setShowSettings(true)}
         onOpenResearchLab={() => setShowResearchLab(true)}
+        sceneActionsEnabled={
+          Boolean(activeProject) &&
+          roomAudioStatus.state === 'ready' &&
+          projectActivationPhase === 'idle'
+        }
 
         rooms={availableRooms}
         activeRoomId={activeRoom?.id ?? null}
@@ -804,6 +886,30 @@ useEffect(() => {
           'No Room Selected'
         }
       />
+
+      {activeProject && !currentScene && projectActivationPhase !== 'selecting-room' && (
+        <div className="project-activation-status" role="status">
+          <strong>{activeRoom?.name ?? 'Room'}</strong>
+          <span>
+            {projectActivationPhase === 'connecting-room'
+              ? roomAudioStatus.state === 'error' || roomAudioStatus.state === 'degraded'
+                ? roomAudioStatus.message || 'Unable to activate Room.'
+                : 'Connecting Room audio…'
+              : roomAudioStatus.state === 'ready'
+                ? 'Room Ready'
+                : roomAudioStatus.message}
+          </span>
+          {projectActivationPhase === 'connecting-room' &&
+            (roomAudioStatus.state === 'error' || roomAudioStatus.state === 'degraded') && (
+            <button onClick={() => {
+              roomActivationRunIdRef.current += 1;
+              setProjectActivationPhase('selecting-room');
+            }}>
+              Choose Another Room
+            </button>
+          )}
+        </div>
+      )}
 
       {displayedScene && (
         <SceneWorkspace
@@ -917,6 +1023,47 @@ useEffect(() => {
         </div>
       )}
 
+      {activeProject && projectActivationPhase === 'selecting-room' && (
+        <div className="dialog-backdrop">
+          <div className="dialog">
+            <h2>Select Room</h2>
+            <p>Choose a Room before opening a Scene.</p>
+            <div className="project-picker-list">
+              {availableRooms.map((room) => (
+                <button
+                  key={room.id}
+                  className="project-picker-item"
+                  onClick={() => handleSelectRoom(room.id)}
+                >
+                  {room.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeProject && projectActivationPhase === 'selecting-scene' && (
+        <div className="dialog-backdrop">
+          <div className="dialog">
+            <h2>Select Scene</h2>
+            <p>Room Ready. Choose a Scene to open.</p>
+            <div className="project-picker-list">
+              {activeProject.scenes.map((scene) => (
+                <button
+                  key={scene.instanceId}
+                  className={`project-picker-item${scene.instanceId === preferredSceneInstanceId ? ' preferred' : ''}`}
+                  onClick={() => handleActivateScene(scene.instanceId)}
+                >
+                  {scene.instanceName}
+                  {scene.instanceId === preferredSceneInstanceId ? ' — Last active' : ''}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {showUnsavedChangesDialog && (
         <div className="dialog-backdrop unsaved-changes-backdrop">
           <div className="dialog">
@@ -972,9 +1119,10 @@ useEffect(() => {
 
             <div className="dialog-buttons">
               <button
-                onClick={() =>
-                  setShowNewSceneDialog(false)
-                }
+                onClick={() => {
+                  setShowNewSceneDialog(false);
+                  setProjectActivationPhase('idle');
+                }}
               >
                 Cancel
               </button>

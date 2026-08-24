@@ -83,11 +83,12 @@ export function registerResearchLabStreamRoute(
   });
 
   app.post('/api/research-lab/streams', json(), async (request, response) => {
-    const { deviceId, transportId, httpFramingMode, latencyProfileId } = request.body as {
+    const { deviceId, transportId, httpFramingMode, latencyProfileId, wavSettleDelayMs } = request.body as {
       deviceId?: unknown;
       transportId?: unknown;
       httpFramingMode?: unknown;
       latencyProfileId?: unknown;
+      wavSettleDelayMs?: unknown;
     };
     if (typeof deviceId !== 'string' || typeof transportId !== 'string') {
       response.status(400).json({
@@ -107,6 +108,12 @@ export function registerResearchLabStreamRoute(
       response.status(400).json({ ok: false, message: 'latencyProfileId must be a string.' });
       return;
     }
+    const allowedWavSettleDelays = [0, 250, 500, 1_000, 2_000, 3_000];
+    if (wavSettleDelayMs !== undefined
+      && (typeof wavSettleDelayMs !== 'number' || !allowedWavSettleDelays.includes(wavSettleDelayMs))) {
+      response.status(400).json({ ok: false, message: 'Unknown WAV settle delay.' });
+      return;
+    }
     try {
       const baseUrl = getPublicBaseUrl(request);
       const stream = await service.start(
@@ -114,7 +121,8 @@ export function registerResearchLabStreamRoute(
         transportId,
         (streamId) => `${baseUrl}/api/research-lab/streams/${encodeURIComponent(streamId)}/live.mp3`,
         httpFramingMode ?? 'chunked',
-        latencyProfileId as string | undefined
+        latencyProfileId as string | undefined,
+        wavSettleDelayMs as number | undefined
       );
       response.status(201).json({ ok: true, stream });
     } catch (error) {
