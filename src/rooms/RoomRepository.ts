@@ -1,95 +1,140 @@
-import type { Room } from '../models/Room';
+import type {
+  Room,
+} from '../models/Room';
 
 import {
   localStorageService,
 } from '../storage/LocalStorageService';
 
+import {
+  hostedCollectionRepository,
+} from '../host/HostedCollectionRepository';
+
 const ROOMS_KEY = 'rooms';
+const ROOMS_COLLECTION = 'rooms';
 
-export class RoomRepository {
-  loadRooms(): Room[] {
-  const rooms =
-    localStorageService.get<Room[]>(
-      ROOMS_KEY,
-      []
-    );
+function normalizeRoom(
+  room: Room
+): Room {
+  return {
+    ...room,
 
-  if (!Array.isArray(rooms)) {
-    return [];
-  }
+    speakers: Array.isArray(room.speakers)
+      ? room.speakers.map(
+          (speaker, index) => ({
+            ...speaker,
 
-  const normalizedRooms =
-    rooms.map((room) => ({
-      ...room,
-
-      speakers: room.speakers.map(
-        (speaker, index) => ({
-          ...speaker,
-
-          name:
-            speaker.name ??
-            `Speaker ${index + 1}`,
-        })
-      ),
-    }));
-
-  return normalizedRooms;
+            name:
+              speaker.name ??
+              `Speaker ${index + 1}`,
+          })
+        )
+      : [],
+  };
 }
 
-  saveRooms(
-    rooms: Room[]
-  ): void {
-    localStorageService.set(
-      ROOMS_KEY,
-      rooms
-    );
-  }
+export class RoomRepository {
+  async loadRooms(): Promise<Room[]> {
+    if (
+      hostedCollectionRepository.hosted
+    ) {
+      const rooms =
+        await hostedCollectionRepository
+          .loadAll<Room>(
+            ROOMS_COLLECTION
+          );
 
-  saveRoom(
-    room: Room
-  ): Room[] {
-    const rooms =
-      this.loadRooms();
-
-    const existingIndex =
-      rooms.findIndex(
-        (candidate) =>
-          candidate.id === room.id
-      );
-
-    let updatedRooms: Room[];
-
-    if (existingIndex >= 0) {
-      updatedRooms =
-        rooms.map((candidate) =>
-          candidate.id === room.id
-            ? room
-            : candidate
-        );
-    } else {
-      updatedRooms = [
-        ...rooms,
-        room,
-      ];
+      return Array.isArray(rooms)
+        ? rooms.map(normalizeRoom)
+        : [];
     }
 
-    this.saveRooms(
+    const rooms =
+      localStorageService.get<Room[]>(
+        ROOMS_KEY,
+        []
+      );
+
+    return Array.isArray(rooms)
+      ? rooms.map(normalizeRoom)
+      : [];
+  }
+
+  async saveRoom(
+    room: Room
+  ): Promise<Room[]> {
+    const normalizedRoom =
+      normalizeRoom(room);
+
+    if (
+      hostedCollectionRepository.hosted
+    ) {
+      await hostedCollectionRepository.save(
+        ROOMS_COLLECTION,
+        normalizedRoom.id,
+        normalizedRoom
+      );
+
+      return this.loadRooms();
+    }
+
+    const rooms =
+      await this.loadRooms();
+
+    const exists =
+      rooms.some(
+        (candidate) =>
+          candidate.id ===
+          normalizedRoom.id
+      );
+
+    const updatedRooms =
+      exists
+        ? rooms.map(
+            (candidate) =>
+              candidate.id ===
+              normalizedRoom.id
+                ? normalizedRoom
+                : candidate
+          )
+        : [
+            ...rooms,
+            normalizedRoom,
+          ];
+
+    localStorageService.set(
+      ROOMS_KEY,
       updatedRooms
     );
 
     return updatedRooms;
   }
 
-  deleteRoom(
+  async deleteRoom(
     roomId: string
-  ): Room[] {
+  ): Promise<Room[]> {
+    if (
+      hostedCollectionRepository.hosted
+    ) {
+      await hostedCollectionRepository.delete(
+        ROOMS_COLLECTION,
+        roomId
+      );
+
+      return this.loadRooms();
+    }
+
+    const rooms =
+      await this.loadRooms();
+
     const updatedRooms =
-      this.loadRooms().filter(
+      rooms.filter(
         (room) =>
           room.id !== roomId
       );
 
-    this.saveRooms(
+    localStorageService.set(
+      ROOMS_KEY,
       updatedRooms
     );
 

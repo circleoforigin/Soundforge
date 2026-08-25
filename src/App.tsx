@@ -77,7 +77,7 @@ function App() {
   const [soundObjectTemplates] =
     useState<SoundObjectTemplate[]>([]);
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
-  const [customRooms, setCustomRooms] = useState<Room[]>(() => roomRepository.loadRooms());
+const [customRooms, setCustomRooms] = useState<Room[]>([]);
   const availableRooms: Room[] = [
     headphonesRoom,
     ...customRooms,
@@ -90,9 +90,8 @@ function App() {
   const [showDiagnosticLog, setShowDiagnosticLog] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [speakerMaps, setSpeakerMaps] = useState<SpeakerMap[]>(
-    () => speakerMapRepository.loadSpeakerMaps()
-  );
+  const [speakerMaps, setSpeakerMaps] =
+    useState<SpeakerMap[]>([]);
   const activeSpeakerMap: SpeakerMap =
     speakerMaps.find((speakerMap) => speakerMap.id === activeRoom?.speakerMapId) ??
     headphonesSpeakerMap;
@@ -127,6 +126,59 @@ useEffect(() => {
     .then((response) => response.ok ? response.json() as Promise<AppSettings> : Promise.reject())
     .then(setAppSettings)
     .catch(() => undefined);
+}, []);
+
+useEffect(() => {
+  async function loadRooms() {
+    try {
+      const rooms =
+        await roomRepository.loadRooms();
+
+      setCustomRooms(rooms);
+    } catch (error) {
+      console.error(
+        'Unable to load rooms:',
+        error
+      );
+
+      setNotification(
+        'Unable to load rooms.'
+      );
+
+      setTimeout(() => {
+        setNotification(null);
+      }, 3000);
+    }
+  }
+
+  void loadRooms();
+}, []);
+
+useEffect(() => {
+  async function loadSpeakerMaps() {
+    try {
+      const maps =
+        await speakerMapRepository
+          .loadSpeakerMaps();
+
+      setSpeakerMaps(maps);
+    } catch (error) {
+      console.error(
+        'Unable to load speaker maps:',
+        error
+      );
+
+      setNotification(
+        'Unable to load speaker maps.'
+      );
+
+      setTimeout(() => {
+        setNotification(null);
+      }, 3000);
+    }
+  }
+
+  void loadSpeakerMaps();
 }, []);
 
 async function handleSettingsChange(settings: AppSettings) {
@@ -696,17 +748,36 @@ async function handleSettingsChange(settings: AppSettings) {
     setShowRoomManager(true);
   }
 
-  function handleCreateRoom(): Room {
-    const newRoom = createDefaultRoom();
-    setCustomRooms(roomRepository.saveRoom(newRoom));
-    return newRoom;
-  }
+  async function handleCreateRoom(): Promise<Room> {
+  const newRoom =
+    createDefaultRoom();
 
-  function handleDeleteRoom(roomId: string) {
-    const updatedRooms = roomRepository.deleteRoom(roomId);
-    setCustomRooms(updatedRooms);
-    if (activeRoom?.id === roomId) handleSelectRoom(null);
+  const updatedRooms =
+    await roomRepository.saveRoom(
+      newRoom
+    );
+
+  setCustomRooms(
+    updatedRooms
+  );
+
+  return newRoom;
+}
+
+  async function handleDeleteRoom(
+  roomId: string
+): Promise<void> {
+  const updatedRooms =
+    await roomRepository.deleteRoom(
+      roomId
+    );
+
+  setCustomRooms(updatedRooms);
+
+  if (activeRoom?.id === roomId) {
+    handleSelectRoom(null);
   }
+}
 
   const refreshSpeakerMap = activeRoom
     ? activeRoom.id === headphonesRoom.id
@@ -792,11 +863,12 @@ async function handleSettingsChange(settings: AppSettings) {
       setShowNewSceneDialog(activeProject.scenes.length === 0);
       setTransitionTargetInstanceId(null);
       setPreviewingTarget(false);
-      const selectedSpeakerMap = speakerMaps.find(
-        (speakerMap) => speakerMap.id === room.speakerMapId
-      ) ?? speakerMapRepository.loadSpeakerMaps().find(
-        (speakerMap) => speakerMap.id === room.speakerMapId
-      ) ?? headphonesSpeakerMap;
+      const selectedSpeakerMap =
+  speakerMaps.find(
+    (speakerMap) =>
+      speakerMap.id ===
+      room.speakerMapId
+  ) ?? headphonesSpeakerMap;
       void roomAudioEngine.configure(room, selectedSpeakerMap).catch((error: unknown) => {
         console.error('Room activation failed.', error);
       });
@@ -898,42 +970,6 @@ async function handleSettingsChange(settings: AppSettings) {
         <div className="dialog-backdrop">
           <div className="dialog">
             <h2>New Project</h2>
-
-<button
-  onClick={async () => {
-    try {
-      const result =
-        await hostedCollectionRepository
-          .loadAll('test');
-
-      console.log(
-        'Shared bus storage result:',
-        result
-      );
-
-      alert(
-        JSON.stringify(
-          result,
-          null,
-          2
-        )
-      );
-    } catch (error) {
-      console.error(
-        'Shared bus storage test failed:',
-        error
-      );
-
-      alert(
-        error instanceof Error
-          ? error.message
-          : 'Storage test failed.'
-      );
-    }
-  }}
->
-  Test Shared Storage Bus
-</button>
 
             <input
               type="text"
@@ -1134,33 +1170,35 @@ async function handleSettingsChange(settings: AppSettings) {
           onDeleteRoom={handleDeleteRoom}
           onCreateRoom={handleCreateRoom}
 
-          onSaveRoom={(updatedRoom) => {
-            const updatedRooms =
-              roomRepository.saveRoom(
-                updatedRoom
-              );
+          onSaveRoom={async (updatedRoom) => {
+  const updatedRooms =
+    await roomRepository.saveRoom(
+      updatedRoom
+    );
 
-            setCustomRooms(updatedRooms);
+  setCustomRooms(updatedRooms);
 
-            if (
-              activeRoom?.id ===
-              updatedRoom.id
-            ) {
-              handleActiveRoomChange(
-                updatedRoom
-              );
-            }
-          }}
+  if (
+    activeRoom?.id ===
+    updatedRoom.id
+  ) {
+    handleActiveRoomChange(
+      updatedRoom
+    );
+  }
+}}
           
-          onSaveSpeakerMap={(speakerMap) => {
-            const updatedMaps =
-              speakerMapRepository
-                .saveSpeakerMap(
-                speakerMap
-              );
+          onSaveSpeakerMap={async (speakerMap) => {
+  const updatedMaps =
+    await speakerMapRepository
+      .saveSpeakerMap(
+        speakerMap
+      );
 
-            setSpeakerMaps(updatedMaps);
-          }}
+  setSpeakerMaps(
+    updatedMaps
+  );
+}}
         />
       )}
 

@@ -1,15 +1,45 @@
-import type { SpeakerMap } from '../models/SpeakerMap';
-import { normalizeSpeakerMap } from './SpeakerMapNormalization';
+import type {
+  SpeakerMap,
+} from '../models/SpeakerMap';
+
+import {
+  normalizeSpeakerMap,
+} from './SpeakerMapNormalization';
 
 import {
   localStorageService,
 } from '../storage/LocalStorageService';
 
+import {
+  hostedCollectionRepository,
+} from '../host/HostedCollectionRepository';
+
 const SPEAKER_MAPS_KEY =
   'speakerMaps';
 
+const SPEAKER_MAPS_COLLECTION =
+  'speakerMaps';
+
 export class SpeakerMapRepository {
-  loadSpeakerMaps(): SpeakerMap[] {
+  async loadSpeakerMaps(): Promise<SpeakerMap[]> {
+    if (
+      hostedCollectionRepository.hosted
+    ) {
+      const maps =
+        await hostedCollectionRepository
+          .loadAll<SpeakerMap>(
+            SPEAKER_MAPS_COLLECTION
+          );
+
+      if (!Array.isArray(maps)) {
+        return [];
+      }
+
+      return maps.map(
+        normalizeSpeakerMap
+      );
+    }
+
     const maps =
       localStorageService.get<
         SpeakerMap[]
@@ -22,66 +52,104 @@ export class SpeakerMapRepository {
       return [];
     }
 
-    const normalizedMaps = maps.map(normalizeSpeakerMap);
+    const normalizedMaps =
+      maps.map(
+        normalizeSpeakerMap
+      );
 
-    if (maps.some((map) => !map.spatialOutputMode)) {
-      this.saveSpeakerMaps(normalizedMaps);
+    if (
+      maps.some(
+        (map) =>
+          !map.spatialOutputMode
+      )
+    ) {
+      localStorageService.set(
+        SPEAKER_MAPS_KEY,
+        normalizedMaps
+      );
     }
 
     return normalizedMaps;
   }
 
-  saveSpeakerMaps(
-    maps: SpeakerMap[]
-  ): void {
-    localStorageService.set(
-      SPEAKER_MAPS_KEY,
-      maps
-    );
-  }
-
-  saveSpeakerMap(
+  async saveSpeakerMap(
     speakerMap: SpeakerMap
-  ): SpeakerMap[] {
-    const normalizedSpeakerMap = normalizeSpeakerMap(speakerMap);
+  ): Promise<SpeakerMap[]> {
+    const normalizedSpeakerMap =
+      normalizeSpeakerMap(
+        speakerMap
+      );
+
+    if (
+      hostedCollectionRepository.hosted
+    ) {
+      await hostedCollectionRepository.save(
+        SPEAKER_MAPS_COLLECTION,
+        normalizedSpeakerMap.id,
+        normalizedSpeakerMap
+      );
+
+      return this.loadSpeakerMaps();
+    }
+
     const maps =
-      this.loadSpeakerMaps();
+      await this.loadSpeakerMaps();
 
     const exists =
       maps.some(
         (map) =>
-          map.id === normalizedSpeakerMap.id
+          map.id ===
+          normalizedSpeakerMap.id
       );
 
     const updatedMaps =
       exists
-        ? maps.map((map) =>
-            map.id === normalizedSpeakerMap.id
-              ? normalizedSpeakerMap
-              : map
+        ? maps.map(
+            (map) =>
+              map.id ===
+              normalizedSpeakerMap.id
+                ? normalizedSpeakerMap
+                : map
           )
         : [
             ...maps,
             normalizedSpeakerMap,
           ];
 
-    this.saveSpeakerMaps(
+    localStorageService.set(
+      SPEAKER_MAPS_KEY,
       updatedMaps
     );
 
     return updatedMaps;
   }
 
-  deleteSpeakerMap(
+  async deleteSpeakerMap(
     speakerMapId: string
-  ): SpeakerMap[] {
-    const updatedMaps =
-      this.loadSpeakerMaps().filter(
-        (map) =>
-          map.id !== speakerMapId
+  ): Promise<SpeakerMap[]> {
+    if (
+      hostedCollectionRepository.hosted
+    ) {
+      await hostedCollectionRepository.delete(
+        SPEAKER_MAPS_COLLECTION,
+        speakerMapId
       );
 
-    this.saveSpeakerMaps(
+      return this.loadSpeakerMaps();
+    }
+
+    const maps =
+      await this.loadSpeakerMaps();
+
+    const updatedMaps =
+      maps.filter(
+        (map) =>
+          map.id !==
+          speakerMapId
+      );
+
+    localStorageService.set(
+      SPEAKER_MAPS_KEY,
       updatedMaps
     );
 

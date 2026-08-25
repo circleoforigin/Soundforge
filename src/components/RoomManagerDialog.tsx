@@ -21,10 +21,18 @@ interface RoomManagerDialogProps {
 
   onClose: () => void;
   onSelectRoom: (roomId: string | null) => void;
-  onCreateRoom: () => Room;
-  onDeleteRoom: (roomId: string) => void;
-  onSaveRoom: (room: Room) => void;
-  onSaveSpeakerMap: (speakerMap: SpeakerMap) => void;
+  onCreateRoom: () => Promise<Room>;
+
+onDeleteRoom: (
+  roomId: string
+) => Promise<void>;
+
+onSaveRoom: (
+  room: Room
+) => Promise<void>;
+ onSaveSpeakerMap: (
+  speakerMap: SpeakerMap
+) => Promise<void>;
 }
 
 type RoomShape =
@@ -340,17 +348,36 @@ function RoomManagerDialog({
     if (room) handleChooseRoom(room);
   }
 
-  function handleCreateRoom() {
-    const room = onCreateRoom();
-    setSelectedRoomId(room.id);
+  async function handleCreateRoom() {
+  const room =
+    await onCreateRoom();
+
+  setSelectedRoomId(
+    room.id
+  );
+}
+
+  async function handleDeleteSelectedRoom() {
+  const room = rooms.find(
+    (candidate) =>
+      candidate.id === selectedRoomId
+  );
+
+  if (
+    !room ||
+    !window.confirm(
+      `Delete "${room.name}"? This cannot be undone.`
+    )
+  ) {
+    return;
   }
 
-  function handleDeleteSelectedRoom() {
-    const room = rooms.find((candidate) => candidate.id === selectedRoomId);
-    if (!room || !window.confirm(`Delete "${room.name}"? This cannot be undone.`)) return;
-    onDeleteRoom(room.id);
-    setSelectedRoomId(null);
-  }
+  await onDeleteRoom(
+    room.id
+  );
+
+  setSelectedRoomId(null);
+}
 
   function handleBack() {
   setDraftRoom(null);
@@ -358,7 +385,7 @@ function RoomManagerDialog({
   setActiveTab('features');
 }
 
-  function handleSave() {
+  async function handleSave() {
   if (!draftRoom) {
     return;
   }
@@ -372,7 +399,7 @@ function RoomManagerDialog({
       updatedAt: new Date(),
     };
 
-    onSaveSpeakerMap(
+    await onSaveSpeakerMap(
       updatedMap
     );
 
@@ -383,7 +410,7 @@ function RoomManagerDialog({
     };
   }
 
-  onSaveRoom(roomToSave);
+  await onSaveRoom(roomToSave);
 
   setDraftRoom(null);
   setDraftSpeakerMap(null);
