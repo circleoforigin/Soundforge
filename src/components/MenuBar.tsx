@@ -4,24 +4,26 @@ import {
   useState,
 } from 'react';
 
-import type { Room } from '../models/Room';
-
 interface MenuBarProps {
   onNewProject: () => void;
   onLoadProject: () => void;
   onSaveProject: () => void;
   onCloseProject: () => void;
   onNewScene: () => void;
+  onOpenScene: () => void;
+  onSaveScene: () => void;
+  onDeleteScene: () => void;
   onImportSound: () => void;
-  onNewRoom: () => void;
   onManageRooms: () => void;
+  onOpenRoomSelector: () => void;
+  onRefreshSpeakerConnection: () => void;
   onOpenSettings: () => void;
   onOpenResearchLab: () => void;
   sceneActionsEnabled: boolean;
+  currentSceneAvailable: boolean;
 
-  rooms: Room[];
-  activeRoomId: string | null;
-  onSelectRoom: (roomId: string | null) => void;
+  roomSelectionEnabled: boolean;
+  refreshSpeakerConnectionEnabled: boolean;
   roomSpeakerVolume: number | null;
   roomSpeakerVolumeEnabled: boolean;
   roomSpeakerVolumeMessage: string;
@@ -37,15 +39,19 @@ function MenuBar({
   onSaveProject,
   onCloseProject,
   onNewScene,
+  onOpenScene,
+  onSaveScene,
+  onDeleteScene,
   onImportSound,
-  onNewRoom,
   onManageRooms,
+  onOpenRoomSelector,
+  onRefreshSpeakerConnection,
   onOpenSettings,
   onOpenResearchLab,
   sceneActionsEnabled,
-  rooms,
-  activeRoomId,
-  onSelectRoom,
+  currentSceneAvailable,
+  roomSelectionEnabled,
+  refreshSpeakerConnectionEnabled,
   roomSpeakerVolume,
   roomSpeakerVolumeEnabled,
   roomSpeakerVolumeMessage,
@@ -147,16 +153,18 @@ function MenuBar({
     onNewScene();
   }
 
+  function handleOpenScene() { closeAllMenus(); onOpenScene(); }
+  function handleSaveScene() { closeAllMenus(); onSaveScene(); }
+  function handleDeleteScene() { closeAllMenus(); onDeleteScene(); }
+
   function handleImportSound() {
     closeAllMenus();
     onImportSound();
   }
 
-  function handleSelectRoom(
-    roomId: string | null
-  ) {
+  function handleOpenRoomSelector() {
     closeAllMenus();
-    onSelectRoom(roomId);
+    onOpenRoomSelector();
   }
 
   return (
@@ -242,11 +250,11 @@ function MenuBar({
               New Scene
             </button>
 
-            <button className="dropdown-item">
+            <button className="dropdown-item" onClick={handleOpenScene}>
               Open Scene
             </button>
 
-            <button className="dropdown-item">
+            <button className="dropdown-item" onClick={handleSaveScene} disabled={!currentSceneAvailable}>
               Save Scene
             </button>
 
@@ -260,7 +268,7 @@ function MenuBar({
               Remove from Project
             </button>
 
-            <button className="dropdown-item">
+            <button className="dropdown-item" onClick={handleDeleteScene} disabled={!currentSceneAvailable}>
               Delete Scene
             </button>
           </div>
@@ -313,46 +321,11 @@ function MenuBar({
           <div className="dropdown-menu">
             <button
               className="dropdown-item"
-              onClick={() =>
-                handleSelectRoom(null)
-              }
+              onClick={handleOpenRoomSelector}
+              disabled={!roomSelectionEnabled}
             >
-              {activeRoomId === null
-                ? '✓ No Room Selected'
-                : 'No Room Selected'}
+              Select Room...
             </button>
-
-            {rooms.length > 0 && (
-              <div className="dropdown-separator" />
-            )}
-
-            {rooms.map((room) => (
-              <button
-                key={room.id}
-                className="dropdown-item"
-                onClick={() =>
-                  handleSelectRoom(room.id)
-                }
-              >
-                {activeRoomId === room.id
-                  ? `✓ ${room.name}`
-                  : room.name}
-              </button>
-            ))}
-
-            <div className="dropdown-separator" />
-
-            <button
-              className="dropdown-item"
-              onClick={() => {
-                closeAllMenus();
-                onNewRoom();
-              }}
-            >
-              New Room...
-            </button>
-
-            <div className="dropdown-separator" />
 
             <button
               className="dropdown-item"
@@ -389,6 +362,17 @@ function MenuBar({
                 <span className="dropdown-room-volume-message">{roomSpeakerVolumeMessage}</span>
               )}
             </label>
+
+            <button
+              className="dropdown-item"
+              disabled={!refreshSpeakerConnectionEnabled}
+              onClick={() => {
+                closeAllMenus();
+                onRefreshSpeakerConnection();
+              }}
+            >
+              Refresh Connection
+            </button>
           </div>
         )}
       </div>
@@ -407,10 +391,6 @@ function MenuBar({
 
         {settingsMenuOpen && (
           <div className="dropdown-menu">
-            <button className="dropdown-item" onClick={() => { closeAllMenus(); onOpenSettings(); }}>
-              Settings...
-            </button>
-            <div className="dropdown-separator" />
             <button
               className="dropdown-item"
               onClick={() => {
@@ -419,6 +399,10 @@ function MenuBar({
               }}
             >
               Research Lab...
+            </button>
+            <div className="dropdown-separator" />
+            <button className="dropdown-item" onClick={() => { closeAllMenus(); onOpenSettings(); }}>
+              Settings...
             </button>
           </div>
         )}

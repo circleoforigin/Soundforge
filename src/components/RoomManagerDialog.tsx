@@ -6,8 +6,13 @@ import {
 } from 'react';
 
 import type { Room } from '../models/Room';
-import type {SpeakerMap} from '../models/SpeakerMap';
+import type { SpeakerMap } from '../models/SpeakerMap';
 import { sonosBridgeUrl } from '../config/api';
+import {
+  addMappedSpeakerSlot,
+  reconcileMappedSpeakerSlots,
+  removeMappedSpeakerSlot,
+} from '../utils/roomSpeakerMapSync';
 
 interface RoomManagerDialogProps {
   rooms: Room[];
@@ -16,6 +21,8 @@ interface RoomManagerDialogProps {
 
   onClose: () => void;
   onSelectRoom: (roomId: string | null) => void;
+  onCreateRoom: () => Room;
+  onDeleteRoom: (roomId: string) => void;
   onSaveRoom: (room: Room) => void;
   onSaveSpeakerMap: (speakerMap: SpeakerMap) => void;
 }
@@ -152,11 +159,15 @@ function RoomManagerDialog({
   activeRoomId,
   onClose,
   onSelectRoom,
+  onCreateRoom,
+  onDeleteRoom,
   onSaveRoom,
   onSaveSpeakerMap,
 }: RoomManagerDialogProps) {
   const [draftRoom, setDraftRoom] =
     useState<Room | null>(null);
+  const [selectedRoomId, setSelectedRoomId] =
+    useState<string | null>(null);
   const [activeTab, setActiveTab] =
     useState<RoomManagerTab>('features');
   const [draftSpeakerMap, setDraftSpeakerMap] =
@@ -284,9 +295,11 @@ function RoomManagerDialog({
       : null;
 
   if (existingMap) {
-    setDraftSpeakerMap(
-      structuredClone(existingMap)
-    );
+    const mapDraft = structuredClone(existingMap);
+    setDraftSpeakerMap({
+      ...mapDraft,
+      speakers: reconcileMappedSpeakerSlots(roomDraft.speakers, mapDraft.speakers),
+    });
 
     return;
   }
@@ -321,6 +334,23 @@ function RoomManagerDialog({
       ),
   });
 }
+
+  function handleOpenSelectedRoom() {
+    const room = rooms.find((candidate) => candidate.id === selectedRoomId);
+    if (room) handleChooseRoom(room);
+  }
+
+  function handleCreateRoom() {
+    const room = onCreateRoom();
+    setSelectedRoomId(room.id);
+  }
+
+  function handleDeleteSelectedRoom() {
+    const room = rooms.find((candidate) => candidate.id === selectedRoomId);
+    if (!room || !window.confirm(`Delete "${room.name}"? This cannot be undone.`)) return;
+    onDeleteRoom(room.id);
+    setSelectedRoomId(null);
+  }
 
   function handleBack() {
   setDraftRoom(null);
@@ -426,6 +456,11 @@ function RoomManagerDialog({
           roomWithSpeaker.height
         ),
     });
+
+    setDraftSpeakerMap((current) => current
+      ? { ...current, speakers: addMappedSpeakerSlot(current.speakers, newSpeaker) }
+      : current
+    );
   }
 
   function handleRemoveSpeaker(
@@ -445,6 +480,11 @@ function RoomManagerDialog({
             speakerId
         ),
     });
+
+    setDraftSpeakerMap((current) => current
+      ? { ...current, speakers: removeMappedSpeakerSlot(current.speakers, speakerId) }
+      : current
+    );
   }
 
   function handleSpeakerPointerDown(
@@ -745,9 +785,17 @@ function RoomManagerDialog({
       <div className="room-manager-header">
         <h2>Manage Rooms</h2>
 
-        <button onClick={onClose}>
-          Close
-        </button>
+        <div className="room-manager-header-actions">
+          {!draftRoom && (
+            <>
+              <button onClick={handleCreateRoom}>New Room</button>
+              <div className="room-manager-header-separator" aria-hidden="true" />
+              <button onClick={handleOpenSelectedRoom} disabled={!selectedRoomId}>Open</button>
+              <button onClick={handleDeleteSelectedRoom} disabled={!selectedRoomId}>Delete</button>
+            </>
+          )}
+          <button onClick={onClose}>Close</button>
+        </div>
       </div>
 
       <div className="room-manager-body">
@@ -763,16 +811,16 @@ function RoomManagerDialog({
                   key={room.id}
                   className={[
                     'room-manager-room-entry',
-
-                    activeRoomId === room.id
+                    selectedRoomId === room.id
                       ? 'selected'
+                      : '',
+                    activeRoomId === room.id
+                      ? 'active-room'
                       : '',
                   ]
                     .filter(Boolean)
                     .join(' ')}
-                  onClick={() =>
-                    handleChooseRoom(room)
-                  }
+                  onClick={() => setSelectedRoomId(room.id)}
                 >
                   {room.name}
                 </button>

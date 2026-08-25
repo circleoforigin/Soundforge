@@ -19,9 +19,7 @@ import SceneWorkspace from './components/SceneWorkspace';
 import { headphonesRoom } from './rooms/DefaultRoom';
 import { headphonesSpeakerMap } from './speakers/DefaultSpeakerMaps';
 import { roomRepository } from './rooms/RoomRepository';
-import NewRoomDialog, {
-  type NewRoomData,
-} from './components/NewRoomDialog';
+import { createDefaultRoom } from './rooms/createDefaultRoom';
 import RoomManagerDialog from './components/RoomManagerDialog';
 import ResearchLabDialog from './components/ResearchLabDialog';
 import SettingsDialog from './components/SettingsDialog';
@@ -37,6 +35,9 @@ import ImportSoundDialog, {
 } from './components/ImportSoundDialog';
 import { localSoundLibrary } from './services/library/browser/LocalSoundLibraryService';
 import { roomAudioEngine } from './audio/RoomAudioEngine';
+import { hostedCollectionRepository } from './host/HostedCollectionRepository';
+
+import { moduleEventBus } from './host/ModuleBus';
 
 function App() {
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
@@ -65,6 +66,7 @@ function App() {
   const transitionInProgressRef = useRef(false);
   const transitionRunIdRef = useRef(0);
   const [projectRuntimeKey, setProjectRuntimeKey] = useState(0);
+  const [sceneOnLoadActivationVersion, setSceneOnLoadActivationVersion] = useState(0);
   const [newProjectName, setNewProjectName] = useState('');
   const [showNewSceneDialog, setShowNewSceneDialog] = useState(false);
   const [newSceneName, setNewSceneName] = useState('');
@@ -80,8 +82,6 @@ function App() {
     headphonesRoom,
     ...customRooms,
   ];
-  const [showNewRoomDialog, setShowNewRoomDialog] =
-    useState(false);
   const [showRoomManager, setShowRoomManager] =
     useState(false);
   const [showResearchLab, setShowResearchLab] =
@@ -164,7 +164,7 @@ async function handleSettingsChange(settings: AppSettings) {
     setShowNewProjectDialog(true);
   }
 
-  function saveActiveProject(): boolean {
+  function saveActiveProject(notificationMessage = 'Project saved.'): boolean {
     if (!activeProject) {
       return false;
     }
@@ -186,7 +186,7 @@ async function handleSettingsChange(settings: AppSettings) {
     setActiveProject(projectToSave);
     setSavedProjects(projects);
     setDirtySceneIds(new Set());
-    setNotification('Project saved.');
+    setNotification(notificationMessage);
 
     setTimeout(() => {
       setNotification(null);
@@ -197,6 +197,43 @@ async function handleSettingsChange(settings: AppSettings) {
 
   function handleSaveProject() {
     saveActiveProject();
+  }
+
+  function handleSaveScene() {
+    if (!currentScene) return;
+    saveActiveProject('Scene saved.');
+  }
+
+  function handleDeleteScene() {
+    if (!activeProject || !currentScene) return;
+    if (!window.confirm(`Delete "${currentScene.instanceName}"? This cannot be undone.`)) return;
+
+    const deletedSceneId = currentScene.instanceId;
+    roomAudioEngine.stopScene(deletedSceneId);
+    roomAudioEngine.setSceneTransitionGain(deletedSceneId, 1);
+    transitionRunIdRef.current += 1;
+    transitionInProgressRef.current = false;
+    setTransitionInProgress(false);
+
+    const updatedProject: Project = {
+      ...activeProject,
+      scenes: activeProject.scenes.filter((scene) => scene.instanceId !== deletedSceneId),
+      activeSceneInstanceId: undefined,
+      activeRoomId: activeRoom?.id ?? activeProject.activeRoomId,
+      updatedAt: new Date(),
+    };
+    const projects = projectRepository.saveProject(updatedProject);
+
+    setActiveProject(updatedProject);
+    setSavedProjects(projects);
+    setCurrentSceneInstanceId(null);
+    setDirtySceneIds(new Set());
+    setTransitionTargetInstanceId((targetId) => targetId === deletedSceneId ? null : targetId);
+    setPreviewingTarget(false);
+    setShowSceneSelectionDialog(updatedProject.scenes.length > 0);
+    setShowNewSceneDialog(updatedProject.scenes.length === 0);
+    setNotification('Scene deleted.');
+    setTimeout(() => setNotification(null), 3000);
   }
 
   function requestProjectAction(
@@ -659,70 +696,49 @@ async function handleSettingsChange(settings: AppSettings) {
     setShowRoomManager(true);
   }
 
-  function handleNewRoom() {
-    setShowNewRoomDialog(true);
+  function handleCreateRoom(): Room {
+    const newRoom = createDefaultRoom();
+    setCustomRooms(roomRepository.saveRoom(newRoom));
+    return newRoom;
   }
 
-  function handleCreateRoom(
-    data: NewRoomData
-  ) {
-    let width = 1;
-    let height = 1;
-
-    if (data.shape === 'rectangle') {
-      width = 1.6;
-      height = 1;
-    }
-
-    const speakers = Array.from(
-      { length: data.speakerCount },
-      (_, index) => {
-        const angle =
-          (index / data.speakerCount) *
-          Math.PI *
-          2;
-
-        return {
-          speakerId: crypto.randomUUID(),
-          name: 'Speaker ${index + 1}',
-
-          position: {
-            x:
-              Math.cos(angle) *
-              (width * 0.4),
-
-            y:
-              Math.sin(angle) *
-              (height * 0.4),
-          },
-        };
-      }
-    );
-
-    const newRoom: Room = {
-      id: crypto.randomUUID(),
-
-      name: data.name,
-
-      offset: {
-        x: 0,
-        y: 0,
-      },
-
-      width,
-      height,
-
-      speakers,
-
-      speakerMapId: undefined,
-    };
-
-    const updatedRooms =
-      roomRepository.saveRoom(newRoom);
-
+  function handleDeleteRoom(roomId: string) {
+    const updatedRooms = roomRepository.deleteRoom(roomId);
     setCustomRooms(updatedRooms);
-    handleActiveRoomChange(newRoom);
-    setShowNewRoomDialog(false);
+    if (activeRoom?.id === roomId) handleSelectRoom(null);
+  }
+
+  const refreshSpeakerMap = activeRoom
+    ? activeRoom.id === headphonesRoom.id
+      ? headphonesSpeakerMap
+      : activeRoom.speakerMapId
+        ? speakerMaps.find((speakerMap) => speakerMap.id === activeRoom.speakerMapId)
+        : undefined
+    : undefined;
+
+  async function handleRefreshSpeakerConnection() {
+    if (!activeRoom || !refreshSpeakerMap) return;
+    const room = activeRoom;
+    const speakerMap = refreshSpeakerMap;
+    const showRefreshError = (message: string) => {
+      setNotification(message);
+      setTimeout(() => setNotification(null), 3000);
+    };
+    try {
+      await roomAudioEngine.shutdown();
+      await roomAudioEngine.configure(room, speakerMap);
+      const status = roomAudioEngine.getStatus();
+      if (status.state === 'ready') {
+        setSceneOnLoadActivationVersion((version) => version + 1);
+        return;
+      }
+      if (status.state !== 'error') return;
+      showRefreshError(status.message || 'Speaker connection refresh failed.');
+    } catch (error) {
+      showRefreshError(error instanceof Error
+        ? `Speaker connection refresh failed: ${error.message}`
+        : 'Speaker connection refresh failed.');
+    }
   }
 
   function handleActiveRoomChange(
@@ -801,21 +817,24 @@ async function handleSettingsChange(settings: AppSettings) {
         onSaveProject={handleSaveProject}
         onCloseProject={handleCloseProject}
         onNewScene={handleNewScene}
+        onOpenScene={() => setShowSceneSelectionDialog(Boolean(activeProject?.scenes.length))}
+        onSaveScene={handleSaveScene}
+        onDeleteScene={handleDeleteScene}
         onImportSound={handleImportSound}
-        onNewRoom={handleNewRoom}
         onManageRooms={handleManageRooms}
+        onOpenRoomSelector={() => setShowRoomSelectionDialog(true)}
+        onRefreshSpeakerConnection={() => void handleRefreshSpeakerConnection()}
         onOpenSettings={() => setShowSettings(true)}
         onOpenResearchLab={() => setShowResearchLab(true)}
         sceneActionsEnabled={
           Boolean(activeProject) &&
           roomAudioStatus.state === 'ready' &&
-          !showRoomSelectionDialog &&
-          currentScene !== null
+          !showRoomSelectionDialog
         }
+        currentSceneAvailable={currentScene !== null}
 
-        rooms={availableRooms}
-        activeRoomId={activeRoom?.id ?? null}
-        onSelectRoom={handleSelectRoom}
+        roomSelectionEnabled={Boolean(activeProject)}
+        refreshSpeakerConnectionEnabled={Boolean(activeRoom && refreshSpeakerMap)}
         roomSpeakerVolume={roomSpeakerVolumeStatus.volume}
         roomSpeakerVolumeEnabled={
           Boolean(activeRoom) &&
@@ -844,6 +863,7 @@ async function handleSettingsChange(settings: AppSettings) {
           soundAssets={soundAssets}
           activeRoom={activeRoom}
           activeSpeakerMap={activeSpeakerMap}
+          sceneOnLoadActivationVersion={sceneOnLoadActivationVersion}
           transitionTarget={transitionTarget}
           previewingTarget={previewingTarget}
           transitionInProgress={transitionInProgress}
@@ -878,6 +898,42 @@ async function handleSettingsChange(settings: AppSettings) {
         <div className="dialog-backdrop">
           <div className="dialog">
             <h2>New Project</h2>
+
+<button
+  onClick={async () => {
+    try {
+      const result =
+        await hostedCollectionRepository
+          .loadAll('test');
+
+      console.log(
+        'Shared bus storage result:',
+        result
+      );
+
+      alert(
+        JSON.stringify(
+          result,
+          null,
+          2
+        )
+      );
+    } catch (error) {
+      console.error(
+        'Shared bus storage test failed:',
+        error
+      );
+
+      alert(
+        error instanceof Error
+          ? error.message
+          : 'Storage test failed.'
+      );
+    }
+  }}
+>
+  Test Shared Storage Bus
+</button>
 
             <input
               type="text"
@@ -948,7 +1004,7 @@ async function handleSettingsChange(settings: AppSettings) {
         </div>
       )}
 
-      {activeProject && currentScene === null && showRoomSelectionDialog && (
+      {activeProject && showRoomSelectionDialog && (
         <RoomSelectorDialog
           rooms={availableRooms}
           selectedRoomId={activeRoom?.id ?? null}
@@ -1058,15 +1114,6 @@ async function handleSettingsChange(settings: AppSettings) {
         />
       )}
 
-      {showNewRoomDialog && (
-        <NewRoomDialog
-          onCancel={() =>
-            setShowNewRoomDialog(false)
-          }
-          onCreate={handleCreateRoom}
-        />
-      )}
-
       {showRoomManager && (
         <RoomManagerDialog
           rooms={customRooms}
@@ -1083,6 +1130,9 @@ async function handleSettingsChange(settings: AppSettings) {
             handleSelectRoom(roomId);
             setShowRoomManager(false);
           }}
+
+          onDeleteRoom={handleDeleteRoom}
+          onCreateRoom={handleCreateRoom}
 
           onSaveRoom={(updatedRoom) => {
             const updatedRooms =

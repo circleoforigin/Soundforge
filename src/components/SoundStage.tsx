@@ -27,6 +27,12 @@ import type { DeployedSceneObjectInstance } from '../models/DeployedSceneObjectI
 import { useOutsidePointerDown } from '../hooks/useOutsidePointerDown';
 import { getBalancedFieldPositionalMix } from '../utils/balancedFieldRouting';
 import { recordDiagnostic } from '../services/diagnostics/DiagnosticClient';
+import {
+  getLoopingZoneSpawnBounds,
+  LoopingZoneScheduler,
+  type LoopingZoneChild,
+} from '../audio/LoopingZoneScheduler';
+import { getLoopingZoneOverlayPath } from '../utils/loopingZoneOverlayMath';
 
 interface SoundStageProps {
   scene: SceneInstance;
@@ -100,12 +106,17 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
     targetSpeakers: string[];
   }>());
   const lastPositionDiagnosticRef = useRef(new Map<string, number>());
+  const loopingZoneSchedulersRef = useRef(new Map<string, LoopingZoneScheduler>());
 
   useEffect(() => () => {
     if (fieldMessageTimerRef.current !== null) {
       window.clearTimeout(fieldMessageTimerRef.current);
     }
   }, []);
+  useEffect(() => () => {
+    for (const scheduler of loopingZoneSchedulersRef.current.values()) scheduler.stop();
+    loopingZoneSchedulersRef.current.clear();
+  }, [scene.instanceId]);
 
   const [resizingCircle, setResizingCircle] =
     useState<'center' | 'full' | null>(null);
@@ -158,6 +169,13 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
     })),
     ...referencedDeployments,
   ];
+  useEffect(() => {
+    for (const [instanceId, scheduler] of loopingZoneSchedulersRef.current) {
+      const currentNode = allDeployedSoundNodes.find(({ node }) => node.instanceId === instanceId)?.node;
+      if (currentNode?.loopingZone?.enabled) scheduler.updateNode(currentNode);
+      else { scheduler.stop(); loopingZoneSchedulersRef.current.delete(instanceId); }
+    }
+  });
 
   const speakerGeometry =
   activeRoom
@@ -181,6 +199,16 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       ({ node }) => node.instanceId === selectedNode.instanceId
     )
       ? selectedNode.position ?? null
+      : null;
+  const selectedDeployedNode = allDeployedSoundNodes.find(
+    ({ node }) => node.instanceId === selectedNodeId
+  )?.node ?? null;
+  const loopingZoneOverlayPath =
+    selectedDeployedNode?.position && selectedDeployedNode.loopingZone?.enabled
+      ? getLoopingZoneOverlayPath(getLoopingZoneSpawnBounds(
+          selectedDeployedNode.position,
+          selectedDeployedNode.loopingZone
+        ))
       : null;
 
   const speakerMix =
@@ -539,6 +567,12 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
   function handleToggleNodePlayback(
     node: SceneObjectInstance
   ) {
+    if (node.playbackMode === 'loop' && node.loopingZone?.enabled) {
+      if (isNodePlaying(node)) stopNodePlayback(node);
+      else startLoopingZone(node);
+      return;
+    }
+
     const isTemporaryOneShot =
       node.playbackMode === 'oneShot' &&
       temporaryDeployments.some(
@@ -580,7 +614,7 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       return;
     }
 
-    if (roomAudioEngine.isPlaying(node.instanceId)) roomAudioEngine.stop(node.instanceId);
+    if (isNodePlaying(node)) stopNodePlayback(node);
     else void handleStartNodePlayback(node);
   }
 
@@ -589,7 +623,7 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
     playing: boolean
   ) {
     if (playing) {
-      void roomAudioEngine.stopNode(node);
+      stopNodePlayback(node);
       return;
     }
 
@@ -600,6 +634,10 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
     node: SceneObjectInstance,
     onComplete?: () => void
   ) {
+    if (node.playbackMode === 'loop' && node.loopingZone?.enabled) {
+      startLoopingZone(node);
+      return;
+    }
     const soundAssetId = node.soundAssetIds[0];
 
     if (!soundAssetId) {
@@ -711,6 +749,65 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       });
       showFieldMessage(error instanceof Error ? error.message : 'Unable to play this sound through Room audio.');
     }
+  }
+
+  function isNodePlaying(node: SceneObjectInstance): boolean {
+    return loopingZoneSchedulersRef.current.get(node.instanceId)?.isRunning
+      ?? roomAudioEngine.isPlaying(node.instanceId);
+  }
+
+  function stopNodePlayback(node: SceneObjectInstance): void {
+    const scheduler = loopingZoneSchedulersRef.current.get(node.instanceId);
+    if (scheduler) {
+      scheduler.stop();
+      loopingZoneSchedulersRef.current.delete(node.instanceId);
+      return;
+    }
+    void roomAudioEngine.stopNode(node);
+  }
+
+  function stopLoopingZoneById(instanceId: string): void {
+    const scheduler = loopingZoneSchedulersRef.current.get(instanceId);
+    if (!scheduler) return;
+    scheduler.stop();
+    loopingZoneSchedulersRef.current.delete(instanceId);
+  }
+
+  function startLoopingZone(node: SceneObjectInstance): void {
+    if (!node.loopingZone?.enabled || !node.position) return;
+    loopingZoneSchedulersRef.current.get(node.instanceId)?.stop();
+    const scheduler = new LoopingZoneScheduler({
+      node,
+      onSpawn: async (child: LoopingZoneChild, complete) => {
+        const asset = soundAssets.find((item) => item.id === child.asset.assetId);
+        if (!asset) { complete(); return; }
+        const childNode: SceneObjectInstance = {
+          ...node,
+          instanceId: child.playbackId,
+          instanceName: `${node.instanceName ?? 'Looping Zone'} child`,
+          soundAssetIds: [child.asset.assetId],
+          playbackMode: 'oneShot',
+          placement: 'field',
+          position: child.position,
+          randomStart: false,
+          gainDb: (node.gainDb ?? 0) + child.asset.gainDb,
+          loopingZone: undefined,
+        };
+        await handleStartNodePlayback(childNode, () => {
+          roomAudioEngine.stop(child.playbackId);
+          complete();
+        });
+      },
+      onStopChild: (playbackId) => roomAudioEngine.stop(playbackId),
+      onEvent: (event, details) => {
+        void recordDiagnostic({
+          category: 'playback', level: 'info', event: `looping_zone.${event}`,
+          message: `Looping Zone ${event}.`, details: { sceneId: scene.instanceId, ...details },
+        });
+      },
+    });
+    loopingZoneSchedulersRef.current.set(node.instanceId, scheduler);
+    scheduler.start();
   }
 
   function despawnTemporaryDeployment(instanceId: string) {
@@ -837,7 +934,8 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
     },
     pauseNodes: (nodes) => {
       for (const node of nodes) {
-        void roomAudioEngine.pause(node);
+        if (node.loopingZone?.enabled) stopNodePlayback(node);
+        else void roomAudioEngine.pause(node);
       }
     },
   }));
@@ -1005,6 +1103,7 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
   function handleRemoveNode(
     instanceId: string
   ) {
+    stopLoopingZoneById(instanceId);
     const sourceNode = scene.positionalObjects.find(
       (node) => node.instanceId === instanceId
     );
@@ -1038,6 +1137,7 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
     }
 
     for (const deploymentId of removedDeploymentIds) {
+      stopLoopingZoneById(deploymentId);
       roomAudioEngine.stop(deploymentId);
     }
 
@@ -1266,6 +1366,16 @@ function handleCircleResizeEnd(
             }}
           />
 
+          {loopingZoneOverlayPath && (
+            <svg
+              className="looping-zone-overlay"
+              viewBox="0 0 100 100"
+              aria-hidden="true"
+            >
+              <path d={loopingZoneOverlayPath} fillRule="evenodd" />
+            </svg>
+          )}
+
           <svg
   className="circle-resize-overlay"
   viewBox="0 0 100 100"
@@ -1315,7 +1425,7 @@ function handleCircleResizeEnd(
                   node.instanceId ===
                   selectedNodeId
                 }
-                playing={roomAudioEngine.isPlaying(node.instanceId)}
+                playing={isNodePlaying(node)}
                 isAmbient={false}
                 onSelect={(instanceId) =>
                   onSelectedNodeChange(
@@ -1474,7 +1584,7 @@ function handleCircleResizeEnd(
                   'shelf-node-tile',
                   'ambience-shelf-node',
                   node.instanceId === selectedNodeId ? 'selected' : '',
-                  roomAudioEngine.isPlaying(node.instanceId) ? 'playing' : '',
+                  isNodePlaying(node) ? 'playing' : '',
                   node.muted ? 'muted' : '',
                   node.soundAssetIds.length === 0 ? 'no-sound' : '',
                 ].filter(Boolean).join(' ')}
@@ -1505,12 +1615,12 @@ function handleCircleResizeEnd(
                   <button
                     className="ambience-playback-toggle"
                     aria-label={
-                      roomAudioEngine.isPlaying(node.instanceId)
+                      isNodePlaying(node)
                         ? `Pause ${node.instanceName ?? 'ambience'}`
                         : `Play ${node.instanceName ?? 'ambience'}`
                     }
                     title={
-                      roomAudioEngine.isPlaying(node.instanceId)
+                      isNodePlaying(node)
                         ? 'Pause'
                         : 'Play'
                     }
@@ -1518,11 +1628,11 @@ function handleCircleResizeEnd(
                       event.stopPropagation();
                       handleNodeTransportPlayback(
                         node,
-                        roomAudioEngine.isPlaying(node.instanceId)
+                        isNodePlaying(node)
                       );
                     }}
                   >
-                    {roomAudioEngine.isPlaying(node.instanceId) ? '■' : '▶'}
+                    {isNodePlaying(node) ? '■' : '▶'}
                   </button>
                   )}
                 </div>

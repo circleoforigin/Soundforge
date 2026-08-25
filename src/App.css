@@ -2414,6 +2414,19 @@ body,
   margin: 0;
 }
 
+.room-manager-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.room-manager-header-separator {
+  align-self: stretch;
+  width: 1px;
+  min-height: 24px;
+  background: #45474e;
+}
+
 .room-manager-body {
   flex: 1;
   min-height: 0;
@@ -2465,6 +2478,10 @@ body,
 .room-manager-room-entry.selected {
   background: #454850;
   color: white;
+}
+
+.room-manager-room-entry.active-room:not(.selected) {
+  box-shadow: inset 3px 0 #6f91bc;
 }
 
 .room-manager-editor {
@@ -2952,6 +2969,36 @@ body,
   color: white;
   background: #3a3c41;
 }
+
+.looping-zone-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.looping-zone-overlay path {
+  fill: rgb(103 137 178 / 16%);
+  stroke: rgb(134 169 211 / 58%);
+  stroke-width: 0.45;
+  vector-effect: non-scaling-stroke;
+}
+.looping-zone-controls { display: grid; gap: 7px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #45474e; }
+.looping-zone-controls h4 { margin: 5px 0 0; color: #aeb0b6; font-size: 11px; text-transform: uppercase; }
+.looping-zone-controls > label:not(.node-checkbox), .looping-zone-asset label { display: flex; align-items: center; justify-content: space-between; gap: 5px; font-size: 11px; }
+.looping-zone-controls input[type="number"] { width: 64px; }
+.looping-zone-asset { display: grid; gap: 5px; padding: 6px; background: #25262a; border-radius: 3px; }
+.looping-zone-asset-header { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; }
+.looping-zone-asset-header > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.looping-zone-gain-control { width: min(150px, 100%); }
+.looping-zone-paired-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.looping-zone-paired-row label { display: grid; gap: 3px; min-width: 0; font-size: 11px; }
+.looping-zone-paired-row label > span { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.looping-zone-paired-row input[type="number"] { width: 100%; min-width: 0; box-sizing: border-box; }
+.looping-zone-note { margin: 0; color: #e5bf75; font-size: 10px; }
 
 .project-picker-item.selected {
   border-color: #7889a8;

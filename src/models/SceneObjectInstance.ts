@@ -1,6 +1,25 @@
-import type { PlaybackMode } from './SoundObjectTemplate';
+import type { PlaybackMode } from './SoundObjectTemplate.ts';
 
 export type SceneNodePlacement = 'shelf' | 'field';
+
+export interface LoopingZoneAsset {
+  assetId: string;
+  gainDb: number;
+  weight: number;
+}
+
+export interface LoopingZoneSettings {
+  enabled: boolean;
+  assets: LoopingZoneAsset[];
+  distanceRange: number;
+  arcPositionDegrees: number;
+  frequencyMinMs: number;
+  frequencyMaxMs: number;
+  pitchMinSemitones: number;
+  pitchMaxSemitones: number;
+  maxConcurrent: number;
+  avoidImmediateRepeat: boolean;
+}
 
 export interface SceneObjectInstance {
   instanceId: string;
@@ -38,6 +57,8 @@ export interface SceneObjectInstance {
   fadeOutMs: number;
   excludeFromBulkControls: boolean;
   randomStart: boolean;
+  /** Optional randomized one-shot scheduler capability for positional loop nodes. */
+  loopingZone?: LoopingZoneSettings;
 
   /**
     * Per-node source gain trim in decibels.

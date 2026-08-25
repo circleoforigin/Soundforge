@@ -1,4 +1,4 @@
-import type { LibraryEntity } from './PersistentEntity';
+import type { LibraryEntity } from './PersistentEntity.ts';
 
 export type PlaybackMode = 'oneShot' | 'loop';
 export type SpatialMode = 'positional' | 'ambient'

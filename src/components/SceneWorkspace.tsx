@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { SceneInstance } from '../models/SceneInstance';
 import type { SceneObjectInstance } from '../models/SceneObjectInstance';
@@ -29,6 +29,7 @@ interface SceneWorkspaceProps {
   soundAssets: SoundAsset[];
   activeRoom: Room | null;
   activeSpeakerMap: SpeakerMap;
+  sceneOnLoadActivationVersion: number;
 
   onSceneChange: (scene: SceneInstance) => void;
   onSelectTransitionTarget: (instanceId: string) => void;
@@ -52,6 +53,7 @@ function SceneWorkspace({
   soundAssets,
   activeRoom,
   activeSpeakerMap,
+  sceneOnLoadActivationVersion,
   onSceneChange,
   onSelectTransitionTarget,
   onClearTransitionTarget,
@@ -61,7 +63,7 @@ function SceneWorkspace({
   onRoomChange,
 }: SceneWorkspaceProps) {
   const soundStageRef = useRef<SoundStageHandle>(null);
-  const loadedSceneIdRef = useRef<string | null>(null);
+  const loadedSceneActivationRef = useRef<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] =
     useState<string | null>(null);
   const [selectedNodeSourceId, setSelectedNodeSourceId] =
@@ -74,7 +76,7 @@ function SceneWorkspace({
     setSelectedNodeId(instanceId);
     setSelectedNodeSourceId(sourceNodeId ?? null);
   }
-  const persistentDeployedNodes = currentScene
+  const persistentDeployedNodes = useMemo(() => currentScene
     ? (currentScene.deployedObjects ?? []).flatMap((deployment) => {
         const sourceNode = currentScene.positionalObjects.find(
           (node) => node.instanceId === deployment.sourceNodeId
@@ -89,7 +91,7 @@ function SceneWorkspace({
             }]
           : [];
       })
-    : [];
+    : [], [currentScene]);
   useEffect(() => {
     if (selectedNodeId !== null) {
       const activeElement = document.activeElement;
@@ -101,15 +103,16 @@ function SceneWorkspace({
   }, [selectedNodeId]);
   useEffect(() => {
     if (!currentScene) {
-      loadedSceneIdRef.current = null;
+      loadedSceneActivationRef.current = null;
       return;
     }
 
-    if (loadedSceneIdRef.current === currentScene.instanceId) {
+    const activationKey = `${currentScene.instanceId}:${sceneOnLoadActivationVersion}`;
+    if (loadedSceneActivationRef.current === activationKey) {
       return;
     }
 
-    loadedSceneIdRef.current = currentScene.instanceId;
+    loadedSceneActivationRef.current = activationKey;
 
     const onLoadNodes = [
       ...currentScene.positionalObjects.filter(
@@ -124,9 +127,10 @@ function SceneWorkspace({
     ];
 
     void soundStageRef.current?.startNodes(onLoadNodes);
-  });
+  }, [currentScene, persistentDeployedNodes, sceneOnLoadActivationVersion]);
   const [showSoundPicker, setShowSoundPicker] =
     useState(false);
+  const [soundPickerPurpose, setSoundPickerPurpose] = useState<'source' | 'looping-zone'>('source');
   const selectedNode =
     scene.positionalObjects.find(
       (node) => node.instanceId === selectedNodeId
@@ -171,6 +175,15 @@ function SceneWorkspace({
     soundAsset: SoundAsset
   ) {
     if (!selectedNode) {
+      return;
+    }
+
+    if (soundPickerPurpose === 'looping-zone' && selectedNode.loopingZone?.enabled) {
+      if (!selectedNode.loopingZone.assets.some((asset) => asset.assetId === soundAsset.id)) {
+        const assets = [...selectedNode.loopingZone.assets, { assetId: soundAsset.id, gainDb: 0, weight: 1 }];
+        handleNodeChange({ ...selectedNode, soundAssetIds: assets.map((asset) => asset.assetId), loopingZone: { ...selectedNode.loopingZone, assets } });
+      }
+      setShowSoundPicker(false);
       return;
     }
 
@@ -247,7 +260,8 @@ function SceneWorkspace({
           isAmbient={selectedNodeIsAmbient}
           soundObjectTemplates={soundObjectTemplates}
           onNodeChange={handleNodeChange}
-          onChooseSource={() => setShowSoundPicker(true)}
+          onChooseSource={() => { setSoundPickerPurpose('source'); setShowSoundPicker(true); }}
+          onAddLoopingZoneSound={() => { setSoundPickerPurpose('looping-zone'); setShowSoundPicker(true); }}
         />
       ) : (
         <SceneSelector

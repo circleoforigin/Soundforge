@@ -1,56 +1,69 @@
-import type { SoundPosition } from './soundStageMath';
-import type { SpeakerGeometry } from './roomSpeakerMath';
+import type { SoundPosition } from './soundStageMath.ts';
 
 import {
   getAngleFromCenter,
   getAttenuation,
   getDistanceFromCenter,
-} from './soundStageMath';
+} from './soundStageMath.ts';
+
+interface SpeakerGeometry {
+  speakerId: string;
+  angleDegrees: number;
+  distanceFromCenter: number;
+}
 
 export interface SpeakerMix {
   speakerId: string;
-
-  /**
-   * Final normalized contribution for this speaker.
-   *
-   * 0 = silent
-   * 1 = full contribution
-   *
-   * This does NOT include the node's gainDb trim.
-   */
+  /** Final spatial contribution, including Soundstage attenuation but not node gainDb. */
   gain: number;
 }
 
-function getAngularDifference(
-  angleA: number,
-  angleB: number
-): number {
-  const difference =
-    Math.abs(angleA - angleB) % 360;
+interface IndexedSpeaker { index: number; angle: number; }
 
-  return difference > 180
-    ? 360 - difference
-    : difference;
+function normalizeAngle(angle: number): number {
+  const normalized = angle % 360;
+  return normalized < 0 ? normalized + 360 : normalized;
 }
 
-function getSpeakerBalanceWeight(
-  distanceFromCenter: number,
-  maxDistance: number
-): number {
-  if (maxDistance <= 0) {
-    return 1;
+function normalizeConstantPower(gains: number[]): number[] {
+  const magnitude = Math.sqrt(gains.reduce((sum, gain) => sum + gain * gain, 0));
+  return magnitude > 0 ? gains.map((gain) => gain / magnitude) : gains.map(() => 0);
+}
+
+function getBroadMix(speakers: SpeakerGeometry[]): number[] {
+  const maxDistance = Math.max(0, ...speakers.map((speaker) => speaker.distanceFromCenter));
+  const weights = speakers.map((speaker) => {
+    if (maxDistance <= 0) return 1;
+    // Retain the existing mild radius compensation without allowing it to change total power.
+    return 0.75 + (speaker.distanceFromCenter / maxDistance) * 0.25;
+  });
+  return normalizeConstantPower(weights);
+}
+
+function getBracketingPairMix(nodeAngle: number, speakers: SpeakerGeometry[]): number[] {
+  const gains = speakers.map(() => 0);
+  if (speakers.length === 1) { gains[0] = 1; return gains; }
+
+  const sorted: IndexedSpeaker[] = speakers
+    .map((speaker, index) => ({ index, angle: normalizeAngle(speaker.angleDegrees) }))
+    .sort((a, b) => a.angle - b.angle || a.index - b.index);
+  const angle = normalizeAngle(nodeAngle);
+  let upperIndex = sorted.findIndex((speaker) => speaker.angle >= angle);
+  if (upperIndex < 0) upperIndex = 0;
+  const upper = sorted[upperIndex];
+  const lower = sorted[(upperIndex - 1 + sorted.length) % sorted.length];
+  const sectorSize = normalizeAngle(upper.angle - lower.angle);
+
+  if (sectorSize <= 1e-9) {
+    gains[upper.index] = 1;
+    return gains;
   }
 
-  /*
-   * A farther speaker receives slightly more baseline weight
-   * so sounds placed in the center feel more balanced.
-   *
-   * This is intentionally mild for now.
-   */
-  const normalizedDistance =
-    distanceFromCenter / maxDistance;
-
-  return 0.75 + normalizedDistance * 0.25;
+  const positionInSector = normalizeAngle(angle - lower.angle);
+  const t = Math.max(0, Math.min(1, positionInSector / sectorSize));
+  gains[lower.index] = Math.cos(t * Math.PI / 2);
+  gains[upper.index] = Math.sin(t * Math.PI / 2);
+  return gains;
 }
 
 export function getSpeakerMix(
@@ -59,119 +72,30 @@ export function getSpeakerMix(
   centerRadius: number,
   fullVolumeRadius: number
 ): SpeakerMix[] {
-  if (speakers.length === 0) {
-    return [];
+  if (speakers.length === 0) return [];
+
+  const nodeDistance = getDistanceFromCenter(nodePosition);
+  const attenuation = getAttenuation(nodePosition, fullVolumeRadius);
+  const broadMix = getBroadMix(speakers);
+  const pairMix = getBracketingPairMix(getAngleFromCenter(nodePosition), speakers);
+  let spatialGains: number[];
+
+  if (nodeDistance <= centerRadius) {
+    spatialGains = broadMix;
+  } else if (nodeDistance >= fullVolumeRadius || fullVolumeRadius <= centerRadius) {
+    spatialGains = pairMix;
+  } else {
+    const linearFocus = Math.max(0, Math.min(1,
+      (nodeDistance - centerRadius) / (fullVolumeRadius - centerRadius)
+    ));
+    const focus = linearFocus * linearFocus * (3 - 2 * linearFocus);
+    spatialGains = normalizeConstantPower(broadMix.map((broadGain, index) =>
+      broadGain * (1 - focus) + pairMix[index] * focus
+    ));
   }
 
-  const nodeDistance =
-    getDistanceFromCenter(nodePosition);
-
-  const nodeAngle =
-    getAngleFromCenter(nodePosition);
-
-  const attenuation =
-    getAttenuation(
-      nodePosition,
-      fullVolumeRadius
-    );
-
-  const maxSpeakerDistance =
-    Math.max(
-      ...speakers.map(
-        (speaker) =>
-          speaker.distanceFromCenter
-      )
-    );
-
-  /*
-   * Directionality strength:
-   *
-   * Inside center radius:
-   * 0 = no directional bias
-   *
-   * Between center and full-volume radius:
-   * ramps smoothly from 0 to 1
-   *
-   * Outside full-volume radius:
-   * stays at full directional strength
-   */
-  let directionalStrength = 0;
-
-  if (nodeDistance > centerRadius) {
-    directionalStrength =
-      (nodeDistance - centerRadius) /
-      (fullVolumeRadius - centerRadius);
-
-    directionalStrength =
-      Math.max(
-        0,
-        Math.min(1, directionalStrength)
-      );
-  }
-
-  const rawWeights =
-    speakers.map((speaker) => {
-      const balanceWeight =
-        getSpeakerBalanceWeight(
-          speaker.distanceFromCenter,
-          maxSpeakerDistance
-        );
-
-      const angularDifference =
-        getAngularDifference(
-          nodeAngle,
-          speaker.angleDegrees
-        );
-
-      /*
-       * Directional contribution:
-       *
-       * same direction = 1
-       * opposite direction = 0
-       */
-      const fullyDirectionalWeight =
-        Math.max(
-          0,
-          1 - angularDifference / 180
-        );
-
-      /*
-       * Blend between:
-       *
-       * 1.0 = no directionality
-       * fullyDirectionalWeight = maximum directionality
-       *
-       * directionalStrength determines how far
-       * between those two states we are.
-       */
-      const directionalWeight =
-        1 -
-        directionalStrength *
-          (1 - fullyDirectionalWeight);
-
-      return {
-        speakerId: speaker.speakerId,
-
-        weight:
-          directionalWeight *
-          balanceWeight,
-      };
-    });
-
-  const maxWeight =
-    Math.max(
-      ...rawWeights.map(
-        (item) => item.weight
-      )
-    );
-
-  return rawWeights.map((item) => ({
-    speakerId: item.speakerId,
-
-    gain:
-      maxWeight > 0
-        ? (item.weight / maxWeight) *
-          attenuation
-        : 0,
+  return speakers.map((speaker, index) => ({
+    speakerId: speaker.speakerId,
+    gain: spatialGains[index] * attenuation,
   }));
 }

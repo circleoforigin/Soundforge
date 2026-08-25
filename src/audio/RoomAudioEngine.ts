@@ -301,14 +301,16 @@ class RoomAudioEngine {
       void this.writeSpeakerVolume(roomId, generation, normalized);
     }, 150);
   }
-  shutdown(): void {
-    if (this.localMode || !this.roomId) return;
+  shutdown(): Promise<void> {
+    if (this.localMode || !this.roomId) return Promise.resolve();
     const roomId = this.roomId;
     this.roomId = null; this.configuredKey = ''; this.remotePlaybackIds.clear();
     this.resetSpeakerVolume();
     this.positionUpdates.clear();
     this.state = 'idle'; this.stateMessage = ''; this.emit();
-    this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(roomId)}/session`), { method: 'DELETE' })), 'room_audio.session_stop_failed');
+    const shutdownRequest = requireSuccessfulRoomAudioResponse(fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(roomId)}/session`), { method: 'DELETE' })).then(() => undefined);
+    this.observeMutation(shutdownRequest, 'room_audio.session_stop_failed');
+    return shutdownRequest.catch(() => undefined);
   }
 
   private resetSpeakerVolume(): void {
