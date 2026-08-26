@@ -497,7 +497,7 @@ const transitionTarget =
 
   function requestProjectAction(
     action: () => void
-  ) {
+    ) {
     if (dirtySceneIds.size === 0) {
       action();
       return;
@@ -506,6 +506,27 @@ const transitionTarget =
     pendingProjectActionRef.current = action;
     setShowUnsavedChangesDialog(true);
   }
+
+  function requestCurrentSceneAction(
+  action: () => void
+) {
+  if (
+    !currentScene ||
+    !dirtySceneIds.has(
+      currentScene.instanceId
+    )
+  ) {
+    action();
+    return;
+  }
+
+  pendingProjectActionRef.current =
+    action;
+
+  setShowUnsavedChangesDialog(
+    true
+  );
+}
 
   async function finishPendingProjectAction(
   saveFirst: boolean
@@ -621,15 +642,116 @@ const transitionTarget =
   }
 
   function handleNewScene() {
-    if (
-      !activeProject ||
-      roomAudioStatus.state !== 'ready'
-    ) {
-      return;
+  if (!activeProject) {
+    return;
+  }
+
+  function handleCloseScene() {
+  if (!currentScene) {
+    return;
+  }
+
+  const sceneToClose =
+    currentScene;
+
+  const closeScene = async () => {
+    const sceneId =
+      sceneToClose.instanceId;
+
+    try {
+      await roomAudioEngine
+        .fadeOutAndStopScene(
+          sceneId,
+          sceneToClose.fadeOutMs
+        );
+    } catch (error) {
+      console.error(
+        'Unable to fade closed scene:',
+        error
+      );
+
+      roomAudioEngine.stopScene(
+        sceneId
+      );
     }
 
+    roomAudioEngine
+      .setSceneTransitionGain(
+        sceneId,
+        1
+      );
+
+    setLoadedScenes((current) => {
+      const updated =
+        new Map(current);
+
+      updated.delete(
+        sceneId
+      );
+
+      return updated;
+    });
+
+    setDirtySceneIds((current) => {
+      const updated =
+        new Set(current);
+
+      updated.delete(
+        sceneId
+      );
+
+      return updated;
+    });
+
+    setCurrentSceneInstanceId(
+      null
+    );
+
+    setTransitionTargetInstanceId(
+      null
+    );
+
+    setPreviewingTarget(false);
+
+    await openSceneSelectionDialog();
+  };
+
+  requestCurrentSceneAction(
+    () => {
+      void closeScene();
+    }
+  );
+}
+
+  const createNewScene = () => {
+    if (currentSceneInstanceId) {
+      roomAudioEngine.stopScene(
+        currentSceneInstanceId
+      );
+
+      roomAudioEngine.setSceneTransitionGain(
+        currentSceneInstanceId,
+        1
+      );
+    }
+
+    setCurrentSceneInstanceId(
+      null
+    );
+
+    setTransitionTargetInstanceId(
+      null
+    );
+
+    setPreviewingTarget(false);
+
     setShowNewSceneDialog(true);
-  }
+  };
+
+  requestProjectAction(
+    createNewScene
+  );
+}
 
   function handleImportSound() {
     setShowImportSoundDialog(true);
@@ -820,7 +942,50 @@ const transitionTarget =
       updatedAt: now,
     };
 
-    setActiveProject(updatedProject);
+    try {
+  const projects =
+    await projectRepository.saveProject(
+      updatedProject
+    );
+
+  setActiveProject(
+    updatedProject
+  );
+
+  setSavedProjects(
+    projects
+  );
+} catch (error) {
+  console.error(
+    'Unable to add new scene to project:',
+    error
+  );
+
+  await sceneRepository.deleteScene(
+    newInstance.instanceId
+  );
+
+  setLoadedScenes((current) => {
+    const updated =
+      new Map(current);
+
+    updated.delete(
+      newInstance.instanceId
+    );
+
+    return updated;
+  });
+
+  setNotification(
+    'Unable to add new scene to project.'
+  );
+
+  setTimeout(() => {
+    setNotification(null);
+  }, 3000);
+
+  return;
+}
     setCurrentSceneInstanceId(
       newInstance.instanceId
     );
@@ -1384,6 +1549,7 @@ onOpenScene={() => {
   }
 }}
         onSaveScene={handleSaveScene}
+        onCloseScene={handleCloseScene}
         onDeleteScene={handleDeleteScene}
         onImportSound={handleImportSound}
         onManageRooms={handleManageRooms}
@@ -1392,10 +1558,9 @@ onOpenScene={() => {
         onOpenSettings={() => setShowSettings(true)}
         onOpenResearchLab={() => setShowResearchLab(true)}
         sceneActionsEnabled={
-          Boolean(activeProject) &&
-          roomAudioStatus.state === 'ready' &&
-          !showRoomSelectionDialog
-        }
+  Boolean(activeProject) &&
+  !showRoomSelectionDialog
+}
         currentSceneAvailable={currentScene !== null}
 
         roomSelectionEnabled={Boolean(activeProject)}

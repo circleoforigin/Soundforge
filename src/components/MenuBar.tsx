@@ -12,6 +12,7 @@ interface MenuBarProps {
   onNewScene: () => void;
   onOpenScene: () => void;
   onSaveScene: () => void;
+  onCloseScene: () => void;
   onDeleteScene: () => void;
   onImportSound: () => void;
   onManageRooms: () => void;
@@ -41,6 +42,7 @@ function MenuBar({
   onNewScene,
   onOpenScene,
   onSaveScene,
+  onCloseScene,
   onDeleteScene,
   onImportSound,
   onManageRooms,
@@ -155,6 +157,10 @@ function MenuBar({
 
   function handleOpenScene() { closeAllMenus(); onOpenScene(); }
   function handleSaveScene() { closeAllMenus(); onSaveScene(); }
+  function handleCloseScene() {
+    closeAllMenus();
+    onCloseScene();
+  }
   function handleDeleteScene() { closeAllMenus(); onDeleteScene(); }
 
   function handleImportSound() {
@@ -258,18 +264,25 @@ function MenuBar({
               Save Scene
             </button>
 
-            <div className="dropdown-separator" />
-
-            <button className="dropdown-item">
-              Import Scene
-            </button>
-
-            <button className="dropdown-item">
-              Remove from Project
+            <button
+              className="dropdown-item"
+              onClick={handleCloseScene}
+              disabled={!currentSceneAvailable}
+            >
+              Close Scene
             </button>
 
             <button className="dropdown-item" onClick={handleDeleteScene} disabled={!currentSceneAvailable}>
               Delete Scene
+            </button>
+
+            <div className="dropdown-separator" />
+            <button>
+              New From Template...
+            </button>
+
+            <button>
+              Add as Template...
             </button>
           </div>
         )}
