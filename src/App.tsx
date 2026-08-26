@@ -25,7 +25,7 @@ import SettingsDialog from './components/SettingsDialog';
 import DiagnosticLogDialog from './components/DiagnosticLogDialog';
 import RoomSelectorDialog from './components/RoomSelectorDialog';
 import { DEFAULT_APP_SETTINGS, type AppSettings } from './models/AppSettings';
-import { runtimeUrl } from './config/runtime';
+import { appSettingsRepository} from './settings/AppSettingsRepository.ts';
 import { speakerMapRepository } from './speakers/SpeakerMapRepository';
 import { projectRepository } from './projects/ProjectRepository';
 import { sceneRepository } from './scenes/SceneRepository';
@@ -143,10 +143,32 @@ useEffect(() => {
 }, []);
 
 useEffect(() => {
-  void fetch(runtimeUrl('/api/settings'))
-    .then((response) => response.ok ? response.json() as Promise<AppSettings> : Promise.reject())
-    .then(setAppSettings)
-    .catch(() => undefined);
+  async function loadSettings() {
+    try {
+      const settings =
+        await appSettingsRepository
+          .loadSettings();
+
+      setAppSettings(
+        settings
+      );
+    } catch (error) {
+      console.error(
+        'Unable to load application settings:',
+        error
+      );
+
+      setNotification(
+        'Unable to load application settings.'
+      );
+
+      setTimeout(() => {
+        setNotification(null);
+      }, 3000);
+    }
+  }
+
+  void loadSettings();
 }, []);
 
 useEffect(() => {
@@ -202,20 +224,52 @@ useEffect(() => {
   void loadSpeakerMaps();
 }, []);
 
-async function handleSettingsChange(settings: AppSettings) {
-  const previous = appSettings;
-  setAppSettings(settings);
-  setSavingSettings(true);
+async function handleSettingsChange(
+  settings: AppSettings
+) {
+  const previous =
+    appSettings;
+
+  setAppSettings(
+    settings
+  );
+
+  setSavingSettings(
+    true
+  );
+
   try {
-    const response = await fetch(runtimeUrl('/api/settings'), {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings),
-    });
-    if (!response.ok) throw new Error();
-    setAppSettings(await response.json() as AppSettings);
-  } catch {
-    setAppSettings(previous);
-    setNotification('Unable to save application settings.');
-  } finally { setSavingSettings(false); }
+    const savedSettings =
+      await appSettingsRepository
+        .saveSettings(
+          settings
+        );
+
+    setAppSettings(
+      savedSettings
+    );
+  } catch (error) {
+    console.error(
+      'Unable to save application settings:',
+      error
+    );
+
+    setAppSettings(
+      previous
+    );
+
+    setNotification(
+      'Unable to save application settings.'
+    );
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 3000);
+  } finally {
+    setSavingSettings(
+      false
+    );
+  }
 }
 
   const currentScene =
