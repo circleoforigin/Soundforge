@@ -67,12 +67,18 @@ function App() {
     useState(false);
   const pendingProjectActionRef =
     useRef<(() => void) | null>(null);
+  const pendingSaveActionRef =
+  useRef<(() => Promise<boolean>) | null>(
+    null
+  );
   const [notification, setNotification] = useState<string | null>(null);
   const [currentSceneInstanceId, setCurrentSceneInstanceId] =
     useState<string | null>(null);
   const [showRoomSelectionDialog, setShowRoomSelectionDialog] = useState(false);
   const [showSceneSelectionDialog, setShowSceneSelectionDialog] = useState(false);
-  const [ showLoadSceneDialog, setShowLoadSceneDialog] = useState(false);
+  const [showLoadSceneDialog, setShowLoadSceneDialog] = useState(false);
+  const [showDeleteSceneDialog, setShowDeleteSceneDialog] = useState(false);
+  const [selectedSceneIdToDelete, setSelectedSceneIdToDelete] = useState<string | null>(null);
   const [importingSound, setImportingSound] = useState(false);
   const [libraryFolderConfigured, setLibraryFolderConfigured] =
     useState(false);
@@ -362,59 +368,158 @@ const transitionTarget =
   }
 }
 
-  async function handleDeleteScene() {
-  if (!activeProject || !currentScene) {
+async function handleDeleteScene() {
+  if (
+    !activeProject ||
+    activeProject.sceneIds.length === 0
+  ) {
     return;
   }
 
+  try {
+    const scenes =
+      await sceneRepository.loadScenes();
+
+    const projectSceneIds =
+      new Set(
+        activeProject.sceneIds
+      );
+
+    const summaries: SceneSummary[] =
+      scenes
+        .filter((scene) =>
+          projectSceneIds.has(
+            scene.instanceId
+          ) &&
+          scene.instanceId !==
+            currentSceneInstanceId
+        )
+        .map((scene) => ({
+          instanceId:
+            scene.instanceId,
+
+          instanceName:
+            scene.instanceName,
+
+          description:
+            scene.description ?? '',
+        }));
+
+        if (summaries.length === 0) {
+  setNotification(
+    'No scenes available to delete. Close the current scene first if you want to delete it.'
+  );
+
+  setTimeout(() => {
+    setNotification(null);
+  }, 3000);
+
+  return;
+}
+    setSceneSummaries(
+      summaries
+    );
+
+    setSelectedSceneIdToDelete(
+      null
+    );
+
+    setShowDeleteSceneDialog(
+      true
+    );
+  } catch (error) {
+    console.error(
+      'Unable to load scene list:',
+      error
+    );
+
+    setNotification(
+      'Unable to load scenes.'
+    );
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 3000);
+  }
+}
+
+async function confirmDeleteSelectedScene() {
+  if (
+    !activeProject ||
+    !selectedSceneIdToDelete
+  ) {
+    return;
+  }
+
+  const sceneId =
+    selectedSceneIdToDelete;
+
+  const summary =
+    sceneSummaries.find(
+      (scene) =>
+        scene.instanceId === sceneId
+    );
+
+  const sceneName =
+    summary?.instanceName ??
+    'this scene';
+
   if (
     !window.confirm(
-      `Delete "${currentScene.instanceName}"? This cannot be undone.`
+      `Delete "${sceneName}"? This cannot be undone.`
     )
   ) {
     return;
   }
 
-  const deletedSceneId =
-    currentScene.instanceId;
-
   try {
-    roomAudioEngine.stopScene(
-      deletedSceneId
+    if (
+  currentSceneInstanceId === sceneId
+) {
+  const sceneToDelete =
+    loadedScenes.get(sceneId);
+
+  if (sceneToDelete) {
+    try {
+      await roomAudioEngine
+        .fadeOutAndStopScene(
+          sceneId,
+          sceneToDelete.fadeOutMs
+        );
+    } catch {
+      roomAudioEngine.stopScene(
+        sceneId
+      );
+    }
+
+    roomAudioEngine
+      .setSceneTransitionGain(
+        sceneId,
+        1
+      );
+  }
+}
+
+    await sceneRepository.deleteScene(
+      sceneId
     );
-
-    roomAudioEngine.setSceneTransitionGain(
-      deletedSceneId,
-      1
-    );
-
-    transitionRunIdRef.current += 1;
-    transitionInProgressRef.current = false;
-
-    setTransitionInProgress(false);
 
     const updatedProject: Project = {
       ...activeProject,
 
       sceneIds:
         activeProject.sceneIds.filter(
-          (sceneId) =>
-            sceneId !== deletedSceneId
+          (candidateId) =>
+            candidateId !== sceneId
         ),
 
       activeSceneInstanceId:
-        undefined,
-
-      activeRoomId:
-        activeRoom?.id ??
-        activeProject.activeRoomId,
+        currentSceneInstanceId === sceneId
+          ? undefined
+          : activeProject.activeSceneInstanceId,
 
       updatedAt: new Date(),
     };
-
-    await sceneRepository.deleteScene(
-      deletedSceneId
-    );
 
     const projects =
       await projectRepository.saveProject(
@@ -425,12 +530,37 @@ const transitionTarget =
       const updated =
         new Map(current);
 
-      updated.delete(
-        deletedSceneId
-      );
+      updated.delete(sceneId);
 
       return updated;
     });
+
+    setDirtySceneIds((current) => {
+      const updated =
+        new Set(current);
+
+      updated.delete(sceneId);
+
+      return updated;
+    });
+
+    if (
+      currentSceneInstanceId === sceneId
+    ) {
+      setCurrentSceneInstanceId(
+        null
+      );
+    }
+
+    if (
+      transitionTargetInstanceId === sceneId
+    ) {
+      setTransitionTargetInstanceId(
+        null
+      );
+
+      setPreviewingTarget(false);
+    }
 
     setActiveProject(
       updatedProject
@@ -440,36 +570,12 @@ const transitionTarget =
       projects
     );
 
-    setCurrentSceneInstanceId(
+    setSelectedSceneIdToDelete(
       null
     );
 
-    setDirtySceneIds((current) => {
-      const updated =
-        new Set(current);
-
-      updated.delete(
-        deletedSceneId
-      );
-
-      return updated;
-    });
-
-    setTransitionTargetInstanceId(
-      (targetId) =>
-        targetId === deletedSceneId
-          ? null
-          : targetId
-    );
-
-    setPreviewingTarget(false);
-
-    setShowSceneSelectionDialog(
-      updatedProject.sceneIds.length > 0
-    );
-
-    setShowNewSceneDialog(
-      updatedProject.sceneIds.length === 0
+    setShowDeleteSceneDialog(
+      false
     );
 
     setNotification(
@@ -502,7 +608,8 @@ const transitionTarget =
       action();
       return;
     }
-
+    pendingSaveActionRef.current =
+      () => saveActiveProject();
     pendingProjectActionRef.current = action;
     setShowUnsavedChangesDialog(true);
   }
@@ -520,12 +627,54 @@ const transitionTarget =
     return;
   }
 
-  pendingProjectActionRef.current =
-    action;
+  const sceneToSave =
+  currentScene;
 
-  setShowUnsavedChangesDialog(
-    true
-  );
+pendingSaveActionRef.current =
+  async () => {
+    try {
+      await sceneRepository.saveScene(
+        sceneToSave
+      );
+
+      setDirtySceneIds(
+        (current) => {
+          const updated =
+            new Set(current);
+
+          updated.delete(
+            sceneToSave.instanceId
+          );
+
+          return updated;
+        }
+      );
+
+      return true;
+    } catch (error) {
+      console.error(
+        'Unable to save scene:',
+        error
+      );
+
+      setNotification(
+        'Unable to save scene.'
+      );
+
+      setTimeout(() => {
+        setNotification(null);
+      }, 3000);
+
+      return false;
+    }
+  };
+
+pendingProjectActionRef.current =
+  action;
+
+setShowUnsavedChangesDialog(
+  true
+);
 }
 
   async function finishPendingProjectAction(
@@ -538,18 +687,24 @@ const transitionTarget =
     return;
   }
 
-  if (saveFirst) {
+ if (saveFirst) {
+  const saveAction =
+    pendingSaveActionRef.current;
+
+  if (saveAction) {
     const saved =
-      await saveActiveProject();
+      await saveAction();
 
     if (!saved) {
       return;
     }
   }
+}
 
   pendingProjectActionRef.current =
     null;
-
+pendingSaveActionRef.current =
+  null;
   setShowUnsavedChangesDialog(
     false
   );
@@ -646,7 +801,52 @@ const transitionTarget =
     return;
   }
 
-  function handleCloseScene() {
+  const createNewScene = async () => {
+  if (currentScene) {
+    try {
+      await roomAudioEngine
+        .fadeOutAndStopScene(
+          currentScene.instanceId,
+          currentScene.fadeOutMs
+        );
+    } catch (error) {
+      console.error(
+        'Unable to fade out current scene:',
+        error
+      );
+
+      roomAudioEngine.stopScene(
+        currentScene.instanceId
+      );
+    }
+
+    roomAudioEngine.setSceneTransitionGain(
+      currentScene.instanceId,
+      1
+    );
+  }
+
+  setCurrentSceneInstanceId(
+    null
+  );
+
+  setTransitionTargetInstanceId(
+    null
+  );
+
+  setPreviewingTarget(false);
+
+  setShowNewSceneDialog(true);
+};
+
+  requestCurrentSceneAction(
+  () => {
+    void createNewScene();
+  }
+);
+}
+
+function handleCloseScene() {
   if (!currentScene) {
     return;
   }
@@ -720,36 +920,6 @@ const transitionTarget =
     () => {
       void closeScene();
     }
-  );
-}
-
-  const createNewScene = () => {
-    if (currentSceneInstanceId) {
-      roomAudioEngine.stopScene(
-        currentSceneInstanceId
-      );
-
-      roomAudioEngine.setSceneTransitionGain(
-        currentSceneInstanceId,
-        1
-      );
-    }
-
-    setCurrentSceneInstanceId(
-      null
-    );
-
-    setTransitionTargetInstanceId(
-      null
-    );
-
-    setPreviewingTarget(false);
-
-    setShowNewSceneDialog(true);
-  };
-
-  requestProjectAction(
-    createNewScene
   );
 }
 
@@ -1701,6 +1871,81 @@ onOpenScene={() => {
           </div>
         </div>
       )}
+
+      {activeProject &&
+  showDeleteSceneDialog && (
+    <div className="dialog-backdrop">
+      <div className="dialog">
+        <h2>
+          Delete Scene
+        </h2>
+
+        <div className="project-picker-list">
+          {sceneSummaries.map(
+            (scene) => (
+              <button
+                key={
+                  scene.instanceId
+                }
+                className={
+                  selectedSceneIdToDelete ===
+                  scene.instanceId
+                    ? 'project-picker-item selected'
+                    : 'project-picker-item'
+                }
+                onClick={() =>
+                  setSelectedSceneIdToDelete(
+                    scene.instanceId
+                  )
+                }
+              >
+                <strong>
+                  {
+                    scene.instanceName
+                  }
+                </strong>
+
+                {scene.description && (
+                  <span>
+                    {
+                      scene.description
+                    }
+                  </span>
+                )}
+              </button>
+            )
+          )}
+        </div>
+
+        <div className="dialog-buttons">
+          <button
+            onClick={() => {
+              setSelectedSceneIdToDelete(
+                null
+              );
+
+              setShowDeleteSceneDialog(
+                false
+              );
+            }}
+          >
+            Cancel
+          </button>
+
+          <button
+            disabled={
+              !selectedSceneIdToDelete
+            }
+            onClick={() =>
+              void confirmDeleteSelectedScene()
+            }
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  )}
 
       {activeProject && showRoomSelectionDialog && (
         <RoomSelectorDialog
