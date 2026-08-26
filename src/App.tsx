@@ -222,17 +222,38 @@ const transitionTarget =
     setShowNewProjectDialog(true);
   }
 
-  function saveActiveProject(notificationMessage = 'Project saved.'): boolean {
-    if (!activeProject) {
-      return false;
+  async function saveActiveProject(
+  notificationMessage = 'Project saved.'
+): Promise<boolean> {
+  if (!activeProject) {
+    return false;
+  }
+
+  try {
+    for (const sceneId of dirtySceneIds) {
+      const scene =
+        loadedScenes.get(sceneId);
+
+      if (!scene) {
+        continue;
+      }
+
+      await sceneRepository.saveScene(
+        scene
+      );
     }
 
     const projectToSave: Project = {
       ...activeProject,
+
       activeSceneInstanceId:
-        currentSceneInstanceId ?? undefined,
+        currentSceneInstanceId ??
+        undefined,
+
       activeRoomId:
-        activeRoom?.id ?? undefined,
+        activeRoom?.id ??
+        undefined,
+
       updatedAt: new Date(),
     };
 
@@ -241,26 +262,92 @@ const transitionTarget =
         projectToSave
       );
 
-    setActiveProject(projectToSave);
-    setSavedProjects(projects);
-    setDirtySceneIds(new Set());
-    setNotification(notificationMessage);
+    setActiveProject(
+      projectToSave
+    );
+
+    setSavedProjects(
+      projects
+    );
+
+    setDirtySceneIds(
+      new Set()
+    );
+
+    setNotification(
+      notificationMessage
+    );
 
     setTimeout(() => {
       setNotification(null);
     }, 3000);
 
     return true;
+  } catch (error) {
+    console.error(
+      'Unable to save project:',
+      error
+    );
+
+    setNotification(
+      'Unable to save project.'
+    );
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 3000);
+
+    return false;
   }
+}
 
   function handleSaveProject() {
-    saveActiveProject();
+  void saveActiveProject();
+}
+
+  async function handleSaveScene() {
+  if (!currentScene) {
+    return;
   }
 
-  function handleSaveScene() {
-    if (!currentScene) return;
-    saveActiveProject('Scene saved.');
+  try {
+    await sceneRepository.saveScene(
+      currentScene
+    );
+
+    setDirtySceneIds((current) => {
+      const updated =
+        new Set(current);
+
+      updated.delete(
+        currentScene.instanceId
+      );
+
+      return updated;
+    });
+
+    setNotification(
+      'Scene saved.'
+    );
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 3000);
+  } catch (error) {
+    console.error(
+      'Unable to save scene:',
+      error
+    );
+
+    setNotification(
+      'Unable to save scene.'
+    );
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 3000);
   }
+}
 
   function handleDeleteScene() {
     if (!activeProject || !currentScene) return;
@@ -275,7 +362,10 @@ const transitionTarget =
 
     const updatedProject: Project = {
       ...activeProject,
-      scenes: activeProject.scenes.filter((scene) => scene.instanceId !== deletedSceneId),
+     sceneIds: activeProject.sceneIds.filter(
+  (sceneId) =>
+    sceneId !== deletedSceneId
+),
       activeSceneInstanceId: undefined,
       activeRoomId: activeRoom?.id ?? activeProject.activeRoomId,
       updatedAt: new Date(),
@@ -288,9 +378,13 @@ const transitionTarget =
     setDirtySceneIds(new Set());
     setTransitionTargetInstanceId((targetId) => targetId === deletedSceneId ? null : targetId);
     setPreviewingTarget(false);
-    setShowSceneSelectionDialog(updatedProject.scenes.length > 0);
-    setShowNewSceneDialog(updatedProject.scenes.length === 0);
-    setNotification('Scene deleted.');
+    setShowSceneSelectionDialog(
+  updatedProject.sceneIds.length > 0
+);
+
+setShowNewSceneDialog(
+  updatedProject.sceneIds.length === 0
+);
     setTimeout(() => setNotification(null), 3000);
   }
 
@@ -306,24 +400,34 @@ const transitionTarget =
     setShowUnsavedChangesDialog(true);
   }
 
-  function finishPendingProjectAction(
-    saveFirst: boolean
-  ) {
-    const action =
-      pendingProjectActionRef.current;
+  async function finishPendingProjectAction(
+  saveFirst: boolean
+) {
+  const action =
+    pendingProjectActionRef.current;
 
-    if (!action) {
-      return;
-    }
-
-    if (saveFirst && !saveActiveProject()) {
-      return;
-    }
-
-    pendingProjectActionRef.current = null;
-    setShowUnsavedChangesDialog(false);
-    action();
+  if (!action) {
+    return;
   }
+
+  if (saveFirst) {
+    const saved =
+      await saveActiveProject();
+
+    if (!saved) {
+      return;
+    }
+  }
+
+  pendingProjectActionRef.current =
+    null;
+
+  setShowUnsavedChangesDialog(
+    false
+  );
+
+  action();
+}
 
   function cancelPendingProjectAction() {
     pendingProjectActionRef.current = null;
@@ -332,10 +436,16 @@ const transitionTarget =
 
   function teardownProjectRuntime(project: Project) {
     roomAudioEngine.shutdown();
-    for (const scene of project.scenes) {
-      roomAudioEngine.stopScene(scene.instanceId);
-      roomAudioEngine.setSceneTransitionGain(scene.instanceId, 1);
-    }
+    for (const scene of loadedScenes.values()) {
+  roomAudioEngine.stopScene(
+    scene.instanceId
+  );
+
+  roomAudioEngine.setSceneTransitionGain(
+    scene.instanceId,
+    1
+  );
+}
 
     transitionRunIdRef.current += 1;
     transitionInProgressRef.current = false;
@@ -382,16 +492,7 @@ const transitionTarget =
     if (activeProject) {
       teardownProjectRuntime(activeProject);
     }
-    setLoadedScenes(
-      new Map(
-        project.scenes.map(
-          (scene) => [
-            scene.instanceId,
-            scene,
-          ]
-        )
-      )
-    );
+    setLoadedScenes(new Map());
     setActiveProject(project);
     setCurrentSceneInstanceId(null);
     setTransitionTargetInstanceId(null);
@@ -507,7 +608,7 @@ const transitionTarget =
       name: trimmedName,
       createdAt: now,
       updatedAt: now,
-      scenes: [],
+      sceneIds: [],
     };
 
     setActiveProject(newProject);
@@ -534,7 +635,7 @@ const transitionTarget =
     );
   }
 
-  function handleCreateScene() {
+  async function handleCreateScene() {
     if (!activeProject) {
       return;
     }
@@ -567,6 +668,27 @@ const transitionTarget =
       fadeOutMs: 2000,
     };
 
+    try {
+  await sceneRepository.saveScene(
+    newInstance
+  );
+} catch (error) {
+  console.error(
+    'Unable to create scene:',
+    error
+  );
+
+  setNotification(
+    'Unable to create scene.'
+  );
+
+  setTimeout(() => {
+    setNotification(null);
+  }, 3000);
+
+  return;
+}
+
     setLoadedScenes((current) => {
       const updated =
         new Map(current);
@@ -581,22 +703,16 @@ const transitionTarget =
 
     const updatedProject: Project = {
       ...activeProject,
-      scenes: [
-        ...activeProject.scenes,
-        newInstance,
+     sceneIds: [
+        ...activeProject.sceneIds,
+        newInstance.instanceId,
       ],
+      activeSceneInstanceId:
+        newInstance.instanceId,
       updatedAt: now,
     };
 
     setActiveProject(updatedProject);
-    setDirtySceneIds((current) => {
-      const updated = new Set(current);
-
-      updated.add(newInstance.instanceId);
-
-      return updated;
-    });
-
     setCurrentSceneInstanceId(
       newInstance.instanceId
     );
@@ -625,24 +741,6 @@ const transitionTarget =
       );
 
       return updated;
-    });
-
-    setActiveProject((currentProject) => {
-      if (!currentProject) {
-        return currentProject;
-      }
-
-      return {
-        ...currentProject,
-
-        scenes: currentProject.scenes.map((scene) =>
-          scene.instanceId === updatedScene.instanceId
-            ? updatedScene
-            : scene
-        ),
-
-        updatedAt: new Date(),
-      };
     });
 
     setDirtySceneIds((current) => {
@@ -881,8 +979,13 @@ const transitionTarget =
     if (activeProject) {
       setCurrentSceneInstanceId(null);
       setShowRoomSelectionDialog(false);
-      setShowSceneSelectionDialog(activeProject.scenes.length > 0);
-      setShowNewSceneDialog(activeProject.scenes.length === 0);
+      setShowSceneSelectionDialog(
+  activeProject.sceneIds.length > 0
+);
+
+setShowNewSceneDialog(
+  activeProject.sceneIds.length === 0
+);
       setTransitionTargetInstanceId(null);
       setPreviewingTarget(false);
       const selectedSpeakerMap =
@@ -897,11 +1000,78 @@ const transitionTarget =
     }
   }
 
-  function handleActivateScene(instanceId: string) {
-    if (!activeProject?.scenes.some((scene) => scene.instanceId === instanceId)) return;
-    setCurrentSceneInstanceId(instanceId);
-    setShowSceneSelectionDialog(false);
+  async function handleActivateScene(
+  instanceId: string
+) {
+  if (
+    !activeProject?.sceneIds.includes(
+      instanceId
+    )
+  ) {
+    return;
   }
+
+  let scene =
+    loadedScenes.get(instanceId);
+
+  if (!scene) {
+    try {
+      scene =
+        await sceneRepository.loadScene(
+          instanceId
+        ) ?? undefined;
+    } catch (error) {
+      console.error(
+        'Unable to load scene:',
+        error
+      );
+
+      setNotification(
+        'Unable to load scene.'
+      );
+
+      setTimeout(() => {
+        setNotification(null);
+      }, 3000);
+
+      return;
+    }
+
+    if (!scene) {
+      setNotification(
+        'Scene could not be found.'
+      );
+
+      setTimeout(() => {
+        setNotification(null);
+      }, 3000);
+
+      return;
+    }
+
+    const loadedScene = scene;
+
+    setLoadedScenes((current) => {
+      const updated =
+        new Map(current);
+
+      updated.set(
+        loadedScene.instanceId,
+        loadedScene
+      );
+
+      return updated;
+    });
+  }
+
+  setCurrentSceneInstanceId(
+    instanceId
+  );
+
+  setShowSceneSelectionDialog(
+    false
+  );
+}
 
   return (
     <div className="app">
@@ -911,7 +1081,13 @@ const transitionTarget =
         onSaveProject={handleSaveProject}
         onCloseProject={handleCloseProject}
         onNewScene={handleNewScene}
-        onOpenScene={() => setShowSceneSelectionDialog(Boolean(activeProject?.scenes.length))}
+onOpenScene={() =>
+  setShowSceneSelectionDialog(
+    Boolean(
+      activeProject?.sceneIds.length
+    )
+  )
+}
         onSaveScene={handleSaveScene}
         onDeleteScene={handleDeleteScene}
         onImportSound={handleImportSound}
@@ -968,7 +1144,11 @@ const transitionTarget =
                 )
               : false
           }
-          projectScenes={activeProject?.scenes ?? []}
+          projectScenes={
+  Array.from(
+    loadedScenes.values()
+  )
+}
           soundObjectTemplates={soundObjectTemplates}
           onSceneChange={handleSceneChange}          
           onSelectTransitionTarget={
@@ -1075,15 +1255,23 @@ const transitionTarget =
           <div className="dialog">
             <h2>Select Scene</h2>
             <div className="project-picker-list">
-              {activeProject.scenes.map((scene) => (
-                <button
-                  key={scene.instanceId}
-                  className="project-picker-item"
-                  onClick={() => handleActivateScene(scene.instanceId)}
-                >
-                  {scene.instanceName}
-                </button>
-              ))}
+              {activeProject.sceneIds.map(
+  (sceneId) => (
+    <button
+      key={sceneId}
+      className="project-picker-item"
+      onClick={() =>
+  void handleActivateScene(
+    sceneId
+  )
+}
+    >
+      {loadedScenes.get(
+        sceneId
+      )?.instanceName ?? sceneId}
+    </button>
+  )
+)}
             </div>
           </div>
         </div>
@@ -1101,7 +1289,9 @@ const transitionTarget =
             <div className="dialog-buttons">
               <button
                 onClick={() =>
-                  finishPendingProjectAction(true)
+                  void finishPendingProjectAction(
+                    true
+                  )
                 }
               >
                 Save
@@ -1109,7 +1299,9 @@ const transitionTarget =
 
               <button
                 onClick={() =>
-                  finishPendingProjectAction(false)
+                  void finishPendingProjectAction(
+                    false
+                  )
                 }
               >
                 Don&apos;t Save
@@ -1148,7 +1340,9 @@ const transitionTarget =
               </button>
 
               <button
-                onClick={handleCreateScene}
+                onClick={() =>
+                  void handleCreateScene()
+                }
               >
                 Create
               </button>

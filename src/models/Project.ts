@@ -1,9 +1,13 @@
-import type { PersistentEntity } from './PersistentEntity';
-import type { SceneInstance } from './SceneInstance';
+import type {
+  PersistentEntity,
+} from './PersistentEntity';
 
-export interface Project extends PersistentEntity {
+export interface Project
+  extends PersistentEntity {
   name: string;
-  scenes: SceneInstance[];
+
+  sceneIds: string[];
+
   activeSceneInstanceId?: string;
   activeRoomId?: string;
 }
