@@ -22,10 +22,9 @@ export interface ImportSoundData {
 
 interface ImportSoundDialogProps {
   onCancel: () => void;
-  onImport: (data: ImportSoundData) => void;
-  onChooseLibraryFolder: () => Promise<void>;
-  libraryFolderConfigured: boolean;
-  directoryPickerSupported: boolean;
+  onImport: (
+    data: ImportSoundData
+  ) => void;
   isImporting: boolean;
 }
 
@@ -54,9 +53,6 @@ function getUrlFileName(url: string): string | undefined {
 function ImportSoundDialog({
   onCancel,
   onImport,
-  onChooseLibraryFolder,
-  libraryFolderConfigured,
-  directoryPickerSupported,
   isImporting,
 }: ImportSoundDialogProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -75,7 +71,6 @@ function ImportSoundDialog({
   const [sourceUrl, setSourceUrl] = useState('');
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
-  const [folderError, setFolderError] = useState<string | null>(null);
 
   function stopPreview() {
     audioRef.current?.pause();
@@ -167,22 +162,6 @@ function ImportSoundDialog({
     }
   }
 
-  async function handleChooseLibraryFolder() {
-    setFolderError(null);
-
-    try {
-      await onChooseLibraryFolder();
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        return;
-      }
-
-      setFolderError(
-        error instanceof Error ? error.message : 'Unable to choose library folder.'
-      );
-    }
-  }
-
   function handleImport() {
     const trimmedName = name.trim();
 
@@ -229,10 +208,16 @@ function ImportSoundDialog({
     ? file !== null
     : webUrl.trim().length > 0;
   const importDisabled =
-    !name.trim() ||
-    isImporting ||
-    (sourceType === 'local' && (!file || !libraryFolderConfigured)) ||
-    (sourceType === 'url' && !webUrl.trim());
+  !name.trim() ||
+  isImporting ||
+  (
+    sourceType === 'local' &&
+    !file
+  ) ||
+  (
+    sourceType === 'url' &&
+    !webUrl.trim()
+  );
 
   return (
     <div className="dialog-backdrop">
@@ -261,28 +246,6 @@ function ImportSoundDialog({
             Web URL
           </button>
         </div>
-
-        <div className="library-folder-status">
-          <span>
-            Local Library Folder:{' '}
-            <strong>
-              {libraryFolderConfigured ? 'Configured' : 'Not configured'}
-            </strong>
-          </span>
-          <button
-            disabled={!directoryPickerSupported || isImporting}
-            onClick={() => void handleChooseLibraryFolder()}
-          >
-            {libraryFolderConfigured
-              ? 'Change Library Folder'
-              : 'Choose Library Folder'}
-          </button>
-          {!directoryPickerSupported && (
-            <small>The File System Access API is unavailable in this browser.</small>
-          )}
-          {folderError && <small className="import-error">{folderError}</small>}
-        </div>
-
         {sourceType === 'local' ? (
           <>
             <div className="import-row">

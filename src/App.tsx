@@ -33,7 +33,7 @@ import { sceneRepository } from './scenes/SceneRepository';
 import ImportSoundDialog, {
   type ImportSoundData,
 } from './components/ImportSoundDialog';
-import { localSoundLibrary } from './services/library/browser/LocalSoundLibraryService';
+import { hostedSoundLibrary} from './services/library/HostedSoundLibraryService';
 import { roomAudioEngine } from './audio/RoomAudioEngine';
 import { hostedCollectionRepository } from './host/HostedCollectionRepository';
 
@@ -80,8 +80,6 @@ function App() {
   const [showDeleteSceneDialog, setShowDeleteSceneDialog] = useState(false);
   const [selectedSceneIdToDelete, setSelectedSceneIdToDelete] = useState<string | null>(null);
   const [importingSound, setImportingSound] = useState(false);
-  const [libraryFolderConfigured, setLibraryFolderConfigured] =
-    useState(false);
   const [transitionTargetInstanceId, setTransitionTargetInstanceId] =
     useState<string | null>(null);
   const [previewingTarget, setPreviewingTarget] = useState(false);
@@ -123,11 +121,18 @@ const [customRooms, setCustomRooms] = useState<Room[]>([]);
 useEffect(() => {
   async function loadSoundLibrary() {
     try {
-      const assets = await localSoundLibrary.initialize();
-      setSoundAssets(assets);
-      setLibraryFolderConfigured(localSoundLibrary.directoryConfigured);
+      const assets =
+        await hostedSoundLibrary
+          .initialize();
+
+      setSoundAssets(
+        assets
+      );
     } catch (error) {
-      console.error(error);
+      console.error(
+        'Unable to load sound library:',
+        error
+      );
 
       setNotification(
         'Unable to load sound library.'
@@ -139,7 +144,7 @@ useEffect(() => {
     }
   }
 
-  loadSoundLibrary();
+  void loadSoundLibrary();
 }, []);
 
 useEffect(() => {
@@ -950,12 +955,6 @@ function handleCloseScene() {
     setShowImportSoundDialog(true);
   }
 
-  async function handleChooseLibraryFolder() {
-    const assets = await localSoundLibrary.chooseDirectory();
-    setSoundAssets(assets);
-    setLibraryFolderConfigured(true);
-  }
-
   async function handleSubmitSoundImport(
     data: ImportSoundData
   ) {
@@ -976,13 +975,22 @@ function handleCloseScene() {
         license: data.license,
         sourceUrl: data.sourceUrl,
       };
-      const asset = data.sourceType === 'local'
-        ? data.file
-          ? await localSoundLibrary.importLocalFile(data.file, metadata)
-          : null
-        : data.webUrl
-          ? await localSoundLibrary.importWebUrl(data.webUrl, metadata)
-          : null;
+      const asset =
+  data.sourceType === 'local'
+    ? data.file
+      ? await hostedSoundLibrary
+          .importLocalFile(
+            data.file,
+            metadata
+          )
+      : null
+    : data.webUrl
+      ? await hostedSoundLibrary
+          .importWebUrl(
+            data.webUrl,
+            metadata
+          )
+      : null;
 
       if (!asset) {
         throw new Error('The selected import source is incomplete.');
@@ -992,9 +1000,9 @@ function handleCloseScene() {
 
       setShowImportSoundDialog(false);
 
-      setNotification(
-        'Sound added to local library.'
-      );
+     setNotification(
+  'Sound added to library.'
+);
 
       setTimeout(() => {
         setNotification(null);
@@ -2208,11 +2216,6 @@ onOpenScene={() => {
             setShowImportSoundDialog(false)
           }
           onImport={handleSubmitSoundImport}
-          onChooseLibraryFolder={handleChooseLibraryFolder}
-          libraryFolderConfigured={libraryFolderConfigured}
-          directoryPickerSupported={
-            localSoundLibrary.directoryPickerSupported
-          }
           isImporting={importingSound}
         />
       )}

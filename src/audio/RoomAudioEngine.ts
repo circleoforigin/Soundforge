@@ -6,7 +6,7 @@ import type { SpeakerMap } from '../models/SpeakerMap';
 import type { SpeakerMix } from '../utils/spatialMixMath';
 import { runtimeUrl } from '../config/runtime';
 import { recordDiagnostic } from '../services/diagnostics/DiagnosticClient';
-import { localSoundLibrary } from '../services/library/browser/LocalSoundLibraryService';
+import { hostedSoundLibrary} from '../services/library/HostedSoundLibraryService';
 import { playbackEngine, type PlaybackRouting, type StereoMix } from './PlaybackEngine';
 import { requireSuccessfulRoomAudioResponse, roomAudioErrorMessage as errorMessage } from './RoomAudioHttp';
 import {
@@ -379,7 +379,7 @@ class RoomAudioEngine {
     if (cached.status !== 404) throw new Error(await errorMessage(cached));
     let file: File;
     if (asset.source.type === 'local') {
-      file = await localSoundLibrary.readManagedAsset(asset);
+      file = await hostedSoundLibrary.readManagedAsset(asset);
     } else {
       const sourceResponse = await fetch(asset.source.path);
       if (!sourceResponse.ok) throw new Error('Unable to read this sound for Room audio synchronization.');
