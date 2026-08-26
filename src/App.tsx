@@ -28,6 +28,7 @@ import { DEFAULT_APP_SETTINGS, type AppSettings } from './models/AppSettings';
 import { runtimeUrl } from './config/runtime';
 import { speakerMapRepository } from './speakers/SpeakerMapRepository';
 import { projectRepository } from './projects/ProjectRepository';
+import { sceneRepository } from './scenes/SceneRepository';
 
 import ImportSoundDialog, {
   type ImportSoundData,
@@ -44,6 +45,10 @@ function App() {
   const [savedProjects, setSavedProjects] = useState<Project[]>([]);
   const [soundAssets, setSoundAssets] = useState<SoundAsset[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
+  const [loadedScenes, setLoadedScenes] =
+    useState<Map<string, SceneInstance>>(
+    () => new Map()
+  );
   const [dirtySceneIds, setDirtySceneIds] =
     useState<Set<string>>(() => new Set());
   const [showUnsavedChangesDialog, setShowUnsavedChangesDialog] =
@@ -195,14 +200,18 @@ async function handleSettingsChange(settings: AppSettings) {
 }
 
   const currentScene =
-    activeProject?.scenes.find(
-      (scene) => scene.instanceId === currentSceneInstanceId
-    ) ?? null;
+  currentSceneInstanceId
+    ? loadedScenes.get(
+        currentSceneInstanceId
+      ) ?? null
+    : null;
 
-  const transitionTarget =
-    activeProject?.scenes.find(
-      (scene) => scene.instanceId === transitionTargetInstanceId
-    ) ?? null;
+const transitionTarget =
+  transitionTargetInstanceId
+    ? loadedScenes.get(
+        transitionTargetInstanceId
+      ) ?? null
+    : null;
 
   const displayedScene =
     previewingTarget && transitionTarget
@@ -347,6 +356,7 @@ async function handleSettingsChange(settings: AppSettings) {
 
     teardownProjectRuntime(activeProject);
     setActiveProject(null);
+    setLoadedScenes(new Map());
     setCurrentSceneInstanceId(null);
     setActiveRoom(null);
   }
@@ -372,7 +382,16 @@ async function handleSettingsChange(settings: AppSettings) {
     if (activeProject) {
       teardownProjectRuntime(activeProject);
     }
-
+    setLoadedScenes(
+      new Map(
+        project.scenes.map(
+          (scene) => [
+            scene.instanceId,
+            scene,
+          ]
+        )
+      )
+    );
     setActiveProject(project);
     setCurrentSceneInstanceId(null);
     setTransitionTargetInstanceId(null);
@@ -480,6 +499,7 @@ async function handleSettingsChange(settings: AppSettings) {
       teardownProjectRuntime(activeProject);
     }
 
+    setLoadedScenes(new Map());
     const now = new Date();
 
     const newProject: Project = {
@@ -547,6 +567,18 @@ async function handleSettingsChange(settings: AppSettings) {
       fadeOutMs: 2000,
     };
 
+    setLoadedScenes((current) => {
+      const updated =
+        new Map(current);
+
+      updated.set(
+        newInstance.instanceId,
+        newInstance
+      );
+
+      return updated;
+    });
+
     const updatedProject: Project = {
       ...activeProject,
       scenes: [
@@ -576,14 +608,24 @@ async function handleSettingsChange(settings: AppSettings) {
     setShowNewSceneDialog(false);
   }
 
-  
-
   function handleSceneChange(
     updatedScene: SceneInstance
   ) {
     if (!activeProject) {
       return;
     }
+
+    setLoadedScenes((current) => {
+      const updated =
+        new Map(current);
+
+      updated.set(
+        updatedScene.instanceId,
+        updatedScene
+      );
+
+      return updated;
+    });
 
     setActiveProject((currentProject) => {
       if (!currentProject) {
