@@ -45,10 +45,16 @@ function App() {
   const [savedProjects, setSavedProjects] = useState<Project[]>([]);
   const [soundAssets, setSoundAssets] = useState<SoundAsset[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
+  type SceneSummary = {
+    instanceId: string;
+    instanceName: string;
+    description: string;
+  };
   const [loadedScenes, setLoadedScenes] =
     useState<Map<string, SceneInstance>>(
     () => new Map()
   );
+  const [sceneSummaries, setSceneSummaries] = useState<SceneSummary[]>([]);
   const [dirtySceneIds, setDirtySceneIds] =
     useState<Set<string>>(() => new Set());
   const [showUnsavedChangesDialog, setShowUnsavedChangesDialog] =
@@ -1043,7 +1049,7 @@ const transitionTarget =
     );
   }
 
-  function handleSelectRoom(
+  async function handleSelectRoom(
     roomId: string | null
   ) {
     if (roomId === null) {
@@ -1094,6 +1100,59 @@ setShowNewSceneDialog(
       });
     }
   }
+
+async function openSceneSelectionDialog() {
+  if (!activeProject) {
+    return;
+  }
+
+  try {
+    const scenes =
+      await sceneRepository.loadScenes();
+
+    const projectSceneIds =
+      new Set(activeProject.sceneIds);
+
+    const summaries: SceneSummary[] =
+      scenes
+        .filter((scene) =>
+          projectSceneIds.has(
+            scene.instanceId
+          )
+        )
+        .map((scene) => ({
+          instanceId:
+            scene.instanceId,
+
+          instanceName:
+            scene.instanceName,
+
+          description:
+            scene.description ?? '',
+        }));
+
+    setSceneSummaries(
+      summaries
+    );
+
+    setShowSceneSelectionDialog(
+      true
+    );
+  } catch (error) {
+    console.error(
+      'Unable to load scene list:',
+      error
+    );
+
+    setNotification(
+      'Unable to load scenes.'
+    );
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 3000);
+  }
+}
 
   async function handleActivateScene(
   instanceId: string
@@ -1178,13 +1237,13 @@ setShowNewSceneDialog(
         onSaveProject={handleSaveProject}
         onCloseProject={handleCloseProject}
         onNewScene={handleNewScene}
-onOpenScene={() =>
-  setShowSceneSelectionDialog(
-    Boolean(
-      activeProject?.sceneIds.length
-    )
-  )
-}
+onOpenScene={() => {
+  if (
+    activeProject?.sceneIds.length
+  ) {
+    void openSceneSelectionDialog();
+  }
+}}
         onSaveScene={handleSaveScene}
         onDeleteScene={handleDeleteScene}
         onImportSound={handleImportSound}
@@ -1358,10 +1417,10 @@ onOpenScene={() =>
       key={sceneId}
       className="project-picker-item"
       onClick={() =>
-  void handleActivateScene(
-    sceneId
-  )
-}
+        void handleActivateScene(
+          sceneId
+        )
+      }
     >
       {loadedScenes.get(
         sceneId
