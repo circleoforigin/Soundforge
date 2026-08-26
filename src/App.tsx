@@ -1073,32 +1073,41 @@ const transitionTarget =
       return;
     }
 
-    if (activeRoom?.id !== room.id) {
-      roomAudioEngine.shutdown();
-    }
-    handleActiveRoomChange(room);
     if (activeProject) {
-      setCurrentSceneInstanceId(null);
-      setShowRoomSelectionDialog(false);
-      setShowSceneSelectionDialog(
-  activeProject.sceneIds.length > 0
-);
+  setCurrentSceneInstanceId(null);
+  setShowRoomSelectionDialog(false);
 
-setShowNewSceneDialog(
-  activeProject.sceneIds.length === 0
-);
-      setTransitionTargetInstanceId(null);
-      setPreviewingTarget(false);
-      const selectedSpeakerMap =
-  speakerMaps.find(
-    (speakerMap) =>
-      speakerMap.id ===
-      room.speakerMapId
-  ) ?? headphonesSpeakerMap;
-      void roomAudioEngine.configure(room, selectedSpeakerMap).catch((error: unknown) => {
-        console.error('Room activation failed.', error);
-      });
-    }
+  if (activeProject.sceneIds.length > 0) {
+    await openSceneSelectionDialog();
+
+    setShowNewSceneDialog(false);
+  } else {
+    setShowSceneSelectionDialog(false);
+    setShowNewSceneDialog(true);
+  }
+
+  setTransitionTargetInstanceId(null);
+  setPreviewingTarget(false);
+
+  const selectedSpeakerMap =
+    speakerMaps.find(
+      (speakerMap) =>
+        speakerMap.id ===
+        room.speakerMapId
+    ) ?? headphonesSpeakerMap;
+
+  void roomAudioEngine
+    .configure(
+      room,
+      selectedSpeakerMap
+    )
+    .catch((error: unknown) => {
+      console.error(
+        'Room activation failed.',
+        error
+      );
+    });
+}
   }
 
 async function openSceneSelectionDialog() {
