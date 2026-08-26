@@ -55,6 +55,12 @@ function App() {
     () => new Map()
   );
   const [sceneSummaries, setSceneSummaries] = useState<SceneSummary[]>([]);
+  const [
+    selectedSceneIdsToLoad,
+    setSelectedSceneIdsToLoad,
+  ] = useState<Set<string>>(
+    () => new Set()
+  );
   const [dirtySceneIds, setDirtySceneIds] =
     useState<Set<string>>(() => new Set());
   const [showUnsavedChangesDialog, setShowUnsavedChangesDialog] =
@@ -66,6 +72,7 @@ function App() {
     useState<string | null>(null);
   const [showRoomSelectionDialog, setShowRoomSelectionDialog] = useState(false);
   const [showSceneSelectionDialog, setShowSceneSelectionDialog] = useState(false);
+  const [ showLoadSceneDialog, setShowLoadSceneDialog] = useState(false);
   const [importingSound, setImportingSound] = useState(false);
   const [libraryFolderConfigured, setLibraryFolderConfigured] =
     useState(false);
@@ -1163,6 +1170,129 @@ async function openSceneSelectionDialog() {
   }
 }
 
+async function openLoadSceneDialog() {
+  if (!activeProject) {
+    return;
+  }
+
+  try {
+    const scenes =
+      await sceneRepository.loadScenes();
+
+    const projectSceneIds =
+      new Set(
+        activeProject.sceneIds
+      );
+
+    const summaries: SceneSummary[] =
+      scenes
+        .filter((scene) =>
+          projectSceneIds.has(
+            scene.instanceId
+          )
+        )
+        .map((scene) => ({
+          instanceId:
+            scene.instanceId,
+
+          instanceName:
+            scene.instanceName,
+
+          description:
+            scene.description ?? '',
+        }));
+
+    setSceneSummaries(
+      summaries
+    );
+
+    setSelectedSceneIdsToLoad(
+      new Set()
+    );
+
+    setShowLoadSceneDialog(
+      true
+    );
+  } catch (error) {
+    console.error(
+      'Unable to load scene list:',
+      error
+    );
+
+    setNotification(
+      'Unable to load scenes.'
+    );
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 3000);
+  }
+}
+
+async function handleLoadSelectedScenes() {
+  if (
+    !activeProject ||
+    selectedSceneIdsToLoad.size === 0
+  ) {
+    return;
+  }
+
+  try {
+    const scenesToLoad =
+      await Promise.all(
+        Array.from(
+          selectedSceneIdsToLoad
+        ).map(
+          (sceneId) =>
+            sceneRepository.loadScene(
+              sceneId
+            )
+        )
+      );
+
+    setLoadedScenes((current) => {
+      const updated =
+        new Map(current);
+
+      for (
+        const scene of scenesToLoad
+      ) {
+        if (!scene) {
+          continue;
+        }
+
+        updated.set(
+          scene.instanceId,
+          scene
+        );
+      }
+
+      return updated;
+    });
+
+    setSelectedSceneIdsToLoad(
+      new Set()
+    );
+
+    setShowLoadSceneDialog(
+      false
+    );
+  } catch (error) {
+    console.error(
+      'Unable to load selected scenes:',
+      error
+    );
+
+    setNotification(
+      'Unable to load selected scenes.'
+    );
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 3000);
+  }
+}
+
   async function handleActivateScene(
   instanceId: string
 ) {
@@ -1250,7 +1380,7 @@ onOpenScene={() => {
   if (
     activeProject?.sceneIds.length
   ) {
-    void openSceneSelectionDialog();
+    void openLoadSceneDialog();
   }
 }}
         onSaveScene={handleSaveScene}
@@ -1414,6 +1544,123 @@ onOpenScene={() => {
           onSelectRoom={(roomId) => handleSelectRoom(roomId)}
         />
       )}
+
+      {activeProject &&
+  showLoadSceneDialog && (
+    <div className="dialog-backdrop">
+      <div className="dialog">
+        <h2>
+          Load Scenes
+        </h2>
+
+        <div className="project-picker-list">
+          {sceneSummaries.map(
+            (scene) => {
+              const alreadyLoaded =
+                loadedScenes.has(
+                  scene.instanceId
+                );
+
+              const selected =
+                selectedSceneIdsToLoad.has(
+                  scene.instanceId
+                );
+
+              return (
+                <label
+                  key={
+                    scene.instanceId
+                  }
+                  className="project-picker-item"
+                >
+                  <input
+                    type="checkbox"
+                    checked={
+                      alreadyLoaded ||
+                      selected
+                    }
+                    disabled={
+                      alreadyLoaded
+                    }
+                    onChange={() => {
+                      setSelectedSceneIdsToLoad(
+                        (current) => {
+                          const updated =
+                            new Set(
+                              current
+                            );
+
+                          if (
+                            updated.has(
+                              scene.instanceId
+                            )
+                          ) {
+                            updated.delete(
+                              scene.instanceId
+                            );
+                          } else {
+                            updated.add(
+                              scene.instanceId
+                            );
+                          }
+
+                          return updated;
+                        }
+                      );
+                    }}
+                  />
+
+                  <span>
+                    <strong>
+                      {
+                        scene.instanceName
+                      }
+                    </strong>
+
+                    {scene.description && (
+                      <span>
+                        {
+                          scene.description
+                        }
+                      </span>
+                    )}
+                  </span>
+                </label>
+              );
+            }
+          )}
+        </div>
+
+        <div className="dialog-buttons">
+          <button
+            onClick={() => {
+              setSelectedSceneIdsToLoad(
+                new Set()
+              );
+
+              setShowLoadSceneDialog(
+                false
+              );
+            }}
+          >
+            Cancel
+          </button>
+
+          <button
+            disabled={
+              selectedSceneIdsToLoad
+                .size === 0
+            }
+            onClick={() =>
+              void handleLoadSelectedScenes()
+            }
+          >
+            Load Selected
+          </button>
+        </div>
+      </div>
+    </div>
+  )}
 
       {activeProject && showSceneSelectionDialog && (
         <div className="dialog-backdrop">

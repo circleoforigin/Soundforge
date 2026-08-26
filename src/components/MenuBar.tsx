@@ -251,7 +251,7 @@ function MenuBar({
             </button>
 
             <button className="dropdown-item" onClick={handleOpenScene}>
-              Open Scene
+              Load Scene...
             </button>
 
             <button className="dropdown-item" onClick={handleSaveScene} disabled={!currentSceneAvailable}>
