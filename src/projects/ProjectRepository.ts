@@ -1,13 +1,37 @@
-import type { Project } from '../models/Project';
+import type {
+  Project,
+} from '../models/Project';
 
 import {
   localStorageService,
 } from '../storage/LocalStorageService';
 
-const PROJECTS_KEY = 'projects';
+import {
+  hostedCollectionRepository,
+} from '../host/HostedCollectionRepository';
+
+const PROJECTS_KEY =
+  'projects';
+
+const PROJECTS_COLLECTION =
+  'projects';
 
 export class ProjectRepository {
-  loadProjects(): Project[] {
+  async loadProjects(): Promise<Project[]> {
+    if (
+      hostedCollectionRepository.hosted
+    ) {
+      const projects =
+        await hostedCollectionRepository
+          .loadAll<Project>(
+            PROJECTS_COLLECTION
+          );
+
+      return Array.isArray(projects)
+        ? projects
+        : [];
+    }
+
     const projects =
       localStorageService.get<Project[]>(
         PROJECTS_KEY,
@@ -19,20 +43,23 @@ export class ProjectRepository {
       : [];
   }
 
-  saveProjects(
-    projects: Project[]
-  ): void {
-    localStorageService.set(
-      PROJECTS_KEY,
-      projects
-    );
-  }
-
-  saveProject(
+  async saveProject(
     project: Project
-  ): Project[] {
+  ): Promise<Project[]> {
+    if (
+      hostedCollectionRepository.hosted
+    ) {
+      await hostedCollectionRepository.save(
+        PROJECTS_COLLECTION,
+        project.id,
+        project
+      );
+
+      return this.loadProjects();
+    }
+
     const projects =
-      this.loadProjects();
+      await this.loadProjects();
 
     const exists =
       projects.some(
@@ -53,23 +80,39 @@ export class ProjectRepository {
             project,
           ];
 
-    this.saveProjects(
+    localStorageService.set(
+      PROJECTS_KEY,
       updatedProjects
     );
 
     return updatedProjects;
   }
 
-  deleteProject(
+  async deleteProject(
     projectId: string
-  ): Project[] {
+  ): Promise<Project[]> {
+    if (
+      hostedCollectionRepository.hosted
+    ) {
+      await hostedCollectionRepository.delete(
+        PROJECTS_COLLECTION,
+        projectId
+      );
+
+      return this.loadProjects();
+    }
+
+    const projects =
+      await this.loadProjects();
+
     const updatedProjects =
-      this.loadProjects().filter(
+      projects.filter(
         (project) =>
           project.id !== projectId
       );
 
-    this.saveProjects(
+    localStorageService.set(
+      PROJECTS_KEY,
       updatedProjects
     );
 

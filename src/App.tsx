@@ -258,7 +258,7 @@ const transitionTarget =
     };
 
     const projects =
-      projectRepository.saveProject(
+      await projectRepository.saveProject(
         projectToSave
       );
 
@@ -349,44 +349,138 @@ const transitionTarget =
   }
 }
 
-  function handleDeleteScene() {
-    if (!activeProject || !currentScene) return;
-    if (!window.confirm(`Delete "${currentScene.instanceName}"? This cannot be undone.`)) return;
+  async function handleDeleteScene() {
+  if (!activeProject || !currentScene) {
+    return;
+  }
 
-    const deletedSceneId = currentScene.instanceId;
-    roomAudioEngine.stopScene(deletedSceneId);
-    roomAudioEngine.setSceneTransitionGain(deletedSceneId, 1);
+  if (
+    !window.confirm(
+      `Delete "${currentScene.instanceName}"? This cannot be undone.`
+    )
+  ) {
+    return;
+  }
+
+  const deletedSceneId =
+    currentScene.instanceId;
+
+  try {
+    roomAudioEngine.stopScene(
+      deletedSceneId
+    );
+
+    roomAudioEngine.setSceneTransitionGain(
+      deletedSceneId,
+      1
+    );
+
     transitionRunIdRef.current += 1;
     transitionInProgressRef.current = false;
+
     setTransitionInProgress(false);
 
     const updatedProject: Project = {
       ...activeProject,
-     sceneIds: activeProject.sceneIds.filter(
-  (sceneId) =>
-    sceneId !== deletedSceneId
-),
-      activeSceneInstanceId: undefined,
-      activeRoomId: activeRoom?.id ?? activeProject.activeRoomId,
+
+      sceneIds:
+        activeProject.sceneIds.filter(
+          (sceneId) =>
+            sceneId !== deletedSceneId
+        ),
+
+      activeSceneInstanceId:
+        undefined,
+
+      activeRoomId:
+        activeRoom?.id ??
+        activeProject.activeRoomId,
+
       updatedAt: new Date(),
     };
-    const projects = projectRepository.saveProject(updatedProject);
 
-    setActiveProject(updatedProject);
-    setSavedProjects(projects);
-    setCurrentSceneInstanceId(null);
-    setDirtySceneIds(new Set());
-    setTransitionTargetInstanceId((targetId) => targetId === deletedSceneId ? null : targetId);
+    await sceneRepository.deleteScene(
+      deletedSceneId
+    );
+
+    const projects =
+      await projectRepository.saveProject(
+        updatedProject
+      );
+
+    setLoadedScenes((current) => {
+      const updated =
+        new Map(current);
+
+      updated.delete(
+        deletedSceneId
+      );
+
+      return updated;
+    });
+
+    setActiveProject(
+      updatedProject
+    );
+
+    setSavedProjects(
+      projects
+    );
+
+    setCurrentSceneInstanceId(
+      null
+    );
+
+    setDirtySceneIds((current) => {
+      const updated =
+        new Set(current);
+
+      updated.delete(
+        deletedSceneId
+      );
+
+      return updated;
+    });
+
+    setTransitionTargetInstanceId(
+      (targetId) =>
+        targetId === deletedSceneId
+          ? null
+          : targetId
+    );
+
     setPreviewingTarget(false);
-    setShowSceneSelectionDialog(
-  updatedProject.sceneIds.length > 0
-);
 
-setShowNewSceneDialog(
-  updatedProject.sceneIds.length === 0
-);
-    setTimeout(() => setNotification(null), 3000);
+    setShowSceneSelectionDialog(
+      updatedProject.sceneIds.length > 0
+    );
+
+    setShowNewSceneDialog(
+      updatedProject.sceneIds.length === 0
+    );
+
+    setNotification(
+      'Scene deleted.'
+    );
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 3000);
+  } catch (error) {
+    console.error(
+      'Unable to delete scene:',
+      error
+    );
+
+    setNotification(
+      'Unable to delete scene.'
+    );
+
+    setTimeout(() => {
+      setNotification(null);
+    }, 3000);
   }
+}
 
   function requestProjectAction(
     action: () => void
@@ -479,12 +573,13 @@ setShowNewSceneDialog(
     requestProjectAction(closeActiveProject);
   }
 
-  function handleOpenProjectPicker() {
-    setSavedProjects(
-      projectRepository.loadProjects()
-    );
-    setShowProjectPicker(true);
-  }
+  async function handleOpenProjectPicker() {
+  const projects =
+    await projectRepository.loadProjects();
+
+  setSavedProjects(projects);
+  setShowProjectPicker(true);
+}
 
   function loadProject(
     project: Project
@@ -1077,7 +1172,9 @@ setShowNewSceneDialog(
     <div className="app">
       <MenuBar
         onNewProject={handleNewProject}
-        onLoadProject={handleOpenProjectPicker}
+        onLoadProject={() =>
+          void handleOpenProjectPicker()
+        }
         onSaveProject={handleSaveProject}
         onCloseProject={handleCloseProject}
         onNewScene={handleNewScene}
