@@ -473,33 +473,6 @@ async function confirmDeleteSelectedScene() {
   }
 
   try {
-    if (
-  currentSceneInstanceId === sceneId
-) {
-  const sceneToDelete =
-    loadedScenes.get(sceneId);
-
-  if (sceneToDelete) {
-    try {
-      await roomAudioEngine
-        .fadeOutAndStopScene(
-          sceneId,
-          sceneToDelete.fadeOutMs
-        );
-    } catch {
-      roomAudioEngine.stopScene(
-        sceneId
-      );
-    }
-
-    roomAudioEngine
-      .setSceneTransitionGain(
-        sceneId,
-        1
-      );
-  }
-}
-
     await sceneRepository.deleteScene(
       sceneId
     );
@@ -513,11 +486,7 @@ async function confirmDeleteSelectedScene() {
             candidateId !== sceneId
         ),
 
-      activeSceneInstanceId:
-        currentSceneInstanceId === sceneId
-          ? undefined
-          : activeProject.activeSceneInstanceId,
-
+     activeSceneInstanceId: activeProject.activeSceneInstanceId,
       updatedAt: new Date(),
     };
 

@@ -272,18 +272,26 @@ function MenuBar({
               Close Scene
             </button>
 
-            <button className="dropdown-item" onClick={handleDeleteScene} disabled={!currentSceneAvailable}>
+            <button className="dropdown-item" onClick={handleDeleteScene} disabled={!sceneActionsEnabled}>
               Delete Scene
             </button>
 
             <div className="dropdown-separator" />
-            <button>
-              New From Template...
-            </button>
+            <div className="dropdown-separator" />
 
-            <button>
-              Add as Template...
-            </button>
+<button
+  className="dropdown-item"
+  disabled={!sceneActionsEnabled}
+>
+  New from Template...
+</button>
+
+<button
+  className="dropdown-item"
+  disabled={!currentSceneAvailable}
+>
+  Create Template Scene...
+</button>
           </div>
         )}
       </div>
