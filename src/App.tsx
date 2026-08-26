@@ -1420,20 +1420,26 @@ onOpenScene={() => {
           <div className="dialog">
             <h2>Select Scene</h2>
             <div className="project-picker-list">
-              {activeProject.sceneIds.map(
-  (sceneId) => (
+              {sceneSummaries.map(
+  (scene) => (
     <button
-      key={sceneId}
+      key={scene.instanceId}
       className="project-picker-item"
       onClick={() =>
         void handleActivateScene(
-          sceneId
+          scene.instanceId
         )
       }
     >
-      {loadedScenes.get(
-        sceneId
-      )?.instanceName ?? sceneId}
+      <strong>
+        {scene.instanceName}
+      </strong>
+
+      {scene.description && (
+        <span>
+          {scene.description}
+        </span>
+      )}
     </button>
   )
 )}
