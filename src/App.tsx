@@ -9,7 +9,6 @@ import './App.css';
 
 import type { Project } from './models/Project';
 import type { SceneInstance } from './models/SceneInstance';
-import type { SceneTemplate } from './models/SceneTemplate';
 import type { SoundObjectTemplate } from './models/SoundObjectTemplate';
 import type { Room } from './models/Room';
 import type { SpeakerMap } from './models/SpeakerMap';
@@ -72,8 +71,6 @@ function App() {
   const [newSceneName, setNewSceneName] = useState('');
   const [showImportSoundDialog, setShowImportSoundDialog] =
     useState(false);
-  const [, setSceneTemplates] =
-    useState<SceneTemplate[]>([]);
   const [soundObjectTemplates] =
     useState<SoundObjectTemplate[]>([]);
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
@@ -530,20 +527,8 @@ async function handleSettingsChange(settings: AppSettings) {
 
     const now = new Date();
 
-    const newTemplate: SceneTemplate = {
-      id: crypto.randomUUID(),
-      name: trimmedName,
-      createdAt: now,
-      updatedAt: now,
-      categoryPaths: [],
-      tags: [],
-      positionalObjects: [],
-      ambientObjects: [],
-    };
-
     const newInstance: SceneInstance = {
       instanceId: crypto.randomUUID(),
-      templateId: newTemplate.id,
       instanceName: trimmedName,
       description: '',
       transitionMode: 'crossfade',
@@ -570,11 +555,6 @@ async function handleSettingsChange(settings: AppSettings) {
       ],
       updatedAt: now,
     };
-
-    setSceneTemplates((current) => [
-      ...current,
-      newTemplate,
-    ]);
 
     setActiveProject(updatedProject);
     setDirtySceneIds((current) => {
