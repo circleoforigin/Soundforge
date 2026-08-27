@@ -38,6 +38,7 @@ import { roomAudioEngine } from './audio/RoomAudioEngine';
 import { hostedCollectionRepository } from './host/HostedCollectionRepository';
 
 import { moduleEventBus } from './host/ModuleBus';
+import { modulePresence } from './host/ModulePresence.ts';
 
 function App() {
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
@@ -118,6 +119,16 @@ const [customRooms, setCustomRooms] = useState<Room[]>([]);
   const roomAudioStatus = roomAudioEngine.getStatus();
   const roomSpeakerVolumeStatus = roomAudioEngine.getRoomSpeakerVolumeStatus();
   
+useEffect(() => {
+  modulePresence.start();
+
+  modulePresence.announceReady();
+
+  return () => {
+    modulePresence.stop();
+  };
+}, []);
+
 useEffect(() => {
   async function loadSoundLibrary() {
     try {
