@@ -2414,6 +2414,27 @@ body,
   margin: 0;
 }
 
+.scene-on-load-one-shot {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 14px;
+  color: #aeb0b6;
+  font-size: 13px;
+}
+
+.scene-on-load-one-shot > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.scene-on-load-one-shot button:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .room-manager-header-actions {
   display: flex;
   align-items: center;

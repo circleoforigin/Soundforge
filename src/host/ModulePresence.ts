@@ -35,6 +35,9 @@ export class ModulePresenceStore {
   private readonly modules =
     new Map<string, ModulePresence>();
 
+  private readonly listeners =
+    new Set<() => void>();
+
   private unsubscribers:
     (() => void)[] = [];
 
@@ -106,11 +109,30 @@ export class ModulePresenceStore {
             'sacscape.loopingZone.spawned',
           ],
 
-          actions: [],
+          actions: [
+            'project.status',
+            'project.load',
+            'project.save',
+            'project.close',
+          ],
         },
       }
     );
   }
+
+  subscribe(
+  listener: () => void
+): () => void {
+  this.listeners.add(
+    listener
+  );
+
+  return () => {
+    this.listeners.delete(
+      listener
+    );
+  };
+}
 
   getAll(): ModulePresence[] {
     return Array.from(
@@ -144,6 +166,15 @@ export class ModulePresenceStore {
     );
   }
 
+  private notify(): void {
+  for (
+    const listener
+    of this.listeners
+  ) {
+    listener();
+  }
+}
+
   private handleSnapshot(
     message: HostEventMessage
   ): void {
@@ -172,6 +203,7 @@ export class ModulePresenceStore {
         module
       );
     }
+    this.notify();
   }
 
   private handleModuleUpdate(
@@ -190,6 +222,8 @@ export class ModulePresenceStore {
       payload.module.id,
       payload.module
     );
+
+    this.notify();
   }
 
   private handleModuleRemoved(
@@ -207,6 +241,8 @@ export class ModulePresenceStore {
     this.modules.delete(
       payload.module.id
     );
+
+    this.notify();
   }
 }
 

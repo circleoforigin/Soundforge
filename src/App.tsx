@@ -38,7 +38,7 @@ import { roomAudioEngine } from './audio/RoomAudioEngine';
 import { hostedCollectionRepository } from './host/HostedCollectionRepository';
 
 import { moduleEventBus } from './host/ModuleBus';
-import { modulePresence } from './host/ModulePresence.ts';
+import { modulePresence } from './host/ModulePresence';
 
 function App() {
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
@@ -811,7 +811,7 @@ pendingSaveActionRef.current =
 
   function loadProject(
     project: Project
-  ) {
+    ) {
     if (activeProject) {
       teardownProjectRuntime(activeProject);
     }
@@ -826,6 +826,100 @@ pendingSaveActionRef.current =
     setShowRoomSelectionDialog(true);
     setShowSceneSelectionDialog(false);
   }
+
+  useEffect(() => {
+  const unregisterStatus =
+    moduleEventBus.registerRequestHandler(
+      'project.status',
+      () => ({
+        projectId: activeProject?.id,
+        projectName: activeProject?.name,
+        dirty: dirtySceneIds.size > 0,
+      })
+    );
+
+  const unregisterLoad =
+    moduleEventBus.registerRequestHandler(
+      'project.load',
+      async (request) => {
+        const payload = request.payload as
+          | { projectId?: string }
+          | undefined;
+
+        if (!payload?.projectId) {
+          throw new Error('project.load requires a projectId.');
+        }
+
+        const project =
+          await projectRepository.loadProject(payload.projectId);
+
+        if (!project) {
+          throw new Error(
+            `Project "${payload.projectId}" was not found.`
+          );
+        }
+
+        loadProject(project);
+
+        return {
+          loaded: true,
+          projectId: project.id,
+          projectName: project.name,
+        };
+      }
+    );
+
+  const unregisterSave =
+    moduleEventBus.registerRequestHandler(
+      'project.save',
+      async () => {
+        if (!activeProject) {
+          return {
+            saved: false,
+            projectId: undefined,
+          };
+        }
+
+        const saved = await saveActiveProject();
+
+        if (!saved) {
+          throw new Error('Unable to save the active project.');
+        }
+
+        return {
+          saved: true,
+          projectId: activeProject.id,
+        };
+      }
+    );
+
+  const unregisterClose =
+    moduleEventBus.registerRequestHandler(
+      'project.close',
+      (request) => {
+        const payload = request.payload as
+          | { discardChanges?: boolean }
+          | undefined;
+
+        if (dirtySceneIds.size > 0 && !payload?.discardChanges) {
+          throw new Error('Project has unsaved changes.');
+        }
+
+        closeActiveProject();
+
+        return {
+          closed: true,
+        };
+      }
+    );
+
+  return () => {
+    unregisterStatus();
+    unregisterLoad();
+    unregisterSave();
+    unregisterClose();
+  };
+}, [activeProject, dirtySceneIds]);
 
   function handleLoadProject(
     project: Project
@@ -1457,6 +1551,8 @@ function handleCloseScene() {
       return;
     }
 
+    handleActiveRoomChange(room);
+
     if (activeProject) {
   setCurrentSceneInstanceId(null);
   setShowRoomSelectionDialog(false);
@@ -1737,6 +1833,7 @@ async function handleLoadSelectedScenes() {
   setCurrentSceneInstanceId(
     instanceId
   );
+  setSceneOnLoadActivationVersion((version) => version + 1);
 
   setShowSceneSelectionDialog(
     false
@@ -1753,13 +1850,9 @@ async function handleLoadSelectedScenes() {
         onSaveProject={handleSaveProject}
         onCloseProject={handleCloseProject}
         onNewScene={handleNewScene}
-onOpenScene={() => {
-  if (
-    activeProject?.sceneIds.length
-  ) {
-    void openLoadSceneDialog();
-  }
-}}
+        onOpenScene={() => {
+          void openLoadSceneDialog();
+        }}
         onSaveScene={handleSaveScene}
         onCloseScene={handleCloseScene}
         onDeleteScene={handleDeleteScene}

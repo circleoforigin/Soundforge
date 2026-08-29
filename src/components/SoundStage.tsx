@@ -52,6 +52,7 @@ interface SoundStageProps {
 export interface SoundStageHandle {
   startNodes: (nodes: SceneObjectInstance[]) => Promise<void>;
   pauseNodes: (nodes: SceneObjectInstance[]) => void;
+  playSceneOnLoadOneShot: (assetId: string) => Promise<void>;
 }
 
 interface NodeContextMenu {
@@ -937,6 +938,28 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
         if (node.loopingZone?.enabled) stopNodePlayback(node);
         else void roomAudioEngine.pause(node);
       }
+    },
+    playSceneOnLoadOneShot: async (assetId) => {
+      const asset = soundAssets.find((candidate) => candidate.id === assetId);
+      if (!asset) return;
+      const runtimeNode: SceneObjectInstance = {
+        instanceId: `scene-on-load-${crypto.randomUUID()}`,
+        instanceName: asset.name,
+        soundAssetIds: [asset.id],
+        playbackMode: 'oneShot',
+        placement: 'field',
+        onLoad: false,
+        fadeInEnabled: false,
+        fadeInMs: 1000,
+        fadeOutEnabled: false,
+        fadeOutMs: 1000,
+        excludeFromBulkControls: true,
+        randomStart: false,
+        gainDb: 0,
+        position: { x: 0, y: 0 },
+        muted: false,
+      };
+      await handleStartNodePlayback(runtimeNode, () => roomAudioEngine.stop(runtimeNode.instanceId));
     },
   }));
 

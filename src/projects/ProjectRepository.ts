@@ -43,6 +43,19 @@ export class ProjectRepository {
       : [];
   }
 
+  async loadProject(projectId: string): Promise<Project | null> {
+  if (hostedCollectionRepository.hosted) {
+    return hostedCollectionRepository.loadOne<Project>(
+      PROJECTS_COLLECTION,
+      projectId
+    );
+  }
+
+  const projects = await this.loadProjects();
+
+  return projects.find((project) => project.id === projectId) ?? null;
+}
+
   async saveProject(
     project: Project
   ): Promise<Project[]> {

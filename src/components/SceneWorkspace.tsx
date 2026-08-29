@@ -127,10 +127,13 @@ function SceneWorkspace({
     ];
 
     void soundStageRef.current?.startNodes(onLoadNodes);
+    if (currentScene.onLoadOneShotAssetId) {
+      void soundStageRef.current?.playSceneOnLoadOneShot(currentScene.onLoadOneShotAssetId);
+    }
   }, [currentScene, persistentDeployedNodes, sceneOnLoadActivationVersion]);
   const [showSoundPicker, setShowSoundPicker] =
     useState(false);
-  const [soundPickerPurpose, setSoundPickerPurpose] = useState<'source' | 'looping-zone'>('source');
+  const [soundPickerPurpose, setSoundPickerPurpose] = useState<'source' | 'looping-zone' | 'scene-on-load'>('source');
   const selectedNode =
     scene.positionalObjects.find(
       (node) => node.instanceId === selectedNodeId
@@ -174,6 +177,14 @@ function SceneWorkspace({
   function handleConfirmSound(
     soundAsset: SoundAsset
   ) {
+    if (soundPickerPurpose === 'scene-on-load') {
+      if (currentScene) {
+        onSceneChange({ ...currentScene, onLoadOneShotAssetId: soundAsset.id });
+      }
+      setShowSoundPicker(false);
+      return;
+    }
+
     if (!selectedNode) {
       return;
     }
@@ -272,6 +283,7 @@ function SceneWorkspace({
           transitionInProgress={transitionInProgress}
           sceneDirty={currentSceneDirty}
           projectScenes={projectScenes}
+          soundAssets={soundAssets}
           onSceneChange={onSceneChange}
           onSelectTransitionTarget={onSelectTransitionTarget}
           onClearTransitionTarget={onClearTransitionTarget}
@@ -287,6 +299,10 @@ function SceneWorkspace({
             soundStageRef.current?.pauseNodes(
               getPlaybackNodes(group, 'pause')
             );
+          }}
+          onChooseOnLoadOneShot={() => {
+            setSoundPickerPurpose('scene-on-load');
+            setShowSoundPicker(true);
           }}
         />
       )}

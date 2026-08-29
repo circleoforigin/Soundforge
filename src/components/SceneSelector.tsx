@@ -4,6 +4,7 @@ import type {
   SceneInstance,
   SceneTransitionMode,
 } from '../models/SceneInstance';
+import type { SoundAsset } from '../models/SoundAsset';
 
 export type ScenePlaybackGroup = 'all' | 'loop' | 'ambience';
 
@@ -15,6 +16,7 @@ interface SceneSelectorProps {
   transitionInProgress: boolean;
   sceneDirty: boolean;
   projectScenes: SceneInstance[];
+  soundAssets: SoundAsset[];
 
   onSceneChange: (scene: SceneInstance) => void;
   onSelectTransitionTarget: (instanceId: string) => void;
@@ -24,6 +26,7 @@ interface SceneSelectorProps {
   onTransition: () => void;
   onStartPlayback: (group: ScenePlaybackGroup) => void;
   onPausePlayback: (group: ScenePlaybackGroup) => void;
+  onChooseOnLoadOneShot: () => void;
 }
 
 function SceneSelector({
@@ -34,6 +37,7 @@ function SceneSelector({
   transitionInProgress,
   sceneDirty,
   projectScenes,
+  soundAssets,
   onSceneChange,
   onSelectTransitionTarget,
   onClearTransitionTarget,
@@ -42,6 +46,7 @@ function SceneSelector({
   onTransition,
   onStartPlayback,
   onPausePlayback,
+  onChooseOnLoadOneShot,
 }: SceneSelectorProps) {
   const [sceneNameDraft, setSceneNameDraft] =
     useState(currentScene?.instanceName ?? '');
@@ -133,6 +138,9 @@ function SceneSelector({
     sequential: 'Fade Out → Fade In',
     immediate: 'Immediate',
   };
+  const onLoadOneShotAsset = soundAssets.find(
+    (asset) => asset.id === currentScene?.onLoadOneShotAssetId
+  ) ?? null;
 
   return (
   <div className="scene-selector">
@@ -176,6 +184,25 @@ function SceneSelector({
         }
       }}
     />
+
+    <div className="scene-on-load-one-shot">
+      <span>On Load One-Shot</span>
+      <div>
+        <button type="button" onClick={onChooseOnLoadOneShot} disabled={!currentScene}>
+          {onLoadOneShotAsset?.name ?? (currentScene?.onLoadOneShotAssetId ? 'Missing sound' : 'Choose sound...')}
+        </button>
+        <button
+          type="button"
+          disabled={!currentScene?.onLoadOneShotAssetId}
+          onClick={() => currentScene && onSceneChange({
+            ...currentScene,
+            onLoadOneShotAssetId: undefined,
+          })}
+        >
+          Clear
+        </button>
+      </div>
+    </div>
 
     <div className="transition-target">
 

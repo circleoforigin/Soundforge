@@ -190,7 +190,7 @@ function MenuBar({
             setFileMenuOpen(opening);
           }}
         >
-          File
+          Project
         </button>
 
         {fileMenuOpen && (

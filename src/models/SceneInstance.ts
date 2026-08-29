@@ -17,6 +17,7 @@ export interface SceneInstance extends SceneDefinition {
   instanceName: string;
   description?: string;
   transitionMode?: SceneTransitionMode;
+  onLoadOneShotAssetId?: string;
 
   volume: {
     master: number;
