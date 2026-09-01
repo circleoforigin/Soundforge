@@ -34,26 +34,44 @@ const AUDIO_FOLDER =
 export class HostedSoundLibraryService {
   private readonly playbackUrls =
     new Map<string, string>();
+  private readonly hydrationRequests =
+    new Map<string, Promise<SoundAsset>>();
 
   async initialize(): Promise<SoundAsset[]> {
     return this.loadAssets();
   }
 
   async loadAssets(): Promise<SoundAsset[]> {
-    const assets =
-      await hostedCollectionRepository
-        .loadAll<SoundAsset>(
-          SOUND_ASSETS_COLLECTION
-        );
-
-    return Promise.all(
-      assets.map(
-        (asset) =>
-          this.hydrateAsset(
-            asset
-          )
-      )
+    return hostedCollectionRepository.loadAll<SoundAsset>(
+      SOUND_ASSETS_COLLECTION
     );
+  }
+
+  async ensurePlaybackUrl(asset: SoundAsset): Promise<SoundAsset> {
+    if (asset.source.type !== 'local' || asset.source.playbackUrl) {
+      return asset;
+    }
+
+    const cachedUrl = this.playbackUrls.get(asset.id);
+
+    if (cachedUrl) {
+      return {
+        ...asset,
+        source: {
+          ...asset.source,
+          playbackUrl: cachedUrl,
+        },
+      };
+    }
+
+    const pending = this.hydrationRequests.get(asset.id);
+    if (pending) return pending;
+
+    const request = this.hydrateAsset(asset).finally(() => {
+      this.hydrationRequests.delete(asset.id);
+    });
+    this.hydrationRequests.set(asset.id, request);
+    return request;
   }
 
   async importLocalFile(
@@ -250,13 +268,6 @@ export class HostedSoundLibraryService {
   private async hydrateAsset(
     asset: SoundAsset
   ): Promise<SoundAsset> {
-    if (
-      asset.source.type !==
-      'local'
-    ) {
-      return asset;
-    }
-
     const blob =
       await hostedFileRepository
         .readBlob(

@@ -886,19 +886,11 @@ pendingSaveActionRef.current =
     }) ?? projectRooms[0] ?? null;
     const rememberedSceneId = project.lastSceneId
       ?? project.activeSceneInstanceId;
-    console.warn(
-  '===== ABOUT TO LOAD REMEMBERED SCENE =====',
-  rememberedSceneId
-);
+
     const restoredScene = rememberedSceneId
       && project.sceneIds.includes(rememberedSceneId)
       ? await sceneRepository.loadScene(rememberedSceneId)
       : null;
-
-      console.warn(
-  '===== REMEMBERED SCENE LOADED =====',
-  restoredScene?.instanceId
-);
 
       console.warn('===== loadProject ENTER =====');
     if (activeProject) {

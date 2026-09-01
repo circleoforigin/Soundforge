@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 
 import type { SoundAsset } from '../models/SoundAsset';
 import { getSoundAssetPlaybackUrl } from '../models/SoundAsset';
+import { hostedSoundLibrary } from '../services/library/HostedSoundLibraryService';
 import type { SoundObjectTemplate } from '../models/SoundObjectTemplate';
 
 type PickerMode = 'sound' | 'template';
@@ -120,8 +121,20 @@ function SoundPickerDialog({
 
     stopPreview();
 
-    const audio =
-      new Audio(getSoundAssetPlaybackUrl(selectedSound));
+    let playableSound: SoundAsset;
+
+    try {
+      playableSound =
+        await hostedSoundLibrary.ensurePlaybackUrl(selectedSound);
+    } catch (error) {
+      console.error(
+        `Unable to preview sound: ${selectedSound.name}`,
+        error
+      );
+      return;
+    }
+
+    const audio = new Audio(getSoundAssetPlaybackUrl(playableSound));
 
     audioRef.current = audio;
 

@@ -1,6 +1,7 @@
 import type { SceneObjectInstance } from '../models/SceneObjectInstance';
 import type { SoundAsset } from '../models/SoundAsset';
 import { getSoundAssetPlaybackUrl } from '../models/SoundAsset';
+import { hostedSoundLibrary } from '../services/library/HostedSoundLibraryService';
 
 export interface StereoMix {
   left: number;
@@ -346,8 +347,8 @@ export class PlaybackEngine {
       await audioContext.resume();
     }
 
-    const audio =
-      new Audio(getSoundAssetPlaybackUrl(asset));
+    const playableAsset = await hostedSoundLibrary.ensurePlaybackUrl(asset);
+    const audio = new Audio(getSoundAssetPlaybackUrl(playableAsset));
 
     audio.crossOrigin = 'anonymous';
 

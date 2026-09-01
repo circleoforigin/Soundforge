@@ -3,6 +3,7 @@ import type { SoundAsset } from '../models/SoundAsset';
 import type { SpeakerMap } from '../models/SpeakerMap';
 import { sonosBridgeUrl } from '../config/api';
 import type { SpeakerMix } from '../utils/spatialMixMath';
+import { hostedSoundLibrary } from '../services/library/HostedSoundLibraryService';
 
 interface SonosOneShotRequest {
   asset: SoundAsset;
@@ -78,7 +79,8 @@ async function performLocalAssetSynchronization(asset: SoundAsset): Promise<stri
     return mediaUrl;
   }
 
-  const localUrl = asset.source.playbackUrl;
+  const playableAsset = await hostedSoundLibrary.ensurePlaybackUrl(asset);
+  const localUrl = playableAsset.source.playbackUrl;
 
   if (!localUrl) {
     throw new Error(
