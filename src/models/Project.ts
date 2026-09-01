@@ -12,4 +12,6 @@ export interface Project
 
   activeSceneInstanceId?: string;
   activeRoomId?: string;
+  lastSceneId?: string;
+  lastRoomId?: string;
 }

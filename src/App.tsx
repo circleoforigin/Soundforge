@@ -6,6 +6,12 @@ import {
 } from 'react';
 import type { SoundAsset } from './models/SoundAsset';
 import './App.css';
+import type {
+  ProjectLoadAcceptedPayload,
+  ProjectLoadFailedPayload,
+  ProjectLoadedPayload,
+  ProjectLoadRequest,
+} from '@settingforge/module-sdk';
 
 import type { Project } from './models/Project';
 import type { SceneInstance } from './models/SceneInstance';
@@ -373,6 +379,14 @@ const transitionTarget =
         activeRoom?.id ??
         undefined,
 
+      lastSceneId:
+        currentSceneInstanceId ??
+        undefined,
+
+      lastRoomId:
+        activeRoom?.id ??
+        undefined,
+
       updatedAt: new Date(),
     };
 
@@ -588,6 +602,10 @@ async function confirmDeleteSelectedScene() {
         ),
 
      activeSceneInstanceId: activeProject.activeSceneInstanceId,
+      lastSceneId:
+        activeProject.lastSceneId === sceneId
+          ? undefined
+          : activeProject.lastSceneId,
       updatedAt: new Date(),
     };
 
@@ -788,18 +806,28 @@ pendingSaveActionRef.current =
     setShowUnsavedChangesDialog(false);
   }
 
-  function teardownProjectRuntime(project: Project) {
-    roomAudioEngine.shutdown();
-    for (const scene of loadedScenes.values()) {
-  roomAudioEngine.stopScene(
-    scene.instanceId
-  );
+  function teardownProjectRuntime(project: Project)
+  {
+    console.warn('===== TEARDOWN ENTER =====');
 
-  roomAudioEngine.setSceneTransitionGain(
-    scene.instanceId,
-    1
+  console.warn('===== ABOUT TO SHUTDOWN AUDIO ENGINE =====');
+    roomAudioEngine.shutdown();
+    console.warn('===== AUDIO ENGINE SHUTDOWN COMPLETE =====');
+
+  console.warn(
+    '===== ABOUT TO STOP LOADED SCENES =====',
+    loadedScenes.size
   );
-}
+    for (const scene of loadedScenes.values()) {
+      roomAudioEngine.stopScene(
+        scene.instanceId
+      );
+
+      roomAudioEngine.setSceneTransitionGain(
+        scene.instanceId, 1
+      );
+    }
+ console.warn('===== SCENE STOP LOOP COMPLETE =====');
 
     transitionRunIdRef.current += 1;
     transitionInProgressRef.current = false;
@@ -843,23 +871,78 @@ pendingSaveActionRef.current =
   setShowProjectPicker(true);
 }
 
-  function loadProject(
-    project: Project
-    ) {
+  async function loadProject(
+    project: Project,
+    roomRestoreFailureIsFatal = false
+  ): Promise<void> {
+    const [rooms, maps] = await Promise.all([
+      roomRepository.loadRooms(),
+      speakerMapRepository.loadSpeakerMaps(),
+    ]);
+    const projectRooms = [headphonesRoom, ...rooms];
+    const rememberedRoomId = project.lastRoomId ?? project.activeRoomId;
+    const restoredRoom = projectRooms.find((room) => {
+      return room.id === rememberedRoomId;
+    }) ?? projectRooms[0] ?? null;
+    const rememberedSceneId = project.lastSceneId
+      ?? project.activeSceneInstanceId;
+    console.warn(
+  '===== ABOUT TO LOAD REMEMBERED SCENE =====',
+  rememberedSceneId
+);
+    const restoredScene = rememberedSceneId
+      && project.sceneIds.includes(rememberedSceneId)
+      ? await sceneRepository.loadScene(rememberedSceneId)
+      : null;
+
+      console.warn(
+  '===== REMEMBERED SCENE LOADED =====',
+  restoredScene?.instanceId
+);
+
+      console.warn('===== loadProject ENTER =====');
     if (activeProject) {
+      console.warn('===== ABOUT TO TEARDOWN OLD PROJECT =====');
       teardownProjectRuntime(activeProject);
+      console.warn('===== OLD PROJECT TEARDOWN COMPLETE =====');
     }
-    setLoadedScenes(new Map());
+    console.warn('===== ABOUT TO SET NEW PROJECT STATE =====');
+    setCustomRooms(rooms);
+    setSpeakerMaps(maps);
+    setLoadedScenes(restoredScene
+      ? new Map([[restoredScene.instanceId, restoredScene]])
+      : new Map());
     setActiveProject(project);
-    setCurrentSceneInstanceId(null);
+    setCurrentSceneInstanceId(restoredScene?.instanceId ?? null);
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
-    setActiveRoom(null);
+    setActiveRoom(restoredRoom);
     setDirtySceneIds(new Set());
     setProjectDirty(false);
     setShowProjectPicker(false);
-    setShowRoomSelectionDialog(true);
+    setShowRoomSelectionDialog(false);
     setShowSceneSelectionDialog(false);
+    setShowLoadSceneDialog(false);
+    setShowNewSceneDialog(false);
+
+    console.warn('===== Right before restoring room =====');
+
+    if (restoredScene) {
+      setSceneOnLoadActivationVersion((version) => version + 1);
+    }
+
+    if (restoredRoom) {
+      const restoredSpeakerMap = maps.find((speakerMap) => {
+        return speakerMap.id === restoredRoom.speakerMapId;
+      }) ?? headphonesSpeakerMap;
+      try {
+        await roomAudioEngine.configure(restoredRoom, restoredSpeakerMap);
+      } catch (error) {
+        console.error('Room restoration failed.', error);
+        if (roomRestoreFailureIsFatal) throw error;
+      }
+    }
+    console.warn('===== loadProject EXIT =====');
   }
 
   useEffect(() => {
@@ -878,15 +961,27 @@ pendingSaveActionRef.current =
       'project.load',
       async (request) => {
         const payload = request.payload as
-          | { projectId?: string }
+          | Partial<ProjectLoadRequest>
           | undefined;
 
-        if (!payload?.projectId) {
-          throw new Error('project.load requires a projectId.');
+        if (!payload?.projectId || !payload.loadId) {
+          throw new Error(
+            'project.load requires projectId and loadId.'
+          );
         }
+
+        console.warn(
+  '===== SACSCAPE ABOUT TO LOAD PROJECT RECORD ====='
+);
+
 
         const project =
           await projectRepository.loadProject(payload.projectId);
+
+console.warn(
+  '===== SACSCAPE PROJECT RECORD LOADED =====',
+  project?.id
+);
 
         if (!project) {
           throw new Error(
@@ -894,13 +989,38 @@ pendingSaveActionRef.current =
           );
         }
 
-        loadProject(project);
+        const projectId = project.id;
+        const loadId = payload.loadId;
 
-        return {
-          loaded: true,
-          projectId: project.id,
-          projectName: project.name,
+        void loadProject(project, true)
+          .then(() => {
+            console.warn(
+              '===== SACSCAPE loadProject() COMPLETE ====='
+            );
+            const loaded: ProjectLoadedPayload = {
+              projectId,
+              loadId,
+            };
+            moduleEventBus.emit('project.loaded', loaded);
+          })
+          .catch((error: unknown) => {
+            const failed: ProjectLoadFailedPayload = {
+              projectId,
+              loadId,
+              error: error instanceof Error
+                ? error.message
+                : 'Project restoration failed.',
+            };
+            moduleEventBus.emit('project.loadFailed', failed);
+          });
+
+        const accepted: ProjectLoadAcceptedPayload = {
+          accepted: true,
+          projectId,
+          loadId,
         };
+
+        return accepted;
       }
     );
 
@@ -960,9 +1080,9 @@ pendingSaveActionRef.current =
   function handleLoadProject(
     project: Project
   ) {
-    requestProjectAction(() =>
-      loadProject(project)
-    );
+    requestProjectAction(() => {
+      void loadProject(project);
+    });
   }
 
   function handleNewScene() {
@@ -1283,6 +1403,8 @@ function handleCloseScene() {
       ],
       activeSceneInstanceId:
         newInstance.instanceId,
+      lastSceneId:
+        newInstance.instanceId,
       updatedAt: now,
     };
 
@@ -1398,6 +1520,18 @@ function handleCloseScene() {
     setPreviewingTarget(false);
   }
 
+  function rememberSceneActivation(instanceId: string) {
+    setCurrentSceneInstanceId(instanceId);
+    setActiveProject((project) => project
+      ? {
+          ...project,
+          activeSceneInstanceId: instanceId,
+          lastSceneId: instanceId,
+        }
+      : project);
+    setProjectDirty(true);
+  }
+
   async function handleTransition() {
     if (
       transitionInProgressRef.current ||
@@ -1416,7 +1550,7 @@ function handleCloseScene() {
     const transitionMode = outgoingScene.transitionMode ?? 'crossfade';
 
     function activateIncomingScene() {
-      setCurrentSceneInstanceId(incomingScene.instanceId);
+      rememberSceneActivation(incomingScene.instanceId);
     }
 
     function clearTransitionSelection() {
@@ -1572,6 +1706,15 @@ function handleCloseScene() {
     if (roomId === null) {
       roomAudioEngine.shutdown();
       handleActiveRoomChange(null);
+      setActiveProject((project) => project
+        ? {
+            ...project,
+            activeSceneInstanceId: undefined,
+            lastRoomId: undefined,
+            lastSceneId: undefined,
+          }
+        : project);
+      setProjectDirty(true);
       if (activeProject) {
         setCurrentSceneInstanceId(null);
         setShowRoomSelectionDialog(true);
@@ -1591,6 +1734,15 @@ function handleCloseScene() {
     }
 
     handleActiveRoomChange(room);
+    setActiveProject((project) => project
+      ? {
+          ...project,
+          activeSceneInstanceId: undefined,
+          lastRoomId: room.id,
+          lastSceneId: undefined,
+        }
+      : project);
+    setProjectDirty(true);
 
     if (activeProject) {
   setCurrentSceneInstanceId(null);
@@ -1898,9 +2050,7 @@ async function handleLoadSelectedScenes() {
     });
   }
 
-  setCurrentSceneInstanceId(
-    instanceId
-  );
+  rememberSceneActivation(instanceId);
   setSceneOnLoadActivationVersion((version) => version + 1);
 
   setShowSceneSelectionDialog(
