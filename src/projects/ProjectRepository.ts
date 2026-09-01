@@ -16,6 +16,15 @@ const PROJECTS_KEY =
 const PROJECTS_COLLECTION =
   'projects';
 
+function normalizeProject(project: Project): Project {
+  return {
+    ...project,
+    reactions: Array.isArray(project.reactions)
+      ? project.reactions
+      : [],
+  };
+}
+
 export class ProjectRepository {
   async loadProjects(): Promise<Project[]> {
     if (
@@ -28,7 +37,7 @@ export class ProjectRepository {
           );
 
       return Array.isArray(projects)
-        ? projects
+        ? projects.map(normalizeProject)
         : [];
     }
 
@@ -39,16 +48,17 @@ export class ProjectRepository {
       );
 
     return Array.isArray(projects)
-      ? projects
+      ? projects.map(normalizeProject)
       : [];
   }
 
   async loadProject(projectId: string): Promise<Project | null> {
   if (hostedCollectionRepository.hosted) {
-    return hostedCollectionRepository.loadOne<Project>(
+    const project = await hostedCollectionRepository.loadOne<Project>(
       PROJECTS_COLLECTION,
       projectId
     );
+    return project ? normalizeProject(project) : null;
   }
 
   const projects = await this.loadProjects();

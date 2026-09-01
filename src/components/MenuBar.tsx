@@ -9,6 +9,7 @@ interface MenuBarProps {
   onLoadProject: () => void;
   onSaveProject: () => void;
   onCloseProject: () => void;
+  onOpenReactions: () => void;
   onNewScene: () => void;
   onOpenScene: () => void;
   onSaveScene: () => void;
@@ -39,6 +40,7 @@ function MenuBar({
   onLoadProject,
   onSaveProject,
   onCloseProject,
+  onOpenReactions,
   onNewScene,
   onOpenScene,
   onSaveScene,
@@ -225,6 +227,19 @@ function MenuBar({
               disabled={!projectName}
             >
               Close Project
+            </button>
+
+            <div className="dropdown-separator" />
+
+            <button
+              className="dropdown-item"
+              disabled={!projectName}
+              onClick={() => {
+                closeAllMenus();
+                onOpenReactions();
+              }}
+            >
+              Reactions...
             </button>
           </div>
         )}

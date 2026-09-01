@@ -12,6 +12,7 @@ import type { SceneInstance } from './models/SceneInstance';
 import type { SoundObjectTemplate } from './models/SoundObjectTemplate';
 import type { Room } from './models/Room';
 import type { SpeakerMap } from './models/SpeakerMap';
+import type { RegisteredActionDefinition } from '@settingforge/module-sdk';
 
 import MenuBar from './components/MenuBar';
 import SceneWorkspace from './components/SceneWorkspace';
@@ -24,6 +25,9 @@ import ResearchLabDialog from './components/ResearchLabDialog';
 import SettingsDialog from './components/SettingsDialog';
 import DiagnosticLogDialog from './components/DiagnosticLogDialog';
 import RoomSelectorDialog from './components/RoomSelectorDialog';
+import ReactionsDialog, {
+  type ReactionSceneOption,
+} from './components/ReactionsDialog';
 import { DEFAULT_APP_SETTINGS, type AppSettings } from './models/AppSettings';
 import { appSettingsRepository} from './settings/AppSettingsRepository.ts';
 import { speakerMapRepository } from './speakers/SpeakerMapRepository';
@@ -39,6 +43,7 @@ import { hostedCollectionRepository } from './host/HostedCollectionRepository';
 
 import { moduleEventBus } from './host/ModuleBus';
 import { modulePresence } from './host/ModulePresence';
+import { sacscapeActionManager } from './actions/SacscapeActionManager';
 
 function App() {
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
@@ -46,6 +51,19 @@ function App() {
   const [savedProjects, setSavedProjects] = useState<Project[]>([]);
   const [soundAssets, setSoundAssets] = useState<SoundAsset[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
+  const [projectDirty, setProjectDirty] = useState(false);
+  const [showReactions, setShowReactions] = useState(false);
+  const [reactionScenes, setReactionScenes] =
+    useState<ReactionSceneOption[]>([]);
+  const [availableActions, setAvailableActions] =
+    useState<RegisteredActionDefinition[]>(() => {
+      return moduleEventBus.getAvailableActions();
+    });
+  const activeProjectRef = useRef<Project | null>(null);
+  const currentSceneIdRef = useRef<string | null>(null);
+  const activateSceneRef = useRef<(sceneId: string) => Promise<void>>(
+    async () => undefined
+  );
   type SceneSummary = {
     instanceId: string;
     instanceName: string;
@@ -128,6 +146,18 @@ useEffect(() => {
     modulePresence.stop();
   };
 }, []);
+
+useEffect(() => {
+  return moduleEventBus.onActionsChanged(setAvailableActions);
+}, []);
+
+useEffect(() => {
+  activeProjectRef.current = activeProject;
+}, [activeProject]);
+
+useEffect(() => {
+  currentSceneIdRef.current = currentSceneInstanceId;
+}, [currentSceneInstanceId]);
 
 useEffect(() => {
   async function loadSoundLibrary() {
@@ -362,6 +392,7 @@ const transitionTarget =
     setDirtySceneIds(
       new Set()
     );
+    setProjectDirty(false);
 
     setNotification(
       notificationMessage
@@ -604,6 +635,7 @@ async function confirmDeleteSelectedScene() {
     setActiveProject(
       updatedProject
     );
+    setProjectDirty(false);
 
     setSavedProjects(
       projects
@@ -643,7 +675,7 @@ async function confirmDeleteSelectedScene() {
   function requestProjectAction(
     action: () => void
     ) {
-    if (dirtySceneIds.size === 0) {
+    if (!projectDirty && dirtySceneIds.size === 0) {
       action();
       return;
     }
@@ -775,6 +807,8 @@ pendingSaveActionRef.current =
     setTransitionTargetInstanceId(null);
     setPreviewingTarget(false);
     setDirtySceneIds(new Set());
+    setProjectDirty(false);
+    setShowReactions(false);
     setShowNewSceneDialog(false);
     setShowRoomSelectionDialog(false);
     setShowSceneSelectionDialog(false);
@@ -822,6 +856,7 @@ pendingSaveActionRef.current =
     setPreviewingTarget(false);
     setActiveRoom(null);
     setDirtySceneIds(new Set());
+    setProjectDirty(false);
     setShowProjectPicker(false);
     setShowRoomSelectionDialog(true);
     setShowSceneSelectionDialog(false);
@@ -834,7 +869,7 @@ pendingSaveActionRef.current =
       () => ({
         projectId: activeProject?.id,
         projectName: activeProject?.name,
-        dirty: dirtySceneIds.size > 0,
+        dirty: projectDirty || dirtySceneIds.size > 0,
       })
     );
 
@@ -901,7 +936,8 @@ pendingSaveActionRef.current =
           | { discardChanges?: boolean }
           | undefined;
 
-        if (dirtySceneIds.size > 0 && !payload?.discardChanges) {
+        if ((projectDirty || dirtySceneIds.size > 0) &&
+            !payload?.discardChanges) {
           throw new Error('Project has unsaved changes.');
         }
 
@@ -919,7 +955,7 @@ pendingSaveActionRef.current =
     unregisterSave();
     unregisterClose();
   };
-}, [activeProject, dirtySceneIds]);
+}, [activeProject, dirtySceneIds, projectDirty]);
 
   function handleLoadProject(
     project: Project
@@ -1145,6 +1181,7 @@ function handleCloseScene() {
       createdAt: now,
       updatedAt: now,
       sceneIds: [],
+      reactions: [],
     };
 
     setActiveProject(newProject);
@@ -1154,6 +1191,7 @@ function handleCloseScene() {
     setPreviewingTarget(false);
     setActiveRoom(null);
     setDirtySceneIds(new Set());
+    setProjectDirty(false);
 
     setNewProjectName('');
     setShowNewProjectDialog(false);
@@ -1257,6 +1295,7 @@ function handleCloseScene() {
   setActiveProject(
     updatedProject
   );
+  setProjectDirty(false);
 
   setSavedProjects(
     projects
@@ -1702,6 +1741,35 @@ async function openLoadSceneDialog() {
   }
 }
 
+async function handleOpenReactions() {
+  if (!activeProject) return;
+
+  try {
+    const scenes = await sceneRepository.loadScenes();
+    const projectSceneIds = new Set(activeProject.sceneIds);
+    setReactionScenes(
+      scenes
+        .filter((scene) => projectSceneIds.has(scene.instanceId))
+        .map((scene) => ({
+          id: scene.instanceId,
+          name: scene.instanceName,
+        }))
+    );
+    setShowReactions(true);
+  } catch (error) {
+    console.error('Unable to load Scenes for Reactions:', error);
+    setNotification('Unable to open Reactions.');
+    setTimeout(() => setNotification(null), 3000);
+  }
+}
+
+function handleReactionsChange(reactions: Project['reactions']) {
+  setActiveProject((project) => project
+    ? { ...project, reactions, updatedAt: new Date() }
+    : project);
+  setProjectDirty(true);
+}
+
 async function handleLoadSelectedScenes() {
   if (
     !activeProject ||
@@ -1840,6 +1908,18 @@ async function handleLoadSelectedScenes() {
   );
 }
 
+useEffect(() => {
+  activateSceneRef.current = handleActivateScene;
+});
+
+useEffect(() => {
+  return sacscapeActionManager.start(
+    () => activeProjectRef.current,
+    () => currentSceneIdRef.current,
+    (sceneId) => activateSceneRef.current(sceneId)
+  );
+}, []);
+
   return (
     <div className="app">
       <MenuBar
@@ -1849,6 +1929,7 @@ async function handleLoadSelectedScenes() {
         }
         onSaveProject={handleSaveProject}
         onCloseProject={handleCloseProject}
+        onOpenReactions={() => void handleOpenReactions()}
         onNewScene={handleNewScene}
         onOpenScene={() => {
           void openLoadSceneDialog();
@@ -2378,6 +2459,16 @@ async function handleLoadSelectedScenes() {
 
       {showResearchLab && (
         <ResearchLabDialog onClose={() => setShowResearchLab(false)} />
+      )}
+
+      {activeProject && showReactions && (
+        <ReactionsDialog
+          reactions={activeProject.reactions}
+          actions={availableActions}
+          scenes={reactionScenes}
+          onChange={handleReactionsChange}
+          onClose={() => setShowReactions(false)}
+        />
       )}
 
       {showSettings && (

@@ -2414,6 +2414,103 @@ body,
   margin: 0;
 }
 
+.reactions-dialog {
+  width: min(780px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  overflow-y: auto;
+}
+
+.reactions-dialog-header,
+.reaction-conditions-header,
+.reaction-item-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.reactions-dialog-header h2,
+.reaction-conditions-header h3 {
+  margin: 0;
+}
+
+.reactions-list,
+.reaction-editor,
+.reaction-conditions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.reactions-list {
+  margin-top: 16px;
+}
+
+.reaction-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid #4d4f55;
+  background: #25262a;
+}
+
+.reaction-item small,
+.reactions-empty {
+  color: #aeb0b6;
+}
+
+.reaction-item-actions {
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.reaction-editor {
+  margin-top: 16px;
+}
+
+.reaction-editor > label {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.reaction-editor select,
+.reaction-editor input {
+  min-width: 0;
+  padding: 6px;
+  color: #ededed;
+  border: 1px solid #555860;
+  background: #202125;
+}
+
+.reaction-conditions {
+  padding-top: 8px;
+  border-top: 1px solid #45474d;
+}
+
+.reaction-condition-row {
+  display: grid;
+  grid-template-columns: 1fr 1.25fr 1fr auto;
+  gap: 6px;
+}
+
+.reaction-error {
+  margin: 0;
+  color: #ef9292;
+}
+
+@media (max-width: 700px) {
+  .reaction-condition-row {
+    grid-template-columns: 1fr;
+  }
+
+  .reaction-editor > label {
+    grid-template-columns: 1fr;
+  }
+}
+
 .scene-on-load-one-shot {
   display: grid;
   gap: 5px;
