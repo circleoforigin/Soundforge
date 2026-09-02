@@ -37,11 +37,12 @@ test('Scene activation fires the configured asset once through the existing Soun
   assert.match(stage, /await handleStartNodePlayback\(runtimeNode/);
 });
 
-test('explicit same-scene activation advances the activation version instead of suppressing playback', async () => {
+test('canonical scene activation advances On Load for a new destination', async () => {
   const app = await source('src/App.tsx');
-  const handler = app.match(/async function handleActivateScene[\s\S]*?\n {2}return \(/)?.[0] ?? '';
-  assert.match(handler, /setCurrentSceneInstanceId\(\s*instanceId\s*\)/);
+  const handler = app.match(/async function transitionToScene[\s\S]*?\n {2}async function handleTransition/)?.[0] ?? '';
+  assert.match(handler, /rememberSceneActivation\(destinationScene\.instanceId\)/);
   assert.match(handler, /setSceneOnLoadActivationVersion\(\(version\) => version \+ 1\)/);
+  assert.match(handler, /instanceId === currentSceneIdRef\.current/);
 });
 
 test('runtime playback inherits Scene one-shot and master volume routing without persisting a node', async () => {

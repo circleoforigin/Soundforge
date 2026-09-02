@@ -9,7 +9,7 @@ import { moduleEventBus } from '../host/ModuleBus';
 
 type ProjectProvider = () => Project | null;
 type ActiveSceneProvider = () => string | null;
-type SceneLoader = (sceneId: string) => Promise<void>;
+type SceneTransitionRequester = (sceneId: string) => Promise<void>;
 
 export class SacscapeActionManager {
   private readonly eventBus: ModuleEventBus;
@@ -17,7 +17,7 @@ export class SacscapeActionManager {
   private stopCatalogSubscription: (() => void) | null = null;
   private getProject: ProjectProvider = () => null;
   private getActiveSceneId: ActiveSceneProvider = () => null;
-  private loadScene: SceneLoader = async () => undefined;
+  private transitionToScene: SceneTransitionRequester = async () => undefined;
 
   constructor(eventBus: ModuleEventBus) {
     this.eventBus = eventBus;
@@ -26,12 +26,12 @@ export class SacscapeActionManager {
   start(
     getProject: ProjectProvider,
     getActiveSceneId: ActiveSceneProvider,
-    loadScene: SceneLoader
+    transitionToScene: SceneTransitionRequester
   ): () => void {
     this.stop();
     this.getProject = getProject;
     this.getActiveSceneId = getActiveSceneId;
-    this.loadScene = loadScene;
+    this.transitionToScene = transitionToScene;
     this.stopCatalogSubscription = this.eventBus.onActionsChanged(
       (actions) => this.synchronizeSubscriptions(actions)
     );
@@ -82,7 +82,7 @@ export class SacscapeActionManager {
 
     for (const sceneId of sceneIds) {
       if (sceneId === this.getActiveSceneId()) continue;
-      await this.loadScene(sceneId);
+      await this.transitionToScene(sceneId);
     }
   }
 }

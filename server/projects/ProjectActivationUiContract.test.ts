@@ -36,8 +36,7 @@ test('Scene selection does not reconfigure Room Audio', () => {
     source.indexOf('function handleActivateScene('),
     source.indexOf('return (', source.indexOf('function handleActivateScene('))
   );
-  assert.match(handler, /setCurrentSceneInstanceId\(instanceId\)/);
-  assert.match(handler, /setShowSceneSelectionDialog\(false\)/);
+  assert.match(handler, /transitionToScene\(instanceId\)/);
   assert.doesNotMatch(handler, /roomAudioEngine\.configure/);
 });
 

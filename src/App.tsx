@@ -67,7 +67,7 @@ function App() {
     });
   const activeProjectRef = useRef<Project | null>(null);
   const currentSceneIdRef = useRef<string | null>(null);
-  const activateSceneRef = useRef<(sceneId: string) => Promise<void>>(
+  const transitionToSceneRef = useRef<(sceneId: string) => Promise<void>>(
     async () => undefined
   );
   type SceneSummary = {
@@ -77,8 +77,9 @@ function App() {
   };
   const [loadedScenes, setLoadedScenes] =
     useState<Map<string, SceneInstance>>(
-    () => new Map()
-  );
+      () => new Map()
+    );
+  const loadedScenesRef = useRef<Map<string, SceneInstance>>(new Map());
   const [sceneSummaries, setSceneSummaries] = useState<SceneSummary[]>([]);
   const [
     selectedSceneIdsToLoad,
@@ -164,6 +165,10 @@ useEffect(() => {
 useEffect(() => {
   currentSceneIdRef.current = currentSceneInstanceId;
 }, [currentSceneInstanceId]);
+
+useEffect(() => {
+  loadedScenesRef.current = loadedScenes;
+}, [loadedScenes]);
 
 useEffect(() => {
   async function loadSoundLibrary() {
@@ -1513,6 +1518,7 @@ function handleCloseScene() {
   }
 
   function rememberSceneActivation(instanceId: string) {
+    currentSceneIdRef.current = instanceId;
     setCurrentSceneInstanceId(instanceId);
     setActiveProject((project) => project
       ? {
@@ -1524,26 +1530,15 @@ function handleCloseScene() {
     setProjectDirty(true);
   }
 
-  async function handleTransition() {
-    if (
-      transitionInProgressRef.current ||
-      !currentScene ||
-      !transitionTarget
-    ) {
-      return;
-    }
+  async function transitionToScene(instanceId: string) {
+    const project = activeProjectRef.current;
+    if (!project?.sceneIds.includes(instanceId)) return;
+    if (instanceId === currentSceneIdRef.current) return;
+    if (transitionInProgressRef.current) return;
 
     transitionInProgressRef.current = true;
     setTransitionInProgress(true);
     const transitionRunId = ++transitionRunIdRef.current;
-
-    const outgoingScene = currentScene;
-    const incomingScene = transitionTarget;
-    const transitionMode = outgoingScene.transitionMode ?? 'crossfade';
-
-    function activateIncomingScene() {
-      rememberSceneActivation(incomingScene.instanceId);
-    }
 
     function clearTransitionSelection() {
       setTransitionTargetInstanceId(null);
@@ -1551,9 +1546,55 @@ function handleCloseScene() {
     }
 
     try {
+      let incomingScene = loadedScenesRef.current.get(instanceId);
+
+      if (!incomingScene) {
+        incomingScene = await sceneRepository.loadScene(instanceId) ?? undefined;
+
+        if (!incomingScene) {
+          setNotification('Scene could not be found.');
+          setTimeout(() => setNotification(null), 3000);
+          return;
+        }
+
+        if (
+          transitionRunId !== transitionRunIdRef.current ||
+          activeProjectRef.current?.id !== project.id
+        ) {
+          return;
+        }
+
+        const updatedScenes = new Map(loadedScenesRef.current);
+        updatedScenes.set(incomingScene.instanceId, incomingScene);
+        loadedScenesRef.current = updatedScenes;
+        setLoadedScenes(updatedScenes);
+      }
+
+      const destinationScene = incomingScene;
+
+      const outgoingSceneId = currentSceneIdRef.current;
+      const outgoingScene = outgoingSceneId
+        ? loadedScenesRef.current.get(outgoingSceneId)
+        : undefined;
+
+      function activateIncomingScene() {
+        rememberSceneActivation(destinationScene.instanceId);
+        setSceneOnLoadActivationVersion((version) => version + 1);
+        setShowSceneSelectionDialog(false);
+      }
+
+      if (!outgoingScene) {
+        roomAudioEngine.setSceneTransitionGain(destinationScene.instanceId, 1);
+        activateIncomingScene();
+        clearTransitionSelection();
+        return;
+      }
+
+      const transitionMode = outgoingScene.transitionMode ?? 'crossfade';
+
       if (transitionMode === 'immediate') {
         roomAudioEngine.stopScene(outgoingScene.instanceId);
-        roomAudioEngine.setSceneTransitionGain(incomingScene.instanceId, 1);
+        roomAudioEngine.setSceneTransitionGain(destinationScene.instanceId, 1);
         activateIncomingScene();
         clearTransitionSelection();
         return;
@@ -1565,17 +1606,15 @@ function handleCloseScene() {
           outgoingScene.fadeOutMs
         );
 
-        if (transitionRunId !== transitionRunIdRef.current) {
-          return;
-        }
+        if (transitionRunId !== transitionRunIdRef.current) return;
 
-        roomAudioEngine.setSceneTransitionGain(incomingScene.instanceId, 0);
+        roomAudioEngine.setSceneTransitionGain(destinationScene.instanceId, 0);
         activateIncomingScene();
 
         const incomingFade = roomAudioEngine.fadeSceneTransitionGain(
-          incomingScene.instanceId,
+          destinationScene.instanceId,
           1,
-          incomingScene.fadeInMs
+          destinationScene.fadeInMs
         );
 
         clearTransitionSelection();
@@ -1583,7 +1622,7 @@ function handleCloseScene() {
         return;
       }
 
-      roomAudioEngine.setSceneTransitionGain(incomingScene.instanceId, 0);
+      roomAudioEngine.setSceneTransitionGain(destinationScene.instanceId, 0);
       activateIncomingScene();
 
       const transitionFades = [
@@ -1592,20 +1631,29 @@ function handleCloseScene() {
           outgoingScene.fadeOutMs
         ),
         roomAudioEngine.fadeSceneTransitionGain(
-          incomingScene.instanceId,
+          destinationScene.instanceId,
           1,
-          incomingScene.fadeInMs
+          destinationScene.fadeInMs
         ),
       ];
 
       clearTransitionSelection();
       await Promise.all(transitionFades);
+    } catch (error) {
+      console.error('Unable to transition scene:', error);
+      setNotification('Unable to transition scene.');
+      setTimeout(() => setNotification(null), 3000);
     } finally {
       if (transitionRunId === transitionRunIdRef.current) {
         transitionInProgressRef.current = false;
         setTransitionInProgress(false);
       }
     }
+  }
+
+  async function handleTransition() {
+    if (!transitionTargetInstanceId) return;
+    await transitionToScene(transitionTargetInstanceId);
   }
 
   function handleManageRooms() {
@@ -1981,84 +2029,18 @@ async function handleLoadSelectedScenes() {
   async function handleActivateScene(
   instanceId: string
 ) {
-  if (
-    !activeProject?.sceneIds.includes(
-      instanceId
-    )
-  ) {
-    return;
-  }
-
-  let scene =
-    loadedScenes.get(instanceId);
-
-  if (!scene) {
-    try {
-      scene =
-        await sceneRepository.loadScene(
-          instanceId
-        ) ?? undefined;
-    } catch (error) {
-      console.error(
-        'Unable to load scene:',
-        error
-      );
-
-      setNotification(
-        'Unable to load scene.'
-      );
-
-      setTimeout(() => {
-        setNotification(null);
-      }, 3000);
-
-      return;
-    }
-
-    if (!scene) {
-      setNotification(
-        'Scene could not be found.'
-      );
-
-      setTimeout(() => {
-        setNotification(null);
-      }, 3000);
-
-      return;
-    }
-
-    const loadedScene = scene;
-
-    setLoadedScenes((current) => {
-      const updated =
-        new Map(current);
-
-      updated.set(
-        loadedScene.instanceId,
-        loadedScene
-      );
-
-      return updated;
-    });
-  }
-
-  rememberSceneActivation(instanceId);
-  setSceneOnLoadActivationVersion((version) => version + 1);
-
-  setShowSceneSelectionDialog(
-    false
-  );
+  await transitionToScene(instanceId);
 }
 
 useEffect(() => {
-  activateSceneRef.current = handleActivateScene;
+  transitionToSceneRef.current = transitionToScene;
 });
 
 useEffect(() => {
   return sacscapeActionManager.start(
     () => activeProjectRef.current,
     () => currentSceneIdRef.current,
-    (sceneId) => activateSceneRef.current(sceneId)
+    (sceneId) => transitionToSceneRef.current(sceneId)
   );
 }, []);
 
