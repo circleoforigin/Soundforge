@@ -2,14 +2,17 @@ import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 import express from 'express';
-import type { DiagnosticLogEntry } from '../../src/models/DiagnosticLog.ts';
+import type {
+  DiagnosticLogEntry,
+  DiagnosticLogInput,
+} from '../../src/models/DiagnosticLog.ts';
 import { registerDiagnosticLogRoute } from './DiagnosticLogRoute.ts';
 
 test('diagnostic routes record, list, and clear entries', async () => {
   const entries: DiagnosticLogEntry[] = [];
   const app = express();
   registerDiagnosticLogRoute(app, {
-    async record(input) {
+    async record(input: DiagnosticLogInput) {
       const entry = { ...input, id: String(entries.length), timestamp: new Date().toISOString() };
       entries.unshift(entry); return entry;
     },

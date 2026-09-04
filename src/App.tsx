@@ -45,7 +45,6 @@ import ImportSoundDialog, {
 } from './components/ImportSoundDialog';
 import { hostedSoundLibrary} from './services/library/HostedSoundLibraryService';
 import { roomAudioEngine } from './audio/RoomAudioEngine';
-import { hostedCollectionRepository } from './host/HostedCollectionRepository';
 
 import { moduleEventBus } from './host/ModuleBus';
 import { modulePresence } from './host/ModulePresence';
@@ -141,7 +140,6 @@ const [customRooms, setCustomRooms] = useState<Room[]>([]);
     speakerMaps.find((speakerMap) => speakerMap.id === activeRoom?.speakerMapId) ??
     headphonesSpeakerMap;
   useSyncExternalStore(roomAudioEngine.subscribe, roomAudioEngine.getVersion);
-  const roomAudioStatus = roomAudioEngine.getStatus();
   const roomSpeakerVolumeStatus = roomAudioEngine.getRoomSpeakerVolumeStatus();
   
 useEffect(() => {
@@ -811,7 +809,7 @@ pendingSaveActionRef.current =
     setShowUnsavedChangesDialog(false);
   }
 
-  function teardownProjectRuntime(project: Project)
+  function teardownProjectRuntime()
   {
     console.warn('===== TEARDOWN ENTER =====');
 
@@ -853,7 +851,7 @@ pendingSaveActionRef.current =
       return;
     }
 
-    teardownProjectRuntime(activeProject);
+    teardownProjectRuntime();
     setActiveProject(null);
     setLoadedScenes(new Map());
     setCurrentSceneInstanceId(null);
@@ -900,7 +898,7 @@ pendingSaveActionRef.current =
       console.warn('===== loadProject ENTER =====');
     if (activeProject) {
       console.warn('===== ABOUT TO TEARDOWN OLD PROJECT =====');
-      teardownProjectRuntime(activeProject);
+      teardownProjectRuntime();
       console.warn('===== OLD PROJECT TEARDOWN COMPLETE =====');
     }
     console.warn('===== ABOUT TO SET NEW PROJECT STATE =====');
@@ -1286,7 +1284,7 @@ function handleCloseScene() {
     trimmedName: string
   ) {
     if (activeProject) {
-      teardownProjectRuntime(activeProject);
+      teardownProjectRuntime();
     }
 
     setLoadedScenes(new Map());

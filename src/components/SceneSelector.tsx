@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
 import type {
   SceneInstance,
@@ -48,29 +48,27 @@ function SceneSelector({
   onPausePlayback,
   onChooseOnLoadOneShot,
 }: SceneSelectorProps) {
-  const [sceneNameDraft, setSceneNameDraft] =
-    useState(currentScene?.instanceName ?? '');
+  const [invalidSceneNameDraft, setInvalidSceneNameDraft] =
+    useState<{ instanceId: string; value: string } | null>(null);
   const [transitionModeMenuOpen, setTransitionModeMenuOpen] =
     useState(false);
-
-  useEffect(() => {
-    setSceneNameDraft(
-      currentScene?.instanceName ?? ''
-    );
-  }, [
-    currentScene?.instanceId,
-    currentScene?.instanceName,
-  ]);
 
   function handleSceneNameChange(
     value: string
   ) {
-    setSceneNameDraft(value);
-
-    if (!currentScene || !value.trim()) {
+    if (!currentScene) {
       return;
     }
 
+    if (!value.trim()) {
+      setInvalidSceneNameDraft({
+        instanceId: currentScene.instanceId,
+        value,
+      });
+      return;
+    }
+
+    setInvalidSceneNameDraft(null);
     onSceneChange({
       ...currentScene,
       instanceName: value,
@@ -82,18 +80,17 @@ function SceneSelector({
       return;
     }
 
-    const trimmedName =
-      sceneNameDraft.trim();
+    const sceneName = invalidSceneNameDraft?.instanceId === currentScene.instanceId
+      ? invalidSceneNameDraft.value
+      : currentScene.instanceName;
+    const trimmedName = sceneName.trim();
 
     if (!trimmedName) {
-      setSceneNameDraft(
-        currentScene.instanceName
-      );
-
+      setInvalidSceneNameDraft(null);
       return;
     }
 
-    setSceneNameDraft(trimmedName);
+    setInvalidSceneNameDraft(null);
 
     if (
       trimmedName !==
@@ -141,6 +138,10 @@ function SceneSelector({
   const onLoadOneShotAsset = soundAssets.find(
     (asset) => asset.id === currentScene?.onLoadOneShotAssetId
   ) ?? null;
+  const displayedSceneName = currentScene
+    && invalidSceneNameDraft?.instanceId === currentScene.instanceId
+    ? invalidSceneNameDraft.value
+    : currentScene?.instanceName ?? '';
 
   return (
   <div className="scene-selector">
@@ -150,7 +151,7 @@ function SceneSelector({
         className="scene-name-input"
         type="text"
         aria-label="Scene name"
-        value={sceneNameDraft}
+        value={displayedSceneName}
         onChange={(event) =>
           handleSceneNameChange(
             event.target.value

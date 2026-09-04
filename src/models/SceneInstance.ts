@@ -1,4 +1,4 @@
-import type { SceneDefinition } from './SceneDefinition';
+import type { SceneDefinition } from './SceneDefinition.ts';
 
 export type SceneTransitionMode =
   | 'crossfade'

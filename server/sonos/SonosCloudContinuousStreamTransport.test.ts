@@ -96,6 +96,25 @@ function runtimeSnapshot(deliveredBytes: number): AudioStreamSnapshot {
     id: 'stream-id',
     lifecycle: 'running',
     source: 'silence',
+    toneReady: true,
+    telemetry: {
+      measuredAt: null,
+      sourceMode: 'silence',
+      pcmFramesGeneratedLastSecond: 0,
+      pcmBytesGeneratedLastSecond: 0,
+      encodedFramesProducedLastSecond: 0,
+      encodedBytesProducedLastSecond: 0,
+      encodedBitsPerSecond: 0,
+      bytesDeliveredLastSecond: 0,
+      deliveredBitsPerSecond: 0,
+      consumerConnected: true,
+      encodedRate: {
+        current: 0, minimum: 0, maximum: 0, average: 0, samples: 0,
+      },
+      deliveredRate: {
+        current: 0, minimum: 0, maximum: 0, average: 0, samples: 0,
+      },
+    },
     encoder: {
       state: 'running',
       pid: 123,
@@ -103,6 +122,9 @@ function runtimeSnapshot(deliveredBytes: number): AudioStreamSnapshot {
       sampleRate: 44_100,
       channels: 2,
       bitrate: 192_000,
+      codec: 'mp3',
+      container: 'mp3',
+      mimeType: 'audio/mpeg',
       framesGenerated: 1,
       pcmBytesGenerated: 3_528,
       encodedBytesProduced: deliveredBytes,
@@ -119,12 +141,17 @@ function runtimeSnapshot(deliveredBytes: number): AudioStreamSnapshot {
       deliveredBytes,
       writableLength: 0,
       backpressured: false,
+      connectionCount: 1,
+      currentConnectionOrdinal: 1,
+      awaitingReconnect: false,
+      connections: [],
     },
     transport: null,
     createdAt: new Date().toISOString(),
     stoppedAt: null,
     lastError: null,
     recentEvents: [],
+    scheduledEvents: [],
   };
 }
 
@@ -150,6 +177,7 @@ test('Sonos cloud adapter ignores PLAYING to IDLE while binding is incomplete', 
     transport: option,
     streamId: 'stream-id',
     streamUrl: 'https://stream',
+    bindHttpClient() {},
     updateTransport(update) {
       updates.push(update);
     },
@@ -199,6 +227,7 @@ test('Sonos cloud adapter invalidates a bound active stream on later terminal ID
     transport: option,
     streamId: 'stream-id',
     streamUrl: 'https://stream',
+    bindHttpClient() {},
     updateTransport(update) {
       updates.push(update);
     },
@@ -244,6 +273,7 @@ test('Sonos cloud adapter rejects a late binding after an explicit startup error
     transport: option,
     streamId: 'stream-id',
     streamUrl: 'https://stream',
+    bindHttpClient() {},
     updateTransport() {},
     addDiagnostic() {},
     terminate(reason) {

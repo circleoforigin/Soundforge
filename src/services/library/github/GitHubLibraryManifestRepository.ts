@@ -50,9 +50,7 @@ export class GitHubLibraryManifestRepository
     return normalizeLibraryManifest(raw);
   }
 
-  async save(
-    _manifest: LibraryManifest
-  ): Promise<void> {
+  async save(): Promise<void> {
     throw new Error(
       'GitHub manifest writing is not implemented yet.'
     );

@@ -1,4 +1,4 @@
-import type { SoundPosition } from '../utils/soundStageMath';
+import type { SoundPosition } from '../utils/soundStageMath.ts';
 
 export const ROOM_AUDIO_FORMAT = {
   sampleRate: 48_000,

@@ -1,5 +1,7 @@
-import type { SceneObjectInstance } from './SceneObjectInstance';
-import type { DeployedSceneObjectInstance } from './DeployedSceneObjectInstance';
+import type { SceneObjectInstance } from './SceneObjectInstance.ts';
+import type {
+  DeployedSceneObjectInstance,
+} from './DeployedSceneObjectInstance.ts';
 
 export interface SceneDefinition {
   positionalObjects: SceneObjectInstance[];

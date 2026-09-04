@@ -1,4 +1,4 @@
-import type { PersistentEntity } from './PersistentEntity';
+import type { PersistentEntity } from './PersistentEntity.ts';
 
 export type SpatialOutputMode = 'balanced' | 'fullSpatial';
 
