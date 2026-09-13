@@ -2093,6 +2093,24 @@ useEffect(() => {
         }
       />
 
+      {!activeProject && (
+  <main className="sacscape-empty-workspace">
+    <div className="module-empty-state">
+      <div className="module-identifier">
+        SACscape
+      </div>
+
+      <h2>
+        No Project Loaded
+      </h2>
+
+      <p>
+        Create or load a project to get started.
+      </p>
+    </div>
+  </main>
+)}
+
       {displayedScene && (
         <SceneWorkspace
           key={`${activeProject?.id ?? 'none'}:${projectRuntimeKey}`}

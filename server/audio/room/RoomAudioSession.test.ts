@@ -149,3 +149,35 @@ test('one-shot completes exactly once while persistent room session stays ready'
   assert.equal(events.filter((entry) => entry.event === 'room_audio.source_completed').length, 1);
   await session.stop();
 });
+
+test('live PCM mixes independently and underruns to silence', async () => {
+  const registry = new AudioOutputProviderRegistry();
+  const provider = new CapturingProvider('fake');
+  registry.register(provider);
+  const session = new RoomAudioSession({
+    roomId: 'room', roomName: 'Room',
+    endpoints: [endpoint('a', 'fake')],
+  }, registry, assetStore as never, diagnostics as never);
+  await session.start();
+  const live = await session.addSource({
+    ...source({ a: 1 }), assetId: 'desktop:default',
+    assetName: 'Desktop Audio', objectInstanceId: 'desktop',
+    sourceNodeId: 'desktop-source', playbackMode: 'live', typeVolume: 0,
+  });
+  await wait(25);
+  const silenceFrame = provider.connections[0].frames.at(-1);
+  assert.ok(silenceFrame);
+  assert.equal(silenceFrame.every((value) => value === 0), true);
+  const pcm = Buffer.alloc(960 * 4);
+  for (let offset = 0; offset < pcm.length; offset += 2) {
+    pcm.writeInt16LE(16_000, offset);
+  }
+  session.pushLivePcm(live.playbackId, pcm);
+  await wait(25);
+  assert.ok(provider.connections[0].frames.some((frame) => {
+    return frame.readInt16LE(0) > 10_000;
+  }));
+  session.stopSource(live.playbackId, 'test stop', false);
+  assert.equal(session.snapshot().state, 'ready');
+  await session.stop();
+});

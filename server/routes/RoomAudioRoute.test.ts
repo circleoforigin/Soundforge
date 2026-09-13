@@ -11,6 +11,9 @@ test('Room Audio route forwards provider-neutral session and source intent', asy
     get(roomId: string) { return { roomId, state: 'ready' }; },
     async stop(roomId: string) { calls.push(`stop:${roomId}`); return true; },
     async addSource(roomId: string) { calls.push(`source:${roomId}`); return { playbackId: 'playback-1' }; },
+    pushLivePcm(roomId: string, playbackId: string, chunk: Buffer) {
+      calls.push(`pcm:${roomId}:${playbackId}:${chunk.length}`);
+    },
     updateSource(_roomId: string, playbackId: string) { calls.push(`update:${playbackId}`); return { playbackId }; },
     stopSource(_roomId: string, playbackId: string) { calls.push(`stop-source:${playbackId}`); return true; },
   };
@@ -20,10 +23,17 @@ test('Room Audio route forwards provider-neutral session and source intent', asy
     const { port } = server.address() as AddressInfo; const base = `http://127.0.0.1:${port}/api/audio/rooms/room`;
     assert.equal((await fetch(`${base}/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 201);
     assert.equal((await fetch(`${base}/sources`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 201);
+    assert.equal((await fetch(`${base}/sources/playback-1/pcm`, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(16),
+    })).status, 204);
     assert.equal((await fetch(`${base}/sources/playback-1`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 200);
     assert.equal((await fetch(`${base}/sources/playback-1`, { method: 'DELETE' })).status, 200);
     assert.equal((await fetch(`${base}/session`, { method: 'DELETE' })).status, 200);
-    assert.deepEqual(calls, ['start:room', 'source:room', 'update:playback-1', 'stop-source:playback-1', 'stop:room']);
+    assert.deepEqual(calls, [
+      'start:room', 'source:room', 'pcm:room:playback-1:16',
+      'update:playback-1', 'stop-source:playback-1', 'stop:room',
+    ]);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 

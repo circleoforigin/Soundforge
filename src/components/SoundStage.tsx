@@ -307,16 +307,17 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
   }
 
   function createShelfNode(
-    kind: 'oneShot' | 'loop' | 'ambience'
+    kind: 'oneShot' | 'loop' | 'live' | 'ambience'
   ) {
     const isAmbience = kind === 'ambience';
     const newNode: SceneObjectInstance = {
       instanceId: crypto.randomUUID(),
-      instanceName: isAmbience ? 'New Ambience' : 'New Sound',
-      soundAssetIds: [],
-      playbackMode: kind === 'oneShot' ? 'oneShot' : 'loop',
+      instanceName: isAmbience
+        ? 'New Ambience' : kind === 'live' ? 'Desktop Audio' : 'New Sound',
+      soundAssetIds: kind === 'live' ? ['desktop:default'] : [],
+      playbackMode: isAmbience ? 'loop' : kind,
       placement: 'shelf',
-      onLoad: isAmbience,
+      onLoad: isAmbience || kind === 'live',
       fadeInEnabled: false,
       fadeInMs: DEFAULT_NODE_FADE_MS,
       fadeOutEnabled: false,
@@ -519,9 +520,7 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       sourceNodeId: deployment?.sourceNodeId ?? node.instanceId,
       type: isAmbience
         ? 'ambience'
-        : node.playbackMode === 'loop'
-          ? 'loop'
-          : 'oneShot',
+        : node.playbackMode,
       volume: scene.volume,
     };
   }
@@ -594,6 +593,22 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       return;
     }
 
+    if (node.playbackMode === 'live') {
+      const sourceNodeId = referencedDeployments.find(
+        ({ node: deployedNode }) => {
+          return deployedNode.instanceId === node.instanceId;
+        }
+      )?.deployment.sourceNodeId ?? node.instanceId;
+      onSceneChange({
+        ...sceneRef.current,
+        positionalObjects: sceneRef.current.positionalObjects.map(
+          (candidate) => candidate.instanceId === sourceNodeId
+            ? { ...candidate, muted: !node.muted } : candidate
+        ),
+      });
+      return;
+    }
+
     const soundAssetId =
       node.soundAssetIds[0];
 
@@ -637,6 +652,21 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
   ) {
     if (node.playbackMode === 'loop' && node.loopingZone?.enabled) {
       startLoopingZone(node);
+      return;
+    }
+    if (node.playbackMode === 'live') {
+      const correlationId = `playback-${crypto.randomUUID()}`;
+      try {
+        await roomAudioEngine.playLive({
+          correlationId, room: activeRoom, speakerMap: activeSpeakerMap,
+          node, speakerMix: getOutputSpeakerMixForNode(node),
+          stereoMix: getStereoMixForNode(node),
+          routing: getPlaybackRouting(node), sceneName: scene.instanceName,
+        });
+      } catch (error) {
+        showFieldMessage(error instanceof Error
+          ? error.message : 'Unable to start Desktop Audio.');
+      }
       return;
     }
     const soundAssetId = node.soundAssetIds[0];
@@ -877,7 +907,7 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       event.clientY
     );
     const soundAssetId = node?.soundAssetIds[0];
-    const assetExists = soundAssets.some(
+    const assetExists = node?.playbackMode === 'live' || soundAssets.some(
       (asset) => asset.id === soundAssetId
     );
 
@@ -905,7 +935,7 @@ const SoundStage = forwardRef<SoundStageHandle, SoundStageProps>(function SoundS
       position: deployment.position,
     };
 
-    if (node.playbackMode === 'loop') {
+    if (node.playbackMode === 'loop' || node.playbackMode === 'live') {
       onSceneChange({
         ...latestScene,
         deployedObjects: [
@@ -1535,6 +1565,9 @@ function handleCircleResizeEnd(
                   <button onClick={() => createShelfNode('loop')}>
                     Loop
                   </button>
+                  <button onClick={() => createShelfNode('live')}>
+                    Desktop Audio
+                  </button>
                 </div>
               )}
             </div>
@@ -1549,6 +1582,7 @@ function handleCircleResizeEnd(
                   node.instanceId === selectedNodeId ? 'selected' : '',
                   node.muted ? 'muted' : '',
                   node.soundAssetIds.length === 0 ? 'no-sound' : '',
+                  node.playbackMode === 'live' ? 'live-source' : '',
                 ].filter(Boolean).join(' ')}
                 data-node-id={node.instanceId}
                 data-placement="shelf"
@@ -1573,7 +1607,8 @@ function handleCircleResizeEnd(
               >
                 <div className="shelf-node-icon" aria-hidden="true">
                   <span className="shelf-node-type-badge">
-                    {node.playbackMode === 'loop' ? '∞' : '1'}
+                    {node.playbackMode === 'loop'
+                      ? '∞' : node.playbackMode === 'live' ? 'LIVE' : '1'}
                   </span>
                   {node.soundAssetIds.length === 0 && (
                     <span className="shelf-node-no-sound">No Sound</span>

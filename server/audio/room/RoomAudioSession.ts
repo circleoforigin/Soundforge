@@ -22,7 +22,11 @@ interface ActiveSource {
   renderedSamples: number;
   startCount: number;
   state: RoomAudioSourceSnapshot['state'];
-  asset: DecodedRoomAudioAsset;
+  asset?: DecodedRoomAudioAsset;
+  liveFrames?: Buffer[];
+  liveRemainder?: Buffer;
+  liveUnderruns?: number;
+  liveOverruns?: number;
   fadeOutSamplesRemaining: number;
   fadeOutTotalSamples: number;
   completionReason?: string;
@@ -118,19 +122,25 @@ export class RoomAudioSession {
   async addSource(request: RoomAudioSourceRequest): Promise<RoomAudioSourceSnapshot> {
     if (this.state !== 'ready' && this.state !== 'degraded') throw new Error('Room audio session is not ready.');
     const decodeStartedAt = performance.now();
-    const decoded = this.assetStore.decodeWithTelemetry
+    const decoded = request.playbackMode === 'live'
+      ? null
+      : this.assetStore.decodeWithTelemetry
       ? await this.assetStore.decodeWithTelemetry(request.assetId)
       : { asset: await this.assetStore.decode(request.assetId), cacheHit: false, durationMs: performance.now() - decodeStartedAt };
-    const asset = decoded.asset;
+    const asset = decoded?.asset;
     const source: ActiveSource = {
       request: structuredClone(request), playbackId: crypto.randomUUID(),
       logicalStartFrame: this.clock.currentFrameIndex, playheadSamples: 0, renderedSamples: 0, startCount: 1,
       state: 'playing', asset, fadeOutSamplesRemaining: 0, fadeOutTotalSamples: 0,
+      ...(request.playbackMode === 'live' ? {
+        liveFrames: [], liveRemainder: Buffer.alloc(0),
+        liveUnderruns: 0, liveOverruns: 0,
+      } : {}),
       lastObservedPlayhead: 0, loopWrapCount: 0,
       peakMixed: 0, sumSquaresMixed: 0, mixedSampleCount: 0, clippingCount: 0,
       firstAudibleFrameRecorded: false,
     };
-    if (request.randomStart && request.playbackMode === 'loop' && asset.durationSamples > 1) {
+    if (request.randomStart && request.playbackMode === 'loop' && asset && asset.durationSamples > 1) {
       source.playheadSamples = Math.floor(Math.random() * (asset.durationSamples - 1));
     }
     this.sources.set(source.playbackId, source);
@@ -143,10 +153,13 @@ export class RoomAudioSession {
         sourceInstancesCreated: 1, endpointRenderCount: this.readyConnections().length,
         endpointIds: this.readyConnections().map((item) => item.endpoint.endpointId), startCount: 1,
         frontendRequestInitiatedAt: request.frontendRequestInitiatedAt,
-        backendSourceCreatedAt: new Date().toISOString(), decodeDurationMs: decoded.durationMs, decodeCacheHit: decoded.cacheHit,
+        backendSourceCreatedAt: new Date().toISOString(),
+        decodeDurationMs: decoded?.durationMs ?? 0,
+        decodeCacheHit: decoded?.cacheHit ?? false,
+        sourceKind: request.playbackMode === 'live' ? 'live-pcm' : 'asset',
       },
     });
-    await this.diagnostics.record({
+    if (decoded && asset) await this.diagnostics.record({
       category: 'audio', level: 'info', event: 'room_audio.asset_decoded',
       message: decoded.cacheHit ? 'Room audio asset decode cache hit.' : 'Room audio asset decoded.',
       correlationId: request.correlationId,
@@ -159,6 +172,26 @@ export class RoomAudioSession {
       details: { playbackId: source.playbackId, sessionId: this.sessionId, logicalStartFrame: source.logicalStartFrame, sampleRate: ROOM_AUDIO_FORMAT.sampleRate, frameDurationMs: ROOM_AUDIO_FORMAT.frameDurationMs },
     });
     return this.sourceSnapshot(source);
+  }
+
+  pushLivePcm(playbackId: string, chunk: Buffer): void {
+    const source = this.sources.get(playbackId);
+    if (!source || source.request.playbackMode !== 'live' || !source.liveFrames) {
+      throw new Error('Live Room audio source not found.');
+    }
+    const frameBytes = ROOM_AUDIO_FORMAT.sampleRate
+      * ROOM_AUDIO_FORMAT.frameDurationMs / 1000 * 2 * 2;
+    let bytes = source.liveRemainder?.length
+      ? Buffer.concat([source.liveRemainder, chunk]) : chunk;
+    while (bytes.length >= frameBytes) {
+      source.liveFrames.push(Buffer.from(bytes.subarray(0, frameBytes)));
+      bytes = bytes.subarray(frameBytes);
+    }
+    source.liveRemainder = Buffer.from(bytes);
+    while (source.liveFrames.length > 12) {
+      source.liveFrames.shift();
+      source.liveOverruns = (source.liveOverruns ?? 0) + 1;
+    }
   }
 
   updateSource(playbackId: string, update: Partial<Pick<RoomAudioSourceRequest, 'position' | 'endpointGains' | 'nodeGainDb' | 'muted' | 'typeVolume' | 'sceneMasterVolume' | 'sceneTransitionGain' | 'updateCorrelationId'>>): RoomAudioSourceSnapshot {
@@ -258,7 +291,18 @@ export class RoomAudioSession {
       void this.diagnostics.record({
         category: 'transport', level: 'info', event: 'room_audio.transport_telemetry',
         message: 'Room audio transport and clock telemetry checkpoint.',
-        details: { roomId: this.roomId, sessionId: this.sessionId, clock: this.clock.telemetry(), endpoints: this.endpointTelemetry() },
+        details: {
+          roomId: this.roomId, sessionId: this.sessionId,
+          clock: this.clock.telemetry(), endpoints: this.endpointTelemetry(),
+          liveSources: [...this.sources.values()]
+            .filter((source) => source.request.playbackMode === 'live')
+            .map((source) => ({
+              playbackId: source.playbackId,
+              queueDepth: source.liveFrames?.length ?? 0,
+              underruns: source.liveUnderruns ?? 0,
+              overruns: source.liveOverruns ?? 0,
+            })),
+        },
       });
     }
     const samplesPerFrame = ROOM_AUDIO_FORMAT.sampleRate * ROOM_AUDIO_FORMAT.frameDurationMs / 1000;
@@ -286,14 +330,23 @@ export class RoomAudioSession {
           details: { playbackId: source.playbackId, previousPlayheadSamples: source.lastObservedPlayhead, playheadSamples: source.playheadSamples, startCount: source.startCount },
         });
       }
+      const liveFrame = source.request.playbackMode === 'live'
+        ? source.liveFrames?.shift() : undefined;
+      if (source.request.playbackMode === 'live' && !liveFrame) {
+        source.liveUnderruns = (source.liveUnderruns ?? 0) + 1;
+      }
       for (let frameSample = 0; frameSample < samplesPerFrame; frameSample += 1) {
-        if (source.playheadSamples >= source.asset.durationSamples) {
+        if (source.asset && source.playheadSamples >= source.asset.durationSamples) {
           if (source.request.playbackMode === 'loop') { source.playheadSamples = 0; source.loopWrapCount += 1; }
           else { source.state = 'completed'; break; }
         }
         const assetOffset = source.playheadSamples * 2;
-        const left = source.asset.samples[assetOffset] ?? 0;
-        const right = source.asset.samples[assetOffset + 1] ?? left;
+        const left = liveFrame
+          ? liveFrame.readInt16LE(frameSample * 4) / 32_768
+          : source.asset?.samples[assetOffset] ?? 0;
+        const right = liveFrame
+          ? liveFrame.readInt16LE(frameSample * 4 + 2) / 32_768
+          : source.asset?.samples[assetOffset + 1] ?? left;
         if (!source.firstAudibleFrameRecorded && (left !== 0 || right !== 0)) {
           source.firstAudibleFrameRecorded = true;
           void this.diagnostics.record({
@@ -310,8 +363,10 @@ export class RoomAudioSession {
         const fadeInGain = source.request.fadeInEnabled ? Math.min(1, source.renderedSamples / fadeInSamples) : 1;
         const fadeOutGain = source.fadeOutSamplesRemaining > 0
           ? source.fadeOutSamplesRemaining / Math.max(1, source.fadeOutTotalSamples) : 1;
+        const typeGain = source.request.playbackMode === 'live'
+          ? 1 : source.request.typeVolume;
         const base = source.request.muted ? 0 : dbToLinear(source.request.nodeGainDb)
-          * source.request.typeVolume * source.request.sceneMasterVolume
+          * typeGain * source.request.sceneMasterVolume
           * (source.request.sceneTransitionGain ?? 1) * this.sceneGain(source.request.sceneInstanceId)
           * fadeInGain * fadeOutGain;
         for (const { endpoint } of connections) {
@@ -410,15 +465,25 @@ export class RoomAudioSession {
     await this.diagnostics.record({
       category: 'audio', level: 'info', event, message, correlationId: source.request.correlationId,
       details: {
-        playbackId: source.playbackId, assetPeak: source.asset.peak, assetRms: source.asset.rms,
+        playbackId: source.playbackId,
+        assetPeak: source.asset?.peak, assetRms: source.asset?.rms,
+        liveQueueDepth: source.liveFrames?.length,
+        liveUnderruns: source.liveUnderruns,
+        liveOverruns: source.liveOverruns,
         nodeGainLinear, muted: source.request.muted,
-        typeVolume: source.request.typeVolume, sceneMasterVolume: source.request.sceneMasterVolume,
+        typeVolume: source.request.playbackMode === 'live'
+          ? 1 : source.request.typeVolume,
+        sceneMasterVolume: source.request.sceneMasterVolume,
         sceneTransitionGain, fadeGain,
         endpoints: this.readyConnections().map(({ endpoint }) => {
           const spatialGain = source.request.endpointGains[endpoint.speakerId] ?? 0;
           const trimGain = dbToLinear(endpoint.trimDb);
           return { endpointId: endpoint.endpointId, speakerId: endpoint.speakerId, spatialGain, trimDb: endpoint.trimDb, trimGain,
-            finalEffectiveGain: nodeGainLinear * source.request.typeVolume * source.request.sceneMasterVolume * sceneTransitionGain * fadeGain * spatialGain * trimGain };
+            finalEffectiveGain: nodeGainLinear
+              * (source.request.playbackMode === 'live'
+                ? 1 : source.request.typeVolume)
+              * source.request.sceneMasterVolume * sceneTransitionGain
+              * fadeGain * spatialGain * trimGain };
         }),
         endpointTelemetry: this.endpointTelemetry(), clock: this.clock.telemetry(),
       },

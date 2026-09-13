@@ -1,6 +1,13 @@
 html,
 body,
 #root {
+  --sf-bg: #16171d;
+  --sf-text: #9ca3af;
+  --sf-heading: #f3f4f6;
+  --sf-border: #2e303a;
+  --sf-accent: #c084fc;
+  --sf-accent-bg: rgba(192, 132, 252, 0.15);
+  --sf-accent-border: rgba(192, 132, 252, 0.5);
   --z-spatial-background: 0;
   --z-room: 10;
   --z-node: 20;
@@ -20,8 +27,9 @@ body,
   width: 100%;
   height: 100%;
 
-  background: #1e1f22;
-  color: white;
+  background: var(--sf-bg);
+  color: var(--sf-heading);
+  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
 }
 
 
@@ -29,54 +37,64 @@ body,
 
 .menu-bar {
   position: relative;
+  z-index: 1000;
 
-  height: 32px;
+  height: 34px;
   display: flex;
   align-items: center;
-  padding: 0 12px;
+  padding: 0 8px;
 
-  background: #2b2d31;
-  border-bottom: 1px solid #3a3c41;
+  background: #1f1f1f;
+  border-bottom: 1px solid #3a3a3a;
+  user-select: none;
 }
 
 .menu-item {
+  height: 100%;
   appearance: none;
   background: transparent;
   border: none;
-  color: #d8d8d8;
+  color: #e8e8e8;
 
-  padding: 6px 10px;
+  padding: 0 10px;
 
   font: inherit;
   font-size: 14px;
 
-  cursor: default;
+  cursor: pointer;
 }
 
-.menu-item:hover {
-  background: #3a3c41;
-  color: white;
-  border-radius: 4px;
+.menu-item:hover,
+.menu-item:focus {
+  outline: none;
+  background: #343434;
+}
+
+.menu-item:disabled {
+  color: #777777;
+  cursor: default;
 }
 
 .menu-group {
   position: relative;
+  height: 100%;
+  display: flex;
+  align-items: center;
 }
 
 .dropdown-menu {
   position: absolute;
   top: 100%;
   left: 0;
-  z-index: var(--z-popover);
+  z-index: 1100;
 
-  min-width: 180px;
-  padding: 4px;
+  min-width: 190px;
+  padding: 4px 0;
 
-  background: #2b2d31;
-  border: 1px solid #45474e;
-  border-radius: 4px;
+  background: #252525;
+  border: 1px solid #454545;
 
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
 }
 
 .dropdown-item {
@@ -85,42 +103,91 @@ body,
 
   background: transparent;
   border: none;
-  color: #d8d8d8;
+  color: #eeeeee;
 
-  padding: 7px 10px;
+  min-height: 28px;
+  padding: 5px 14px;
 
   text-align: left;
   font: inherit;
   font-size: 14px;
 
-  cursor: default;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.dropdown-item:hover {
-  background: #3a3c41;
-  color: white;
-  border-radius: 3px;
+.dropdown-item:hover:not(:disabled) {
+  background: #3a3a3a;
+}
+
+.dropdown-item:disabled {
+  color: #777777;
+  cursor: default;
 }
 
 .dropdown-separator {
   height: 1px;
-  margin: 4px 6px;
+  margin: 3px 8px;
 
-  background: #45474e;
+  background: #454545;
 }
 
 .project-name {
   position: absolute;
-  left: 25%;
-  right: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 40%;
 
-  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 
-  font-size: 14px;
-  font-weight: 500;
-  color: #b8bac0;
+  font-size: 13px;
+  font-weight: bold;
+  color: #b8b8b8;
 
   pointer-events: none;
+}
+
+/* ---------- EMPTY PROJECT WORKSPACE ---------- */
+
+.sacscape-empty-workspace {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  background: #202225;
+}
+
+.module-empty-state {
+  text-align: center;
+}
+
+.module-identifier {
+  margin-bottom: 10px;
+
+  color: #6f7378;
+
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.module-empty-state h2 {
+  margin: 0 0 8px;
+
+  color: #ffffff;
+}
+
+.module-empty-state p {
+  margin: 0;
+
+  color: #999999;
 }
 
 
@@ -140,8 +207,8 @@ body,
   min-height: 0;
   padding: 14px 16px;
 
-  background: #25262a;
-  border-right: 1px solid #3a3c41;
+  background: #1f2028;
+  border-right: 1px solid var(--sf-border);
 
   overflow-y: auto;
 }
@@ -1382,6 +1449,17 @@ body,
 
 .sound-shelf-node[data-playback-mode="loop"] .shelf-node-icon {
   border-color: #778ca8;
+}
+
+.sound-shelf-node[data-playback-mode="live"] .shelf-node-icon,
+.sound-node.live-source {
+  border-color: #5aa9a2;
+}
+
+.sound-shelf-node[data-playback-mode="live"] .shelf-node-type-badge {
+  width: auto;
+  padding: 0 3px;
+  border-radius: 5px;
 }
 
 .ambience-shelf-node .shelf-node-icon {

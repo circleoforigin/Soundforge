@@ -8,7 +8,7 @@ export interface StereoMix {
   right: number;
 }
 
-export type PlaybackVolumeType = 'oneShot' | 'loop' | 'ambience';
+export type PlaybackVolumeType = 'oneShot' | 'loop' | 'ambience' | 'live';
 
 export interface ScenePlaybackVolume {
   master: number;
@@ -22,6 +22,10 @@ export interface PlaybackRouting {
   sourceNodeId: string;
   type: PlaybackVolumeType;
   volume: ScenePlaybackVolume;
+}
+
+export function getPlaybackTypeVolume(routing: PlaybackRouting): number {
+  return routing.type === 'live' ? 1 : routing.volume[routing.type];
 }
 
 interface ActivePlayback {
@@ -100,7 +104,8 @@ export class PlaybackEngine {
         continue;
       }
 
-      playback.typeGainNode.gain.value = volume[playback.volumeType];
+      playback.typeGainNode.gain.value = playback.volumeType === 'live'
+        ? 1 : volume[playback.volumeType];
       playback.masterGainNode.gain.value = volume.master;
     }
   }
@@ -279,7 +284,7 @@ export class PlaybackEngine {
       existingPlayback.nodeGainNode.gain.value = node.muted
         ? 0
         : this.dbToLinear(node.gainDb ?? 0);
-      existingPlayback.typeGainNode.gain.value = routing.volume[routing.type];
+      existingPlayback.typeGainNode.gain.value = getPlaybackTypeVolume(routing);
       existingPlayback.masterGainNode.gain.value = routing.volume.master;
       this.clearFadeTimer(existingPlayback);
 
@@ -370,7 +375,7 @@ export class PlaybackEngine {
     nodeGainNode.gain.value = node.muted
       ? 0
       : this.dbToLinear(node.gainDb ?? 0);
-    typeGainNode.gain.value = routing.volume[routing.type];
+    typeGainNode.gain.value = getPlaybackTypeVolume(routing);
     masterGainNode.gain.value = routing.volume.master;
 
     /*

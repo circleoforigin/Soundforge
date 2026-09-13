@@ -60,8 +60,8 @@ export interface RoomAudioSourceRequest {
   objectInstanceId: string;
   assetId: string;
   assetName: string;
-  playbackMode: 'oneShot' | 'loop';
-  volumeType: 'oneShot' | 'loop' | 'ambience';
+  playbackMode: 'oneShot' | 'loop' | 'live';
+  volumeType: 'oneShot' | 'loop' | 'ambience' | 'live';
   position?: SoundPosition;
   nodeGainDb: number;
   muted: boolean;

@@ -51,6 +51,21 @@ export function registerRoomAudioRoute(
     try { response.status(201).json(await manager.addSource(request.params.roomId, request.body as RoomAudioSourceRequest)); }
     catch (error) { response.status(409).json({ message: message(error) }); }
   });
+  app.post('/api/audio/rooms/:roomId/sources/:playbackId/pcm',
+    express.raw({ type: 'application/octet-stream', limit: '512kb' }),
+    (request, response) => {
+      try {
+        manager.pushLivePcm(
+          request.params.roomId,
+          request.params.playbackId,
+          request.body as Buffer
+        );
+        response.status(204).end();
+      } catch (error) {
+        response.status(404).json({ message: message(error) });
+      }
+    }
+  );
   app.patch('/api/audio/rooms/:roomId/sources/:playbackId', express.json(), (request, response) => {
     try { response.json(manager.updateSource(request.params.roomId, request.params.playbackId, request.body)); }
     catch (error) { response.status(404).json({ message: message(error) }); }

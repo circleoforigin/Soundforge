@@ -1,6 +1,6 @@
 import type { LibraryEntity } from './PersistentEntity.ts';
 
-export type PlaybackMode = 'oneShot' | 'loop';
+export type PlaybackMode = 'oneShot' | 'loop' | 'live';
 export type SpatialMode = 'positional' | 'ambient'
 
 export interface SoundObjectTemplate extends LibraryEntity {    

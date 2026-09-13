@@ -64,12 +64,19 @@ function NodeInspector({
         />
       </div>
 
-      {!loopingZone && (
+      {!loopingZone && node.playbackMode !== 'live' && (
         <div className="node-row">
           <label>Source</label>
           <button className="node-source-button" onClick={onChooseSource}>
             {selectedTemplate ? selectedTemplate.name : selectedSound ? selectedSound.originalFileName : 'Choose...'}
           </button>
+        </div>
+      )}
+
+      {node.playbackMode === 'live' && (
+        <div className="node-row">
+          <label>Source</label>
+          <span>Desktop Audio (Live)</span>
         </div>
       )}
 
@@ -121,6 +128,7 @@ function NodeInspector({
         </div>
       </div>
 
+      {node.playbackMode !== 'live' && (
       <div className="node-behavior-controls">
         {!isAmbient && node.playbackMode === 'loop' && (
           <label className="node-checkbox">
@@ -325,6 +333,7 @@ function NodeInspector({
           <span>ms</span>
         </div>
       </div>
+      )}
 
       {selectedTemplate && (
         <div className="node-row split">

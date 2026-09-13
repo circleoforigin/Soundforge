@@ -25,6 +25,10 @@ export class RoomAudioSessionManager {
     const session = this.sessions.get(roomId); if (!session) throw new Error('Room audio session not found.');
     return session.updateSource(playbackId, update);
   }
+  pushLivePcm(roomId: string, playbackId: string, chunk: Buffer): void {
+    const session = this.sessions.get(roomId); if (!session) throw new Error('Room audio session not found.');
+    session.pushLivePcm(playbackId, chunk);
+  }
   stopSource(roomId: string, playbackId: string): boolean { return this.sessions.get(roomId)?.stopSource(playbackId) ?? false; }
   stopScene(roomId: string, sceneInstanceId: string): void { this.sessions.get(roomId)?.stopScene(sceneInstanceId); }
   setSceneTransitionGain(roomId: string, sceneInstanceId: string, gain: number, durationMs = 0): void {

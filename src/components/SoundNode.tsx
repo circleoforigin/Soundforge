@@ -193,13 +193,16 @@ return (
       node.muted ? 'muted' : '',
       node.soundAssetIds.length === 0 ? 'no-sound' : '',
       isAmbient ? 'ambient' : 'positional',
+      node.playbackMode === 'live' ? 'live-source' : '',
     ]
       .filter(Boolean)
       .join(' ')}
     onPointerDown={handlePointerDown}
     onContextMenu={handleContextMenu}
     onDoubleClick={handleDoubleClick}
-    title={node.instanceName ?? 'Sound'}
+    title={node.playbackMode === 'live'
+      ? `${node.instanceName ?? 'Desktop Audio'} — double-click to ${node.muted ? 'unmute' : 'mute'}`
+      : node.instanceName ?? 'Sound'}
     data-node-id={node.instanceId}
     data-placement="field"
     data-playback-mode={node.playbackMode}
@@ -208,7 +211,7 @@ return (
       top: `${((1 - position.y) / 2) * 100}%`,
     }}
   >
-    {node.soundAssetIds.length === 0 && (
+    {node.soundAssetIds.length === 0 && node.playbackMode !== 'live' && (
       <span className="sound-node-no-sound">No Sound</span>
     )}
 

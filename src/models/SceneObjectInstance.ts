@@ -36,9 +36,8 @@ export interface SceneObjectInstance {
   instanceName?: string;
 
   /**
-   * Audio assets used by this node.
-   * For a basic sound node this will usually contain one asset.
-   * Future randomized objects may contain several.
+   * Asset-backed nodes store SoundAsset IDs here. Live nodes store stable
+   * logical source identifiers such as `desktop:default`.
    */
   soundAssetIds: string[];
 

@@ -7,7 +7,8 @@ import type { SpeakerMix } from '../utils/spatialMixMath';
 import { runtimeUrl } from '../config/runtime';
 import { recordDiagnostic } from '../services/diagnostics/DiagnosticClient';
 import { hostedSoundLibrary} from '../services/library/HostedSoundLibraryService';
-import { playbackEngine, type PlaybackRouting, type StereoMix } from './PlaybackEngine';
+import { getPlaybackTypeVolume, playbackEngine, type PlaybackRouting, type StereoMix } from './PlaybackEngine';
+import { desktopAudioCapture } from './DesktopAudioCapture';
 import { requireSuccessfulRoomAudioResponse, roomAudioErrorMessage as errorMessage } from './RoomAudioHttp';
 import {
   BoundedControlRequestScheduler, createRoomAudioControlCounters,
@@ -52,6 +53,7 @@ class RoomAudioEngine {
     playbackId: string; sceneId: string; sourceNodeId: string;
     volumeType: PlaybackRouting['type'];
   }>();
+  private readonly livePlaybackIds = new Set<string>();
   private readonly listeners = new Set<() => void>();
   private readonly assetSyncRequests = new Map<string, Promise<AssetSynchronizationResult>>();
   private readonly positionUpdates = new Map<string, LatestValueDispatcher<{
@@ -114,6 +116,8 @@ class RoomAudioEngine {
     this.roomId = room?.id ?? null;
     this.localMode = local;
     this.resetSpeakerVolume();
+    for (const id of this.livePlaybackIds) desktopAudioCapture.unsubscribe(id);
+    this.livePlaybackIds.clear();
     this.remotePlaybackIds.clear();
     this.positionUpdates.clear();
     this.sceneVolumeStates.clear(); this.nodeGainStates.clear();
@@ -169,7 +173,7 @@ class RoomAudioEngine {
       fadeInEnabled: intent.node.fadeInEnabled ?? false, fadeInMs: intent.node.fadeInMs ?? 1000,
       fadeOutEnabled: intent.node.fadeOutEnabled ?? false, fadeOutMs: intent.node.fadeOutMs ?? 1000,
       randomStart: intent.node.randomStart ?? false,
-      typeVolume: intent.routing.volume[intent.routing.type], sceneMasterVolume: intent.routing.volume.master,
+      typeVolume: getPlaybackTypeVolume(intent.routing), sceneMasterVolume: intent.routing.volume.master,
       endpointGains: Object.fromEntries(intent.speakerMix.map((speaker) => [speaker.speakerId, speaker.gain])),
       frontendRequestInitiatedAt: new Date(Date.now() - (performance.now() - synchronizationStartedAt)).toISOString(),
     };
@@ -189,6 +193,81 @@ class RoomAudioEngine {
           intent.onComplete?.();
         }
       }, Math.max(250, intent.asset.durationMs ?? 1000));
+    }
+  }
+
+  async playLive(intent: Omit<PlayIntent, 'asset' | 'onComplete'>): Promise<void> {
+    await this.configurationPromise;
+    if (this.localMode) {
+      throw new Error('Desktop Audio requires an active Room Audio output.');
+    }
+    if (!intent.room || (this.state !== 'ready' && this.state !== 'degraded')) {
+      throw new Error(this.stateMessage || 'Room audio is not ready.');
+    }
+    const request: RoomAudioSourceRequest = {
+      correlationId: intent.correlationId,
+      sceneInstanceId: intent.routing.sceneInstanceId,
+      sceneName: intent.sceneName,
+      sourceNodeId: intent.routing.sourceNodeId,
+      objectInstanceId: intent.node.instanceId,
+      assetId: intent.node.soundAssetIds[0] ?? 'desktop:default',
+      assetName: intent.node.instanceName ?? 'Desktop Audio',
+      playbackMode: 'live',
+      volumeType: intent.routing.type,
+      position: intent.node.position,
+      nodeGainDb: intent.node.gainDb ?? 0,
+      muted: intent.node.muted,
+      fadeInEnabled: intent.node.fadeInEnabled ?? false,
+      fadeInMs: intent.node.fadeInMs ?? 1000,
+      fadeOutEnabled: intent.node.fadeOutEnabled ?? false,
+      fadeOutMs: intent.node.fadeOutMs ?? 1000,
+      randomStart: false,
+      typeVolume: getPlaybackTypeVolume(intent.routing),
+      sceneMasterVolume: intent.routing.volume.master,
+      endpointGains: Object.fromEntries(
+        intent.speakerMix.map((speaker) => [speaker.speakerId, speaker.gain])
+      ),
+    };
+    const response = await requireSuccessfulRoomAudioResponse(await fetch(
+      runtimeUrl(`/api/audio/rooms/${encodeURIComponent(intent.room.id)}/sources`),
+      {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+      }
+    ));
+    const source = await response.json() as RoomAudioSourceSnapshot;
+    this.remotePlaybackIds.set(intent.node.instanceId, {
+      playbackId: source.playbackId,
+      sceneId: intent.routing.sceneInstanceId,
+      sourceNodeId: intent.routing.sourceNodeId,
+      volumeType: intent.routing.type,
+    });
+    try {
+      await desktopAudioCapture.subscribe(intent.node.instanceId, async (pcm) => {
+        const current = this.remotePlaybackIds.get(intent.node.instanceId);
+        if (!current || !this.roomId) return;
+        const upload = await fetch(runtimeUrl(
+          `/api/audio/rooms/${encodeURIComponent(this.roomId)}`
+          + `/sources/${encodeURIComponent(current.playbackId)}/pcm`
+        ), {
+          method: 'POST', headers: { 'Content-Type': 'application/octet-stream' },
+          body: pcm,
+        });
+        if (!upload.ok) throw new Error(await errorMessage(upload));
+      }, () => {
+        this.stop(intent.node.instanceId);
+        void recordDiagnostic({
+          category: 'error', level: 'error',
+          event: 'desktop_audio.capture_ended',
+          message: 'Desktop audio capture ended unexpectedly.',
+          details: { sourceId: 'desktop:default' },
+        });
+      });
+      this.livePlaybackIds.add(intent.node.instanceId);
+      this.emit();
+    } catch (error) {
+      this.stop(intent.node.instanceId);
+      throw error;
     }
   }
 
@@ -221,6 +300,9 @@ class RoomAudioEngine {
 
   isPlaying(instanceId: string): boolean { return this.localMode ? playbackEngine.isPlaying(instanceId) : this.remotePlaybackIds.has(instanceId); }
   stop(instanceId: string): void {
+    if (this.livePlaybackIds.delete(instanceId)) {
+      desktopAudioCapture.unsubscribe(instanceId);
+    }
     if (this.localMode) { playbackEngine.stop(instanceId); return; }
     const playback = this.remotePlaybackIds.get(instanceId); if (!playback || !this.roomId) return;
     this.remotePlaybackIds.delete(instanceId); this.emit();
@@ -237,7 +319,9 @@ class RoomAudioEngine {
     const requests: Promise<void>[] = [];
     for (const playback of this.remotePlaybackIds.values()) {
       if (playback.sceneId === sceneId) { this.controlCounters.volumeSent += 1; requests.push(this.patchRemoteSource(playback.playbackId, {
-        typeVolume: volume[playback.volumeType], sceneMasterVolume: volume.master,
+        typeVolume: playback.volumeType === 'live'
+          ? 1 : volume[playback.volumeType],
+        sceneMasterVolume: volume.master,
       })); }
     }
     this.observeMutation(Promise.all(requests).then(() => {
@@ -267,7 +351,12 @@ class RoomAudioEngine {
     if (this.localMode) { playbackEngine.stopScene(sceneId); return; }
     if (!this.roomId) return;
     for (const [objectId, playback] of this.remotePlaybackIds) {
-      if (playback.sceneId === sceneId) this.remotePlaybackIds.delete(objectId);
+      if (playback.sceneId === sceneId) {
+        this.remotePlaybackIds.delete(objectId);
+        if (this.livePlaybackIds.delete(objectId)) {
+          desktopAudioCapture.unsubscribe(objectId);
+        }
+      }
     }
     this.emit();
     this.observeMutation(requireSuccessfulRoomAudioResponse(fetch(runtimeUrl(`/api/audio/rooms/${encodeURIComponent(this.roomId)}/scenes/${encodeURIComponent(sceneId)}/sources`), { method: 'DELETE' })), 'room_audio.scene_stop_failed');
@@ -305,6 +394,8 @@ class RoomAudioEngine {
     if (this.localMode || !this.roomId) return Promise.resolve();
     const roomId = this.roomId;
     this.roomId = null; this.configuredKey = ''; this.remotePlaybackIds.clear();
+    for (const id of this.livePlaybackIds) desktopAudioCapture.unsubscribe(id);
+    this.livePlaybackIds.clear();
     this.resetSpeakerVolume();
     this.positionUpdates.clear();
     this.state = 'idle'; this.stateMessage = ''; this.emit();
