@@ -6,11 +6,19 @@ import {
 } from 'react';
 import type { SoundAsset } from './models/SoundAsset';
 import './App.css';
+
 import type {
+  ProjectCreateRequest,
+  ProjectCreateResponse,
+  ProjectDeleteRequest,
+  ProjectDeleteResponse,
+  ProjectListResponse,
   ProjectLoadAcceptedPayload,
   ProjectLoadFailedPayload,
   ProjectLoadedPayload,
   ProjectLoadRequest,
+  ProjectRenameRequest,
+  ProjectRenameResponse,
 } from '@settingforge/module-sdk';
 
 import type { Project } from './models/Project';
@@ -941,6 +949,153 @@ pendingSaveActionRef.current =
   }
 
   useEffect(() => {
+      const unregisterList =
+    moduleEventBus.registerRequestHandler(
+      'project.list',
+      async () => {
+        const projects =
+          await projectRepository.loadProjects();
+
+        const response: ProjectListResponse = {
+          projects: projects.map((project) => ({
+            projectId: project.id,
+            projectName: project.name,
+          })),
+        };
+
+        return response;
+      }
+    );
+
+  const unregisterCreate =
+    moduleEventBus.registerRequestHandler(
+      'project.create',
+      async (request) => {
+        const payload = request.payload as
+          | Partial<ProjectCreateRequest>
+          | undefined;
+
+        const name =
+          payload?.name?.trim();
+
+        if (!name) {
+          throw new Error(
+            'project.create requires a name.'
+          );
+        }
+
+        const project =
+          await createProject(name);
+
+        const response: ProjectCreateResponse = {
+          projectId: project.id,
+          projectName: project.name,
+        };
+
+        return response;
+      }
+    );
+
+  const unregisterRename =
+    moduleEventBus.registerRequestHandler(
+      'project.rename',
+      async (request) => {
+        const payload = request.payload as
+          | Partial<ProjectRenameRequest>
+          | undefined;
+
+        const projectId =
+          payload?.projectId;
+
+        const name =
+          payload?.name?.trim();
+
+        if (!projectId || !name) {
+          throw new Error(
+            'project.rename requires projectId and name.'
+          );
+        }
+
+        const project =
+          await projectRepository.loadProject(
+            projectId
+          );
+
+        if (!project) {
+          throw new Error(
+            `Project "${projectId}" was not found.`
+          );
+        }
+
+        const renamedProject: Project = {
+          ...project,
+          name,
+          updatedAt: new Date(),
+        };
+
+        await projectRepository.saveProject(
+          renamedProject
+        );
+
+        if (
+          activeProject?.id === projectId
+        ) {
+          setActiveProject(
+            renamedProject
+          );
+
+          setProjectDirty(false);
+        }
+
+        const response: ProjectRenameResponse = {
+          projectId:
+            renamedProject.id,
+
+          projectName:
+            renamedProject.name,
+        };
+
+        return response;
+      }
+    );
+
+  const unregisterDelete =
+    moduleEventBus.registerRequestHandler(
+      'project.delete',
+      async (request) => {
+        const payload = request.payload as
+          | Partial<ProjectDeleteRequest>
+          | undefined;
+
+        const projectId =
+          payload?.projectId;
+
+        if (!projectId) {
+          throw new Error(
+            'project.delete requires projectId.'
+          );
+        }
+
+        if (
+          activeProject?.id === projectId
+        ) {
+          throw new Error(
+            'The active Project must be closed before it can be deleted.'
+          );
+        }
+
+        await projectRepository.deleteProject(
+          projectId
+        );
+
+        const response: ProjectDeleteResponse = {
+          projectId,
+          deleted: true,
+        };
+
+        return response;
+      }
+    );
   const unregisterStatus =
     moduleEventBus.registerRequestHandler(
       'project.status',
@@ -1065,11 +1220,15 @@ console.warn(
     );
 
   return () => {
-    unregisterStatus();
-    unregisterLoad();
-    unregisterSave();
-    unregisterClose();
-  };
+  unregisterList();
+  unregisterCreate();
+  unregisterRename();
+  unregisterDelete();
+  unregisterStatus();
+  unregisterLoad();
+  unregisterSave();
+  unregisterClose();
+};
 }, [activeProject, dirtySceneIds, projectDirty]);
 
   function handleLoadProject(
@@ -1280,49 +1439,82 @@ function handleCloseScene() {
     }
   }
 
-  function createProject(
-    trimmedName: string
-  ) {
-    if (activeProject) {
-      teardownProjectRuntime();
-    }
+  async function createProject(
+  trimmedName: string
+): Promise<Project> {
+  const name = trimmedName.trim();
 
-    setLoadedScenes(new Map());
-    const now = new Date();
-
-    const newProject: Project = {
-      id: crypto.randomUUID(),
-      name: trimmedName,
-      createdAt: now,
-      updatedAt: now,
-      sceneIds: [],
-      reactions: [],
-    };
-
-    setActiveProject(newProject);
-    setCurrentSceneInstanceId(null);
-    setShowRoomSelectionDialog(true);
-    setTransitionTargetInstanceId(null);
-    setPreviewingTarget(false);
-    setActiveRoom(null);
-    setDirtySceneIds(new Set());
-    setProjectDirty(false);
-
-    setNewProjectName('');
-    setShowNewProjectDialog(false);
-  }
-
-  function handleCreateProject() {
-    const trimmedName = newProjectName.trim();
-
-    if (!trimmedName) {
-      return;
-    }
-
-    requestProjectAction(() =>
-      createProject(trimmedName)
+  if (!name) {
+    throw new Error(
+      'Project name is required.'
     );
   }
+
+  if (activeProject) {
+    teardownProjectRuntime();
+  }
+
+  setLoadedScenes(new Map());
+
+  const now = new Date();
+
+  const newProject: Project = {
+    id: crypto.randomUUID(),
+    name,
+    createdAt: now,
+    updatedAt: now,
+    sceneIds: [],
+    reactions: [],
+  };
+
+  const projects =
+    await projectRepository.saveProject(
+      newProject
+    );
+
+  setSavedProjects(projects);
+  setActiveProject(newProject);
+  setCurrentSceneInstanceId(null);
+  setShowRoomSelectionDialog(true);
+  setTransitionTargetInstanceId(null);
+  setPreviewingTarget(false);
+  setActiveRoom(null);
+  setDirtySceneIds(new Set());
+  setProjectDirty(false);
+
+  setNewProjectName('');
+  setShowNewProjectDialog(false);
+
+  return newProject;
+}
+
+  function handleCreateProject() {
+  const trimmedName =
+    newProjectName.trim();
+
+  if (!trimmedName) {
+    return;
+  }
+
+  requestProjectAction(() => {
+    void createProject(
+      trimmedName
+    ).catch((error) => {
+      console.error(
+        'Unable to create project:',
+        error
+      );
+
+      setNotification(
+        'Unable to create project.'
+      );
+
+      setTimeout(() => {
+        setNotification(null);
+      }, 3000);
+    });
+  });
+}
 
   async function handleCreateScene() {
     if (!activeProject) {
