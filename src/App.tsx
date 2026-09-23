@@ -32,7 +32,7 @@ import type { SceneInstance } from './models/SceneInstance';
 import type { SoundObjectTemplate } from './models/SoundObjectTemplate';
 import type { Room } from './models/Room';
 import type { SpeakerMap } from './models/SpeakerMap';
-import type { RegisteredActionDefinition } from '@settingforge/module-sdk';
+import type { RegisteredEventDefinition } from '@settingforge/module-sdk';
 
 import MenuBar from './components/MenuBar';
 import SceneWorkspace from './components/SceneWorkspace';
@@ -74,10 +74,17 @@ function App() {
   const [showReactions, setShowReactions] = useState(false);
   const [reactionScenes, setReactionScenes] =
     useState<ReactionSceneOption[]>([]);
-  const [availableActions, setAvailableActions] =
-    useState<RegisteredActionDefinition[]>(() => {
-      return moduleEventBus.getAvailableActions();
-    });
+  const [
+  availableEvents,
+  setAvailableEvents,
+] = useState<
+  RegisteredEventDefinition[]
+>(
+  () =>
+    moduleEventBus
+      .getAvailableCapabilities()
+      .events
+);
   const activeProjectRef = useRef<Project | null>(null);
   const currentSceneIdRef = useRef<string | null>(null);
   const transitionToSceneRef = useRef<(sceneId: string) => Promise<void>>(
@@ -167,7 +174,14 @@ useEffect(() => {
 }, []);
 
 useEffect(() => {
-  return moduleEventBus.onActionsChanged(setAvailableActions);
+  return moduleEventBus
+    .onCapabilitiesChanged(
+      (capabilities) => {
+        setAvailableEvents(
+          capabilities.events
+        );
+      }
+    );
 }, []);
 
 useEffect(() => {
@@ -2819,7 +2833,7 @@ useEffect(() => {
       {activeProject && showReactions && (
         <ReactionsDialog
           reactions={activeProject.reactions}
-          actions={availableActions}
+          events={availableEvents}
           scenes={reactionScenes}
           onChange={handleReactionsChange}
           onClose={() => setShowReactions(false)}
