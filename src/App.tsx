@@ -7,6 +7,12 @@ import {
 import type { SoundAsset } from './models/SoundAsset';
 import './App.css';
 
+import {
+  sacscapeCommandDefinitions,
+  sacscapeEventDefinitions,
+  sacscapeQueryDefinitions,
+} from './capabilities/SacscapeCapabilities';
+
 import type {
   ProjectCreateRequest,
   ProjectCreateResponse,
@@ -949,6 +955,23 @@ pendingSaveActionRef.current =
   }
 
   useEffect(() => {
+    if (moduleEventBus.hosted) {
+  void moduleEventBus
+    .registerCapabilities({
+      events:
+        sacscapeEventDefinitions,
+      commands:
+        sacscapeCommandDefinitions,
+      queries:
+        sacscapeQueryDefinitions,
+    })
+    .catch((error: unknown) => {
+      console.error(
+        '[SACscape] Capability registration failed.',
+        error
+      );
+    });
+}
       const unregisterList =
     moduleEventBus.registerRequestHandler(
       'project.list',

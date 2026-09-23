@@ -99,26 +99,11 @@ export class ModulePresenceStore {
   }
 
   announceReady(): void {
-    moduleEventBus.emit(
-      'module.ready',
-      {
-        capabilities: {
-          events: [
-            'sacscape.scene.opened',
-            'sacscape.scene.closed',
-            'sacscape.loopingZone.spawned',
-          ],
-
-          actions: [
-            'project.status',
-            'project.load',
-            'project.save',
-            'project.close',
-          ],
-        },
-      }
-    );
-  }
+  moduleEventBus.emit(
+    'module.ready',
+    {}
+  );
+}
 
   subscribe(
   listener: () => void
