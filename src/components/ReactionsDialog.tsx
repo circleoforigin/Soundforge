@@ -155,7 +155,7 @@ export default function ReactionsDialog({
     events.find(
       (event) =>
         event.id ===
-        draft?.trigger.triggerActionId
+        draft?.trigger.triggerEventId
     );
 
   function startAdd() {
@@ -169,7 +169,7 @@ export default function ReactionsDialog({
         id:
           crypto.randomUUID(),
 
-        triggerActionId:
+        triggerEventId:
           events[0]?.id ?? '',
 
         conditions: [],
@@ -274,7 +274,7 @@ export default function ReactionsDialog({
 
     if (
       !draft.trigger
-        .triggerActionId
+        .triggerEventId
     ) {
       setError(
         'Choose a trigger Event.'
@@ -363,7 +363,7 @@ export default function ReactionsDialog({
         (candidate) =>
           candidate.id ===
           reaction.trigger
-            .triggerActionId
+            .triggerEventId
       );
 
     const effectSummary =
@@ -376,7 +376,7 @@ export default function ReactionsDialog({
       event
         ? `${event.moduleName} — ${event.label}`
         : reaction.trigger
-              .triggerActionId ||
+              .triggerEventId ||
           'Missing Event';
 
     const conditions =
@@ -649,7 +649,7 @@ export default function ReactionsDialog({
               <select
                 value={
                   draft.trigger
-                    .triggerActionId
+                    .triggerEventId
                 }
                 onChange={(
                   event
@@ -660,7 +660,7 @@ export default function ReactionsDialog({
                     trigger: {
                       ...draft.trigger,
 
-                      triggerActionId:
+                      triggerEventId:
                         event
                           .target
                           .value,
@@ -675,15 +675,15 @@ export default function ReactionsDialog({
                   (candidate) =>
                     candidate.id ===
                     draft.trigger
-                      .triggerActionId
+                      .triggerEventId
                 ) &&
                   draft.trigger
-                    .triggerActionId && (
+                    .triggerEventId && (
                     <option
                       value={
                         draft
                           .trigger
-                          .triggerActionId
+                          .triggerEventId
                       }
                     >
                       Missing Event
