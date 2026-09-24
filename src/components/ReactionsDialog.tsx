@@ -130,6 +130,37 @@ function cloneReaction(
   };
 }
 
+function uniqueEvents(
+  events:
+    RegisteredEventDefinition[]
+): RegisteredEventDefinition[] {
+  const byId =
+    new Map<
+      string,
+      RegisteredEventDefinition
+    >();
+
+  for (
+    const event
+    of events
+  ) {
+    if (
+      !byId.has(
+        event.id
+      )
+    ) {
+      byId.set(
+        event.id,
+        event
+      );
+    }
+  }
+
+  return [
+    ...byId.values(),
+  ];
+}
+
 export default function ReactionsDialog({
   reactions,
   events,
@@ -151,8 +182,10 @@ export default function ReactionsDialog({
   ] =
     useState('');
 
+  const availableEvents = uniqueEvents(events);
+
   const selectedEvent =
-    events.find(
+    availableEvents.find(
       (event) =>
         event.id ===
         draft?.trigger.triggerEventId
@@ -170,7 +203,7 @@ export default function ReactionsDialog({
           crypto.randomUUID(),
 
         triggerEventId:
-          events[0]?.id ?? '',
+          availableEvents[0]?.id ?? '',
 
         conditions: [],
       },
@@ -359,7 +392,7 @@ export default function ReactionsDialog({
       );
 
     const event =
-      events.find(
+      availableEvents.find(
         (candidate) =>
           candidate.id ===
           reaction.trigger
@@ -671,7 +704,7 @@ export default function ReactionsDialog({
                   })
                 }
               >
-                {!events.some(
+                {!availableEvents.some(
                   (candidate) =>
                     candidate.id ===
                     draft.trigger
@@ -690,7 +723,7 @@ export default function ReactionsDialog({
                     </option>
                   )}
 
-                {events.length ===
+                {availableEvents.length ===
                   0 && (
                   <option value="">
                     No Events
@@ -698,7 +731,7 @@ export default function ReactionsDialog({
                   </option>
                 )}
 
-                {events.map(
+                {availableEvents.map(
                   (candidate) => (
                     <option
                       key={`${candidate.moduleId}:${candidate.id}`}

@@ -3,6 +3,10 @@ import type {
 } from '../models/Project';
 
 import {
+  normalizeSacscapeReaction,
+} from '../models/SacscapeReaction';
+
+import {
   localStorageService,
 } from '../storage/LocalStorageService';
 
@@ -20,8 +24,10 @@ function normalizeProject(project: Project): Project {
   return {
     ...project,
     reactions: Array.isArray(project.reactions)
-      ? project.reactions
-      : [],
+  ? project.reactions.map(
+      normalizeSacscapeReaction
+    )
+  : [],
   };
 }
 
