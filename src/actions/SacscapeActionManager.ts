@@ -19,63 +19,64 @@ import {
 type ProjectProvider =
   () => Project | null;
 
-type ActiveSceneProvider =
-  () => string | null;
-
-type SceneTransitionRequester =
-  (sceneId: string) => Promise<void>;
+type CommandExecutor =
+  (
+    commandId: string,
+    payload: unknown
+  ) => Promise<void>;
 
 export class SacscapeActionManager {
   private readonly eventBus:
     ModuleEventBus;
 
   private readonly eventSubscriptions =
-    new Map<string, () => void>();
+    new Map<
+      string,
+      () => void
+    >();
 
   private stopCatalogSubscription:
-    (() => void) | null = null;
+    (() => void) | null =
+      null;
 
   private getProject:
-    ProjectProvider = () => null;
+    ProjectProvider =
+      () => null;
 
-  private getActiveSceneId:
-    ActiveSceneProvider = () => null;
-
-  private transitionToScene:
-    SceneTransitionRequester =
+  private executeCommand:
+    CommandExecutor =
       async () => undefined;
 
   constructor(
     eventBus: ModuleEventBus
   ) {
-    this.eventBus = eventBus;
+    this.eventBus =
+      eventBus;
   }
 
   start(
-    getProject: ProjectProvider,
-    getActiveSceneId:
-      ActiveSceneProvider,
-    transitionToScene:
-      SceneTransitionRequester
+    getProject:
+      ProjectProvider,
+
+    executeCommand:
+      CommandExecutor
   ): () => void {
     this.stop();
 
     this.getProject =
       getProject;
 
-    this.getActiveSceneId =
-      getActiveSceneId;
-
-    this.transitionToScene =
-      transitionToScene;
+    this.executeCommand =
+      executeCommand;
 
     this.stopCatalogSubscription =
-      this.eventBus.onCapabilitiesChanged(
-        (capabilities) =>
-          this.synchronizeSubscriptions(
-            capabilities.events
-          )
-      );
+      this.eventBus
+        .onCapabilitiesChanged(
+          (capabilities) =>
+            this.synchronizeSubscriptions(
+              capabilities.events
+            )
+        );
 
     this.synchronizeSubscriptions(
       this.eventBus
@@ -83,7 +84,8 @@ export class SacscapeActionManager {
         .events
     );
 
-    return () => this.stop();
+    return () =>
+      this.stop();
   }
 
   stop(): void {
@@ -94,7 +96,8 @@ export class SacscapeActionManager {
 
     for (
       const unsubscribe
-      of this.eventSubscriptions.values()
+      of this.eventSubscriptions
+        .values()
     ) {
       unsubscribe();
     }
@@ -109,7 +112,8 @@ export class SacscapeActionManager {
     const availableIds =
       new Set(
         events.map(
-          (event) => event.id
+          (event) =>
+            event.id
         )
       );
 
@@ -121,7 +125,9 @@ export class SacscapeActionManager {
       of this.eventSubscriptions
     ) {
       if (
-        availableIds.has(eventId)
+        availableIds.has(
+          eventId
+        )
       ) {
         continue;
       }
@@ -133,7 +139,10 @@ export class SacscapeActionManager {
       );
     }
 
-    for (const event of events) {
+    for (
+      const event
+      of events
+    ) {
       if (
         this.eventSubscriptions.has(
           event.id
@@ -160,7 +169,8 @@ export class SacscapeActionManager {
   }
 
   private async handleEvent(
-    message: HostEventMessage
+    message:
+      HostEventMessage
   ): Promise<void> {
     const project =
       this.getProject();
@@ -200,15 +210,11 @@ export class SacscapeActionManager {
       const sceneId
       of sceneIds
     ) {
-      if (
-        sceneId ===
-        this.getActiveSceneId()
-      ) {
-        continue;
-      }
-
-      await this.transitionToScene(
-        sceneId
+      await this.executeCommand(
+        'SACscape.LoadScene',
+        {
+          sceneId,
+        }
       );
     }
   }

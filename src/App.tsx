@@ -2253,22 +2253,100 @@ async function handleLoadSelectedScenes() {
   }
 }
 
-  async function handleActivateScene(
+async function handleActivateScene(
   instanceId: string
 ) {
-  await transitionToScene(instanceId);
+  await transitionToScene(
+    instanceId
+  );
 }
 
 useEffect(() => {
-  transitionToSceneRef.current = transitionToScene;
+  transitionToSceneRef.current =
+    transitionToScene;
 });
 
-useEffect(() => {
-  return sacscapeActionManager.start(
-    () => activeProjectRef.current,
-    () => currentSceneIdRef.current,
-    (sceneId) => transitionToSceneRef.current(sceneId)
+async function executeSacscapeCommand(
+  commandId: string,
+  payload: unknown
+): Promise<void> {
+  if (
+    commandId !==
+    'SACscape.LoadScene'
+  ) {
+    throw new Error(
+      `Unsupported SACscape Command "${commandId}".`
+    );
+  }
+
+  if (
+    typeof payload !==
+      'object' ||
+    payload === null
+  ) {
+    throw new Error(
+      'SACscape.LoadScene requires a payload.'
+    );
+  }
+
+  const sceneId =
+    (
+      payload as {
+        sceneId?: unknown;
+      }
+    ).sceneId;
+
+  if (
+    typeof sceneId !==
+      'string' ||
+    !sceneId
+  ) {
+    throw new Error(
+      'SACscape.LoadScene requires sceneId.'
+    );
+  }
+
+  if (
+    sceneId ===
+    currentSceneIdRef.current
+  ) {
+    return;
+  }
+
+  await transitionToSceneRef.current(
+    sceneId
   );
+}
+
+useEffect(() => {
+  const unregisterLoadScene =
+    moduleEventBus
+      .registerRequestHandler(
+        'SACscape.LoadScene',
+        async (request) => {
+          await executeSacscapeCommand(
+            'SACscape.LoadScene',
+            request.payload
+          );
+
+          return {
+            loaded: true,
+          };
+        }
+      );
+
+  const stopReactions =
+    sacscapeActionManager.start(
+      () =>
+        activeProjectRef.current,
+
+      executeSacscapeCommand
+    );
+
+  return () => {
+    stopReactions();
+    unregisterLoadScene();
+  };
 }, []);
 
   return (
